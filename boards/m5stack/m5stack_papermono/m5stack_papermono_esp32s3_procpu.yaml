@@ -1,0 +1,26 @@
+identifier: m5stack_papermono/esp32s3/procpu
+name: M5Stack PaperMono C153 PROCPU
+vendor: m5stack
+type: mcu
+arch: xtensa
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - uart
+  - i2c
+  - i2s
+  - spi
+  - display
+  - dma
+  - pwm
+  - input
+  - sensor
+  - rtc
+  - sdhc
+  - nvs
+  - entropy
+  - netif:wifi
+  - bluetooth
+  - lora
+  - led

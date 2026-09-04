@@ -1,0 +1,360 @@
+mainmenu "M5Stack PaperMono LVGL application"
+
+source "Kconfig.zephyr"
+
+menu "PaperMono application"
+
+config PAPERMONO_MFD_INIT_PRIORITY
+	int
+	default 60
+	range 51 84
+	help
+	  Initialize I2C-backed board controllers after the ESP32 I2C bus and
+	  before their child functions and the display.
+
+config PAPERMONO_MFD_CHILD_INIT_PRIORITY
+	int
+	default 70
+	range 61 84
+	help
+	  Initialize M5IOE1/M5PM1 child functions after their parent devices.
+
+config PAPERMONO_BOARD_FUNCTION_INIT_PRIORITY
+	int
+	default 80
+	range 71 84
+	help
+	  Initialize board functions that consume M5IOE1/M5PM1 child devices.
+
+config PAPERMONO_PARTIAL_REFRESH
+	bool "Use the SSD1677 built-in monochrome partial-refresh waveform"
+	default y
+	help
+	  Use the controller's OTP partial-refresh sequence after a successful
+	  monochrome full refresh has established the differential RAM baseline.
+
+config PAPERMONO_PARTIAL_REFRESH_LIMIT
+	int "Partial refreshes before a maintenance full refresh"
+	default 10
+	range 1 20
+	depends on PAPERMONO_PARTIAL_REFRESH
+	help
+	  Maximum number of consecutive partial refreshes. The following update
+	  uses a full refresh to limit ghosting and DC imbalance.
+
+config PAPERMONO_PARTIAL_DEMO
+	bool "Periodically update the dashboard for partial-refresh HIL testing"
+	default n
+	depends on PAPERMONO_PARTIAL_REFRESH
+	help
+	  Update the clock and footer repeatedly so the physical partial-refresh
+	  path can be verified. Keep this disabled in normal firmware builds.
+
+config PAPERMONO_PARTIAL_DEMO_INTERVAL_MS
+	int "Partial-refresh demo interval in milliseconds"
+	default 3000
+	range 1000 60000
+	depends on PAPERMONO_PARTIAL_DEMO
+
+config PAPERMONO_PARTIAL_DEMO_UPDATES
+	int "Number of demo updates"
+	default 12
+	range 1 20
+	depends on PAPERMONO_PARTIAL_DEMO
+
+config PAPERMONO_FT6336
+	bool "PaperMono FT6336 touch controller"
+	default y
+	depends on INPUT && I2C && GPIO
+	select INPUT_TOUCH
+	help
+	  Use the C153-specific FT6336 bring-up and polling path.  The controller
+	  shares the board I2C bus, while its power/reset lines are provided by
+	  M5IOE1 and its active-low wake interrupt is ESP32-S3 GPIO4.  The driver
+	  keeps GPIO4 pulled up in polling mode, retries the post-reset probe, and
+	  releases stale contacts after transient I2C failures.
+
+config PAPERMONO_FT6336_POLL_INTERVAL_MS
+	int "FT6336 polling interval in milliseconds"
+	default 8
+	range 5 50
+	depends on PAPERMONO_FT6336
+	help
+	  Sample touch from a dedicated driver thread. Eight milliseconds matches
+	  the proven CrossMux C153 input cadence and catches short taps reliably.
+
+config PAPERMONO_FT6336_THREAD_STACK_SIZE
+	int "FT6336 polling thread stack size"
+	default 4096
+	range 2048 8192
+	depends on PAPERMONO_FT6336
+	help
+	  Stack used by the dedicated polling thread and synchronous Zephyr input
+	  callbacks. The global system workqueue is intentionally not used.
+
+config PAPERMONO_FT6336_THREAD_PRIORITY
+	int "FT6336 polling thread priority"
+	default 8
+	range 0 14
+	depends on PAPERMONO_FT6336
+	help
+	  Preemptible Zephyr priority used by the touch polling thread.
+
+config PAPERMONO_DRIVER_SELFTEST
+	bool "Run the interactive PaperMono driver HIL self-test"
+	default n
+	depends on DISPLAY && INPUT && SENSOR && RTC && LED && LORA && WIFI
+	depends on DISK_ACCESS && PWM
+	depends on PAPERMONO_IP2315 && PAPERMONO_ST25R3916 && PAPERMONO_PDM_MIC
+	help
+	  Exercise all board devices used by the fixed self-test image, including
+	  the optional charger, NFC and microphone drivers, then log touch and
+	  button events. Keep this disabled in normal firmware builds.
+
+config PAPERMONO_INTERACTIVE_UI
+	bool "Enable the PaperMono personal information terminal UI"
+	default y
+	depends on INPUT && !PAPERMONO_DRIVER_SELFTEST && !PAPERMONO_PARTIAL_DEMO
+	help
+	  Enable the application router, Chinese home/launcher, reader, content,
+	  organizer, HID, information-card, tools, power, and settings pages.
+	  Input callbacks only enqueue actions; LVGL rendering and the physical
+	  e-paper refresh remain serialized in the main thread.
+
+config PAPERMONO_UI_AUTO_REFRESH_MINUTES
+	int "Interactive UI automatic refresh interval in minutes"
+	default 5
+	range 0 60
+	depends on PAPERMONO_INTERACTIVE_UI
+	help
+	  Refresh live RTC and PMIC values after this many idle minutes. Set to
+	  zero to update only after a button or touch action. A longer interval
+	  reduces e-paper activity and power use.
+
+config PAPERMONO_DISPLAY_INPUT_SETTLE_MS
+	int "Input settle time after an e-paper refresh"
+	default 500
+	range 0 2000
+	help
+	  Keep the touch and side-key stream blocked for this duration after the
+	  SSD1677 high-voltage switching interval completes.
+
+config PAPERMONO_UI_IDLE_SLEEP_DEFAULT_MINUTES
+	int "Default inactivity timeout before touch-wake deep sleep"
+	default 10
+	range 0 30
+	depends on PAPERMONO_INTERACTIVE_UI && PAPERMONO_POWER_CONTROL
+	help
+	  Initial default written to application settings. Runtime choices are
+	  off, 1, 5, 10, or 30 minutes. Existing persisted settings take priority.
+
+config PAPERMONO_CONTENT_SERVER
+	bool "Local Wi-Fi content center"
+	default y
+	depends on PAPERMONO_INTERACTIVE_UI && WIFI && HTTP_SERVER
+	help
+	  Provide the authenticated local-only PaperMono HTTP API and SoftAP
+	  provisioning flow. User content is streamed to the TF card transactionally;
+	  network callbacks only enqueue UI refresh requests.
+
+config PAPERMONO_TIME_SYNC
+	bool "Calibrate system clock and RX8130 after Wi-Fi connects"
+	default y
+	depends on PAPERMONO_CONTENT_SERVER && SNTP && RTC
+	help
+	  Query an SNTP server from a dedicated background thread, keep the
+	  system realtime clock in UTC, and store local wall time in RX8130 using
+	  the configured timezone offset. Failures are retried without blocking UI.
+
+config PAPERMONO_NTP_SERVER
+	string "SNTP server"
+	default "pool.ntp.org:123"
+	depends on PAPERMONO_TIME_SYNC
+
+config PAPERMONO_NTP_RETRY_COUNT
+	int "SNTP attempts after each network connection"
+	default 5
+	range 1 10
+	depends on PAPERMONO_TIME_SYNC
+
+config PAPERMONO_BLE_HID
+	bool "BLE HID media, presentation, and mouse remote"
+	default y
+	depends on PAPERMONO_INTERACTIVE_UI && BT && BT_PERIPHERAL && BT_SMP
+	help
+	  Expose a standard composite HID-over-GATT device. Pairing and bonds use
+	  Zephyr Settings; UI callbacks submit only compact HID reports.
+
+config PAPERMONO_BLE_SYNC
+	bool "Authenticated BLE small-data content sync"
+	default y
+	depends on PAPERMONO_BLE_HID
+	help
+	  Add a custom authenticated GATT transfer service for ICS, tasks-v1.json,
+	  Markdown/TXT notes, and state-sized payloads. Book files remain on the
+	  Wi-Fi path. GATT callbacks enqueue bounded chunks for a storage worker.
+
+choice PAPERMONO_LORA_HIL_ACTION
+	prompt "LoRa RF action during the driver self-test"
+	default PAPERMONO_LORA_HIL_NONE
+	depends on PAPERMONO_DRIVER_SELFTEST
+	help
+	  Select an explicit RF test action. The default only configures the
+	  SX1262 and never transmits. Enable transmit only after confirming that
+	  the selected frequency and power are legal at the test location.
+
+config PAPERMONO_LORA_HIL_NONE
+	bool "Configure only (no RF transmit or receive window)"
+
+config PAPERMONO_LORA_HIL_RX
+	bool "Open a finite receive window"
+
+config PAPERMONO_LORA_HIL_TX
+	bool "Transmit one HIL packet"
+
+endchoice
+
+config PAPERMONO_LORA_HIL_FREQUENCY_HZ
+	int "LoRa HIL frequency in Hz"
+	default 868000000
+	range 150000000 960000000
+	depends on PAPERMONO_LORA_HIL_RX || PAPERMONO_LORA_HIL_TX
+
+config PAPERMONO_LORA_HIL_RX_TIMEOUT_MS
+	int "LoRa HIL receive timeout in milliseconds"
+	default 10000
+	range 100 60000
+	depends on PAPERMONO_LORA_HIL_RX
+
+config PAPERMONO_LORA_HIL_TX_POWER_DBM
+	int "LoRa HIL transmit power in dBm"
+	default 10
+	range -9 22
+	depends on PAPERMONO_LORA_HIL_TX
+
+config PAPERMONO_LORA_HIL_TX_PAYLOAD
+	string "LoRa HIL transmit payload"
+	default "PAPERMONO-ZEPHYR-HIL"
+	depends on PAPERMONO_LORA_HIL_TX
+
+config PAPERMONO_IP2315
+	bool "IP2315 USB fast-charger support"
+	default y
+	select CHARGER
+	help
+	  Expose the PaperMono IP2315 as a Zephyr charger device. The charger is
+	  connected to the system I2C bus only while an operation is in progress.
+
+config PAPERMONO_ST25R3916
+	bool "ST25R3916 NFC front-end support"
+	default y
+	depends on I2C && GPIO
+	help
+	  Expose the board-integrated ST25R3916 power, identity, register,
+	  direct-command and interrupt interfaces.
+
+module = PAPERMONO_ST25R3916
+module-str = papermono_st25r3916
+source "subsys/logging/Kconfig.template.log_config"
+
+config PAPERMONO_PDM_MIC
+	bool "PaperMono PDM microphone support"
+	default y
+	depends on SOC_ESP32S3 && I2S
+	help
+	  Capture 16-bit PCM from the board microphone through ESP32-S3 I2S0
+	  PDM-to-PCM hardware filtering while retaining Zephyr DMA ownership.
+
+module = PAPERMONO_PDM_MIC
+module-str = papermono_pdm_mic
+source "subsys/logging/Kconfig.template.log_config"
+
+config PAPERMONO_RX8130_TIMER
+	bool "RX8130 countdown-timer extension"
+	default y
+	depends on I2C && RTC
+	help
+	  Add the RX8130 countdown timer and timer-interrupt controls that are not
+	  part of Zephyr's generic RTC alarm API. This is used for PMIC-controlled
+	  timed wakeup.
+
+config PAPERMONO_POWER_CONTROL
+	bool "PaperMono board power and wake control"
+	default y
+	depends on SOC_ESP32S3
+	help
+	  Provide reusable ESP32-S3 deep-sleep and M5PM1 shutdown paths. Entering
+	  a low-power state is always an explicit application action.
+
+choice PAPERMONO_POWER_HIL_ACTION
+	prompt "Power-state action after the driver self-test"
+	default PAPERMONO_POWER_HIL_NONE
+	depends on PAPERMONO_DRIVER_SELFTEST && PAPERMONO_POWER_CONTROL
+	help
+	  Select an intentionally destructive HIL action. Default firmware never
+	  enters deep sleep or powers the board off automatically.
+
+config PAPERMONO_POWER_HIL_NONE
+	bool "No power-state action"
+
+config PAPERMONO_POWER_HIL_DEEP_SLEEP_TIMER
+	bool "ESP32-S3 deep sleep with timer wake"
+	depends on POWEROFF
+
+config PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH
+	bool "ESP32-S3 deep sleep with touch wake"
+	depends on POWEROFF
+
+config PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON
+	bool "M5PM1 shutdown; wake with the power button"
+
+config PAPERMONO_POWER_HIL_SHUTDOWN_RTC
+	bool "M5PM1 shutdown with RX8130 timer wake"
+	depends on PAPERMONO_RX8130_TIMER
+
+config PAPERMONO_POWER_HIL_SHUTDOWN_IMU
+	bool "M5PM1 shutdown with BMI270 motion wake"
+
+endchoice
+
+config PAPERMONO_POWER_HIL_DELAY_SECONDS
+	int "Delay before the selected power HIL action"
+	default 3
+	range 1 30
+	depends on PAPERMONO_DRIVER_SELFTEST && PAPERMONO_POWER_CONTROL && \
+		!PAPERMONO_POWER_HIL_NONE
+
+config PAPERMONO_POWER_HIL_WAKE_SECONDS
+	int "Automatic wake delay"
+	default 10
+	range 2 3600
+	depends on PAPERMONO_DRIVER_SELFTEST && PAPERMONO_POWER_CONTROL
+	depends on PAPERMONO_POWER_HIL_DEEP_SLEEP_TIMER || \
+		PAPERMONO_POWER_HIL_SHUTDOWN_RTC
+
+config PAPERMONO_POWER_HIL_REPEAT_COUNT
+	int "Verified deep-sleep wake cycles"
+	default 1
+	range 1 50
+	depends on PAPERMONO_DRIVER_SELFTEST && PAPERMONO_POWER_CONTROL
+	depends on PAPERMONO_POWER_HIL_DEEP_SLEEP_TIMER || \
+		PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH
+	help
+	  Repeat an ESP32-S3 deep-sleep HIL cycle only after the selected wake
+	  source and a successful display refresh are both observed. Progress is
+	  kept in M5PM1 RTC RAM so USB disconnect/reconnect does not lose the
+	  count. Use 50 for the touch-wake endurance acceptance profile.
+
+config PAPERMONO_POWER_HIL_USB_RECONNECT_DELAY_MS
+	int "USB console observation delay at HIL startup"
+	default 0
+	range 0 15000
+	depends on PAPERMONO_DRIVER_SELFTEST && PAPERMONO_POWER_CONTROL && \
+		!PAPERMONO_POWER_HIL_NONE
+	help
+	  Keep the application quiet at the start of every power HIL boot so a
+	  USB-only host can enumerate and reopen the ESP32-S3 USB Serial/JTAG
+	  console before wake and display-refresh milestones are logged. This does
+	  not affect the normal firmware.
+
+endmenu

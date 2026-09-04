@@ -1,0 +1,30 @@
+From: PaperMono Zephyr contributors
+Subject: [PATCH] hal: espressif: stop inherited MWDT during boot
+
+Disabling MWDT flashboot mode does not stop a watchdog that survived a prior
+digital-core reset.  Explicitly disable MWDT0 while write protection is open,
+preventing simple-boot images from entering a reset loop.
+
+This patch targets hal_espressif revision
+19f979cfe66bcab09abe3b0b3aa419a664c1606c and is paired with
+zephyr-4.4-esp32s3-watchdog-order.patch.
+
+diff --git a/zephyr/common/soc_init.c b/zephyr/common/soc_init.c
+index 8e68596..506b2a4 100644
+--- a/zephyr/common/soc_init.c
++++ b/zephyr/common/soc_init.c
+@@ -117,6 +117,12 @@ void config_wdt(void)
+ 	wdt_hal_context_t mwdt_ctx = {.inst = WDT_MWDT0, .mwdt_dev = &TIMERG0};
+ 
+ 	wdt_hal_write_protect_disable(&mwdt_ctx);
++	/*
++	 * A digital-core reset does not necessarily clear an MWDT that was armed
++	 * by a previous panic/reset path.  Disabling only flashboot mode leaves
++	 * that watchdog running and traps simple-boot images in a reset loop.
++	 */
++	wdt_hal_disable(&mwdt_ctx);
+ 	wdt_hal_set_flashboot_en(&mwdt_ctx, false);
+ 	wdt_hal_write_protect_enable(&mwdt_ctx);
+ }
+-- 
+2.51.0

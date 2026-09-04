@@ -1,0 +1,31 @@
+From: PaperMono Zephyr contributors
+Subject: [PATCH] dma: esp32: scope memory-to-memory case declarations
+
+Zephyr 4.4.1's ESP32 GDMA driver declares local variables directly after a
+case label.  The Xtensa GCC toolchain rejects that construct when the project
+is compiled with the C17 language mode selected by this workspace.  Give the
+case its own compound scope without changing runtime behavior.
+
+diff --git a/drivers/dma/dma_esp32_gdma.c b/drivers/dma/dma_esp32_gdma.c
+index 1b1427d8..eaff3bae 100644
+--- a/drivers/dma/dma_esp32_gdma.c
++++ b/drivers/dma/dma_esp32_gdma.c
+@@ -376,7 +376,7 @@ static int dma_esp32_config(const struct device *dev, uint32_t channel,
+ 	dma_channel->channel_id = channel / 2;
+ 
+ 	switch (config_dma->channel_direction) {
+-	case MEMORY_TO_MEMORY:
++	case MEMORY_TO_MEMORY: {
+ 		/*
+ 		 *	Create both Tx and Rx stream on the same channel_id
+ 		 */
+@@ -394,6 +394,7 @@ static int dma_esp32_config(const struct device *dev, uint32_t channel,
+ 		ret = dma_esp32_config_rx(dev, dma_channel_rx, config_dma);
+ 		ret = dma_esp32_config_tx(dev, dma_channel_tx, config_dma);
+ 		break;
++	}
+ 	case PERIPHERAL_TO_MEMORY:
+ 		ret = dma_esp32_config_rx(dev, dma_channel, config_dma);
+ 		break;
+-- 
+2.51.0

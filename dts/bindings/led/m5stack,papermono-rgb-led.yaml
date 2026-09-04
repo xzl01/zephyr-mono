@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT
+
+description: Three-channel status LED wired across M5PM1 and M5IOE1
+
+compatible: "m5stack,papermono-rgb-led"
+
+include: base.yaml
+
+properties:
+  pmic:
+    type: phandle
+    required: true
+    description: M5PM1 providing the red LED output
+
+  pwms:
+    type: phandle-array
+    required: true
+    description: M5IOE1 PWM channels for green and blue
+
+  pwm-names:
+    type: string-array
+    required: true
+    description: Must contain green and blue

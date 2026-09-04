@@ -1,0 +1,72 @@
+/* SPDX-License-Identifier: MIT */
+
+#include <zephyr/dt-bindings/pinctrl/esp-pinctrl-common.h>
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
+#include <zephyr/dt-bindings/pinctrl/esp32s3-gpio-sigmap.h>
+
+&pinctrl {
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_GPIO47>,
+				 <I2C0_SCL_GPIO48>;
+			bias-pull-up;
+			drive-open-drain;
+			output-high;
+		};
+	};
+
+	spim2_default: spim2_default {
+		group1 {
+			pinmux = <SPIM2_SCLK_GPIO15>;
+		};
+
+		group2 {
+			pinmux = <SPIM2_MOSI_GPIO14>;
+			output-low;
+		};
+	};
+
+	spim3_default: spim3_default {
+		group1 {
+			pinmux = <SPIM3_MISO_GPIO40>,
+				 <SPIM3_SCLK_GPIO39>;
+		};
+
+		group2 {
+			pinmux = <SPIM3_MOSI_GPIO38>;
+			output-low;
+		};
+	};
+
+	sdhc0_default: sdhc0_default {
+		group1 {
+			pinmux = <SDHC0_CLKOUT_GPIO12>,
+				 <SDHC0_CMD_GPIO13>,
+				 <SDHC0_DATA0_GPIO11>,
+				 <SDHC0_DATA1_GPIO10>,
+				 <SDHC0_DATA2_GPIO9>,
+				 <SDHC0_DATA3_GPIO8>;
+			bias-pull-up;
+			output-high;
+		};
+	};
+
+	ledc0_default: ledc0_default {
+		group1 {
+			pinmux = <LEDC_CH0_GPIO42>;
+			output-enable;
+		};
+	};
+
+	i2s0_pdm_default: i2s0_pdm_default {
+		group1 {
+			pinmux = <I2S0_I_WS_GPIO45>;
+			output-enable;
+		};
+
+		group2 {
+			pinmux = <I2S0_I_SD_GPIO46>;
+			bias-disable;
+		};
+	};
+};

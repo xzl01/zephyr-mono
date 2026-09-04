@@ -1,0 +1,315 @@
+/* SPDX-License-Identifier: MIT */
+
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_wroom_n16r8.dtsi>
+#include <espressif/partitions_0x0_amp_16M.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/lora/sx126x.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include "m5stack_papermono-pinctrl.dtsi"
+
+/ {
+	model = "M5Stack PaperMono C153";
+	compatible = "m5stack,papermono";
+
+	aliases {
+		i2c-0 = &i2c0;
+		display0 = &papermono_display;
+		sw0 = &button_left;
+		sw1 = &button_right;
+		led0 = &status_rgb;
+		lora0 = &lora;
+		pwm-buzzer = &buzzer;
+		microphone0 = &microphone;
+	};
+
+	chosen {
+		zephyr,sram = &sram1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,display = &papermono_display;
+		zephyr,touch = &papermono_touch;
+		zephyr,sdhc = &sdhc0;
+	};
+
+	sd_slot_control: sd-slot-control {
+		compatible = "m5stack,papermono-sd-slot-control";
+		detect-gpios = <&m5ioe1 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		debounce-interval-ms = <30>;
+
+		button_left: button-left {
+			label = "PaperMono left button";
+			gpios = <&gpio0 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+
+		button_right: button-right {
+			label = "PaperMono right button";
+			gpios = <&gpio0 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_1>;
+		};
+	};
+
+	status_rgb: status-rgb {
+		compatible = "m5stack,papermono-rgb-led";
+		pmic = <&m5pm1>;
+		pwms = <&m5ioe1_pwm 1 200000>,
+		       <&m5ioe1_pwm 0 200000>;
+		pwm-names = "green", "blue";
+		status = "okay";
+	};
+
+	buzzer_pwm: buzzer-pwm {
+		compatible = "pwm-leds";
+
+		buzzer: buzzer {
+			label = "PaperMono buzzer";
+			pwms = <&ledc0 0 PWM_HZ(2000) PWM_POLARITY_NORMAL>;
+		};
+	};
+
+	microphone: microphone {
+		compatible = "m5stack,papermono-pdm-mic";
+		i2s = <&i2s0>;
+		power-gpios = <&m5ioe1 11 GPIO_ACTIVE_HIGH>;
+		sample-rate-hz = <16000>;
+		power-on-delay-ms = <20>;
+		status = "okay";
+	};
+
+	wifi_ap: wifi-ap {
+		compatible = "espressif,esp32-wifi";
+		status = "okay";
+	};
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};
+
+&trng0 {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&ledc0 {
+	status = "okay";
+	pinctrl-0 = <&ledc0_default>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel0@0 {
+		reg = <0>;
+		timer = <0>;
+	};
+};
+
+&i2s0 {
+	status = "okay";
+	dmas = <&dma 2>;
+	dma-names = "rx";
+	pinctrl-0 = <&i2s0_pdm_default>;
+	pinctrl-names = "default";
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+
+	m5pm1: pmic@6e {
+		compatible = "m5stack,m5pm1";
+		reg = <0x6e>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <5>;
+		gpio-reserved-ranges = <1 1>;
+		interrupt-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		irq-output-pin = <1>;
+		status = "okay";
+
+		lora-power-hog {
+			gpio-hog;
+			gpios = <2 GPIO_ACTIVE_HIGH>;
+			output-high;
+			line-name = "lora-power";
+		};
+
+		m5pm1_pwm: pwm {
+			compatible = "m5stack,m5pm1-pwm";
+			#pwm-cells = <2>;
+			channels = <2>;
+			status = "okay";
+		};
+	};
+
+	m5ioe1: gpio-expander@4f {
+		compatible = "m5stack,m5ioe1";
+		reg = <0x4f>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <14>;
+		interrupt-gpios = <&gpio0 7 GPIO_ACTIVE_LOW>;
+		status = "okay";
+
+		touch-power-hog {
+			gpio-hog;
+			gpios = <12 GPIO_ACTIVE_HIGH>;
+			output-high;
+			line-name = "touch-power";
+		};
+
+		m5ioe1_pwm: pwm {
+			compatible = "m5stack,m5ioe1-pwm";
+			#pwm-cells = <2>;
+			channels = <4>;
+			status = "okay";
+		};
+	};
+
+	papermono_touch: touchscreen@38 {
+		compatible = "focaltech,ft5336";
+		reg = <0x38>;
+		/* GPIO4 becomes an RTC EXT0 input in deep sleep. ESP32-S3 keeps
+		 * digital-GPIO and RTC-IO pulls separately, so GPIO_INT_WAKEUP is
+		 * required for the ESP32 GPIO driver to program the RTC pull-up too.
+		 */
+		int-gpios = <&gpio0 4
+			(GPIO_ACTIVE_LOW | GPIO_PULL_UP | GPIO_INT_WAKEUP)>;
+		reset-gpios = <&m5ioe1 5 GPIO_ACTIVE_LOW>;
+		/* M5Stack UserDemo rotation 0 uses FT6336 raw x/y directly in the
+		 * portrait 480x800 UI. CrossMux reaches the same mapping after its
+		 * landscape-panel transform; do not apply another axis inversion here.
+		 * The common screen dimensions are intentionally omitted because Zephyr
+		 * uses them only when the corresponding inverted-* property is present.
+		 */
+		status = "okay";
+	};
+
+	imu: imu@68 {
+		compatible = "bosch,bmi270-base", "bosch,bmi270";
+		reg = <0x68>;
+		irq-gpios = <&m5pm1 4 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+
+	rtc: rtc@32 {
+		compatible = "epson,rx8130ce-rtc";
+		reg = <0x32>;
+		irq-gpios = <&m5pm1 0 GPIO_ACTIVE_LOW>;
+		battery-switchover = <3>;
+		status = "okay";
+	};
+
+	charger: charger@75 {
+		compatible = "m5stack,papermono-ip2315";
+		reg = <0x75>;
+		enable-gpios = <&m5ioe1 10 GPIO_ACTIVE_HIGH>;
+		pmic = <&m5pm1>;
+		status = "okay";
+	};
+
+	nfc: nfc@50 {
+		compatible = "m5stack,papermono-st25r3916";
+		reg = <0x50>;
+		power-gpios = <&m5ioe1 3 GPIO_ACTIVE_HIGH>;
+		irq-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+		/* UserDemo waits 120 ms before the NFC library's 50 ms settle. */
+		power-on-delay-ms = <170>;
+		status = "okay";
+	};
+};
+
+&spi2 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+
+	papermono_display: ssd1677@0 {
+		compatible = "m5stack,papermono-ssd1677";
+		reg = <0>;
+		spi-max-frequency = <20000000>;
+		cs-gpios = <&gpio0 16 GPIO_ACTIVE_LOW>;
+		dc-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+		busy-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+		power-gpios = <&m5ioe1 2 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&m5ioe1 4 GPIO_ACTIVE_LOW>;
+		pwms = <&m5pm1_pwm 0 200000>;
+		pwm-names = "frontlight";
+		width = <480>;
+		height = <800>;
+		status = "okay";
+	};
+};
+
+&spi3 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	cs-gpios = <&gpio0 41 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spim3_default>;
+	pinctrl-names = "default";
+
+	lora: sx1262@0 {
+		compatible = "semtech,sx1262";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		reset-gpios = <&m5ioe1 9 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;
+		busy-gpios = <&gpio0 21 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+		antenna-enable-gpios = <&m5ioe1 1 GPIO_ACTIVE_HIGH>;
+		dio2-tx-enable;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_3V0>;
+		tcxo-power-startup-delay-ms = <5>;
+		status = "okay";
+	};
+};
+
+&sdhc {
+	sdhc0: sdhc@0 {
+		status = "okay";
+		pinctrl-0 = <&sdhc0_default>;
+		pinctrl-names = "default";
+		max-bus-freq = <20000000>;
+		bus-width = <4>;
+		pwr-gpios = <&m5ioe1 13 GPIO_ACTIVE_HIGH>;
+		/* Match the factory demo's TF rail stabilization interval. */
+		power-delay-ms = <300>;
+
+		mmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};
+
+&dma {
+	status = "okay";
+};

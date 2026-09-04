@@ -1,0 +1,14 @@
+/* SPDX-License-Identifier: MIT */
+
+/*
+ * MCUboot only needs the SoC flash and console.  The application-level GPIO
+ * expanders also contain gpio-hog children; leaving them enabled would make
+ * the bootloader reference drivers that are deliberately not part of MCUboot.
+ */
+&m5pm1 {
+	status = "disabled";
+};
+
+&m5ioe1 {
+	status = "disabled";
+};

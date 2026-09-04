@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+
+description: |
+  SSD1677 e-paper controller as wired on the M5Stack PaperMono C153.
+  Display power and reset are controlled by an M5IOE1 I2C expander.
+
+compatible: "m5stack,papermono-ssd1677"
+
+include:
+  - spi-device.yaml
+  - display-controller.yaml
+
+properties:
+  cs-gpios:
+    type: phandle-array
+    required: true
+    description: Manually controlled active-low SPI chip select
+
+  dc-gpios:
+    type: phandle-array
+    required: true
+    description: Command/data select, high for data
+
+  busy-gpios:
+    type: phandle-array
+    required: true
+    description: Active-high SSD1677 BUSY signal
+
+  power-gpios:
+    type: phandle-array
+    required: true
+    description: Panel power enable controlled by M5IOE1
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Active-low panel reset controlled by M5IOE1
+
+  pwms:
+    type: phandle-array
+    required: true
+    description: M5PM1 PWM0 driving the panel front light
+
+  pwm-names:
+    type: string-array
+    required: true
+    description: Must contain frontlight

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT
+
+description: PaperMono board-integrated ST25R3916 NFC front end
+
+compatible: "m5stack,papermono-st25r3916"
+
+include: i2c-device.yaml
+
+properties:
+  power-gpios:
+    type: phandle-array
+    required: true
+    description: Load-switch enable for the NFC daughterboard power rail
+
+  irq-gpios:
+    type: phandle-array
+    required: true
+    description: Active-high ST25R3916 interrupt output
+
+  power-on-delay-ms:
+    type: int
+    default: 50
+    description: Delay before the first identity-register access

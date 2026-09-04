@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PaperMono 内容中心</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font: 16px/1.5 system-ui, sans-serif;
+      --canvas: #f5f5f2;
+      --surface: #fff;
+      --text: #181816;
+      --muted: #595954;
+      --border: #d8d8d2;
+      --control: #f0f0ec;
+      --focus: #2358a5;
+      --danger: #9b1515;
+    }
+    * { box-sizing: border-box; }
+    ::selection { background: #cdddf4; color: var(--text); }
+    body { min-height: 100vh; max-width: 760px; margin: 0 auto; padding: 1rem; background: var(--canvas); color: var(--text); }
+    header, section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; margin: 0 0 1rem; }
+    h1, h2 { margin: 0 0 .75rem; }
+    form, .actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; }
+    .field { display: grid; gap: .25rem; min-width: 12rem; flex: 1; font-weight: 600; }
+    .field > span { font-size: .875rem; }
+    input, button, select { min-height: 44px; border: 1px solid #aaa9a2; border-radius: 6px; font: inherit; padding: .55rem .7rem; }
+    input, select { min-width: 0; width: 100%; background: var(--surface); color: var(--text); caret-color: var(--focus); }
+    button { background: var(--control); color: var(--text); cursor: pointer; font-weight: 650; }
+    button:hover { background: #e4e4de; }
+    input:focus-visible, select:focus-visible, button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    button:disabled { cursor: wait; opacity: .6; }
+    #content-list > div { display: flex; gap: .5rem; align-items: center; border-top: 1px solid #ecece7; padding: .7rem 0; }
+    #content-list span { overflow-wrap: anywhere; flex: 1; }
+    #message { min-height: 1.5rem; margin: .5rem 0; }
+    #message.error { color: var(--danger); font-weight: 600; }
+    progress { width: 100%; height: 1rem; accent-color: var(--focus); }
+    .muted { color: var(--muted); }
+    @media (max-width: 520px) {
+      form > .field, .actions > .field { flex-basis: 100%; }
+      form > button, .actions > button { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PaperMono 内容中心</h1>
+    <p class="muted">内容只在设备、TF 卡和当前局域网之间传输。</p>
+    <p id="message" role="status" aria-live="polite"></p>
+  </header>
+
+  <section id="pair-panel">
+    <h2>建立本地会话</h2>
+    <form id="pair-form">
+      <label class="field">
+        <span>设备配对码</span>
+        <input id="code" inputmode="text" pattern="[0-9A-HJ-KM-NP-TV-Z]{8}"
+               maxlength="8" autocapitalize="characters" spellcheck="false"
+               autocomplete="one-time-code" placeholder="屏幕上的八位配对码" required>
+      </label>
+      <button type="submit">配对</button>
+    </form>
+  </section>
+
+  <main id="panel" hidden>
+    <section>
+      <h2>内容</h2>
+      <div class="actions">
+        <label class="field">
+          <span>选择文件</span>
+          <input id="file" type="file" accept=".txt,.epub,.ics,.json,.md">
+        </label>
+        <label class="field">
+          <span>内容类型</span>
+          <select id="kind">
+            <option value="txt">TXT</option>
+            <option value="epub">EPUB</option>
+            <option value="ics">ICS</option>
+            <option value="tasks">tasks-v1.json</option>
+            <option value="note">Markdown/TXT 便签</option>
+            <option value="weread">微信读书书架 weread-v1.json</option>
+          </select>
+        </label>
+        <button id="upload-button" type="button">上传</button>
+        <button id="refresh-button" type="button">刷新</button>
+      </div>
+      <progress id="upload-progress" value="0" max="100" aria-label="上传进度" hidden></progress>
+      <div id="content-list" aria-live="polite"></div>
+    </section>
+
+    <section>
+      <h2>连接局域网</h2>
+      <form id="wifi-form">
+        <label class="field">
+          <span>Wi-Fi 名称</span>
+          <input id="ssid" maxlength="32" autocomplete="off" placeholder="SSID" required>
+        </label>
+        <label class="field">
+          <span>Wi-Fi 密码</span>
+          <input id="psk" type="password" minlength="8" maxlength="64"
+                 autocomplete="new-password" placeholder="至少 8 位" required>
+        </label>
+        <button type="submit">保存并连接</button>
+      </form>
+      <p class="muted">连接成功后页面会把当前会话安全带到设备的局域网地址。</p>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+    const TOKEN_KEY = "papermono-session-v1";
+    const pairPanel = document.querySelector("#pair-panel");
+    const panel = document.querySelector("#panel");
+    const message = document.querySelector("#message");
+    const contentList = document.querySelector("#content-list");
+    const fileInput = document.querySelector("#file");
+    const kindInput = document.querySelector("#kind");
+    const uploadButton = document.querySelector("#upload-button");
+    const uploadProgress = document.querySelector("#upload-progress");
+    let token = "";
+
+    function setMessage(text, error = false) {
+      message.textContent = text;
+      message.classList.toggle("error", error);
+    }
+
+    function storeToken(value) {
+      token = value;
+      try {
+        if (value) localStorage.setItem(TOKEN_KEY, value);
+        else localStorage.removeItem(TOKEN_KEY);
+      } catch (_) {
+        // Private browsing may deny storage; the in-memory session still works.
+      }
+    }
+
+    /* Cross-origin storage is intentionally unavailable. The AP origin requests
+     * a short-lived, one-use ticket and puts only that ticket in the fragment.
+     * The LAN page removes the fragment before redeeming it over POST. The
+     * long-lived session token never enters a URL.
+     */
+    function takeHandoffTicket() {
+      const prefix = "#ticket=";
+      if (!location.hash.startsWith(prefix)) return "";
+      let value = "";
+      try { value = decodeURIComponent(location.hash.slice(prefix.length)); }
+      catch (_) { value = ""; }
+      history.replaceState(null, "", location.pathname + location.search);
+      return /^[0-9A-F]{16}$/.test(value) ? value : "";
+    }
+
+    async function redeemTicket(ticket) {
+      const response = await fetch("/api/v1/session", {
+        method: "POST",
+        headers: { "X-PaperMono-Ticket": ticket }
+      });
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
+      const data = JSON.parse(text);
+      if (!data.session) throw new Error("设备未返回会话令牌");
+      storeToken(data.session);
+    }
+
+    async function issueHandoffTicket() {
+      const data = JSON.parse(await request("/api/v1/session", { method: "POST" }));
+      if (!data.ticket) throw new Error("设备未返回接力凭据");
+      return data.ticket;
+    }
+
+    async function request(path, options = {}) {
+      const headers = new Headers(options.headers || {});
+      if (token) headers.set("X-PaperMono-Session", token);
+      const response = await fetch(path, { ...options, headers });
+      const text = await response.text();
+      if (response.status === 401 && token) {
+        storeToken("");
+        pairPanel.hidden = false;
+        panel.hidden = true;
+        throw new Error("会话已失效，请重新输入设备配对码");
+      }
+      if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
+      return text;
+    }
+
+    function encodeName(name) {
+      const bytes = new TextEncoder().encode(name);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return "b64:" + btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    function guessKind(name) {
+      const lower = name.toLowerCase();
+      if (lower.endsWith(".epub")) return "epub";
+      if (lower.endsWith(".ics")) return "ics";
+      if (lower === "tasks-v1.json") return "tasks";
+      if (lower === "weread-v1.json") return "weread";
+      if (lower.endsWith(".md")) return "note";
+      return "txt";
+    }
+
+    async function refreshContent() {
+      const entries = JSON.parse(await request("/api/v1/content"));
+      contentList.replaceChildren();
+      if (!entries.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "TF 卡中还没有内容。";
+        contentList.append(empty);
+        return;
+      }
+      for (const entry of entries) {
+        const row = document.createElement("div");
+        const label = document.createElement("span");
+        const button = document.createElement("button");
+        label.textContent = `${entry.title} · ${entry.kind} · ${entry.size} B`;
+        button.type = "button";
+        button.textContent = "删除";
+        button.addEventListener("click", () => removeContent(entry.id, entry.title));
+        row.append(label, button);
+        contentList.append(row);
+      }
+    }
+
+    async function removeContent(id, title) {
+      if (!confirm(`确认删除“${title}”？`)) return;
+      try {
+        await request(`/api/v1/content/${encodeURIComponent(id)}`, { method: "DELETE" });
+        setMessage("内容已删除");
+        await refreshContent();
+      } catch (error) {
+        setMessage(`删除失败：${error.message}`, true);
+      }
+    }
+
+    function uploadFile(file, kind) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/v1/content");
+        xhr.setRequestHeader("X-PaperMono-Session", token);
+        xhr.setRequestHeader("X-PaperMono-Name", encodeName(file.name));
+        xhr.setRequestHeader("X-PaperMono-Kind", kind);
+        xhr.upload.onprogress = event => {
+          if (event.lengthComputable) uploadProgress.value = Math.round(event.loaded * 100 / event.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status === 401) {
+            storeToken("");
+            pairPanel.hidden = false;
+            panel.hidden = true;
+          }
+          xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(
+            xhr.status === 401 ? "会话已失效，请重新输入设备配对码" : xhr.responseText || `HTTP ${xhr.status}`
+          ));
+        };
+        xhr.onerror = () => reject(new Error("网络连接中断"));
+        xhr.onabort = () => reject(new Error("上传已取消"));
+        xhr.send(file);
+      });
+    }
+
+    async function uploadSelected() {
+      const file = fileInput.files[0];
+      if (!file) return setMessage("请先选择文件", true);
+      uploadButton.disabled = true;
+      uploadProgress.hidden = false;
+      uploadProgress.value = 0;
+      setMessage(`正在上传 ${file.name}…`);
+      try {
+        await uploadFile(file, kindInput.value);
+        uploadProgress.value = 100;
+        setMessage("上传完成，设备正在刷新内容索引");
+        await refreshContent();
+      } catch (error) {
+        setMessage(`上传失败：${error.message}`, true);
+      } finally {
+        uploadButton.disabled = false;
+      }
+    }
+
+    async function waitForLan() {
+      const deadline = Date.now() + 18000;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 750));
+        try {
+          const state = JSON.parse(await request("/api/v1/status"));
+          const address = state.wifi && state.wifi.station_ipv4;
+          if (address && address !== location.hostname) {
+            setMessage(`已连接，正在转到 ${address}`);
+            const handoffTicket = await issueHandoffTicket();
+            location.replace(`http://${address}/#ticket=${encodeURIComponent(handoffTicket)}`);
+            return;
+          }
+        } catch (_) {
+          // The AP may be changing channel; keep trying during the handoff window.
+        }
+      }
+      setMessage("配置已保存。请按设备屏幕显示的局域网地址重新打开页面。", true);
+    }
+
+    document.querySelector("#pair-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const button = event.submitter;
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/v1/state", {
+          headers: {
+            "X-PaperMono-Code": document.querySelector("#code").value.trim().toUpperCase()
+          }
+        });
+        const state = await response.json();
+        if (!response.ok) {
+          if (response.status === 429) {
+            throw new Error(state.code_rotated
+              ? "尝试次数过多，设备已更换配对码，请查看屏幕上的新配对码"
+              : `尝试过于频繁，请稍后重试`);
+          }
+          throw new Error(state.error || `HTTP ${response.status}`);
+        }
+        /* Pairing yields a one-time ticket; redeem it for the session token so
+         * the long-lived secret never appears in a URL.
+         */
+        const pairingTicket = state.ticket || "";
+        if (!pairingTicket) throw new Error("设备未返回配对凭据");
+        await redeemTicket(pairingTicket);
+        pairPanel.hidden = true;
+        panel.hidden = false;
+        setMessage("本地会话已建立");
+        await refreshContent();
+      } catch (error) {
+        setMessage(`配对失败：${error.message}`, true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.querySelector("#wifi-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const button = event.submitter;
+      button.disabled = true;
+      try {
+        await request("/api/v1/wifi", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ssid: document.querySelector("#ssid").value,
+            psk: document.querySelector("#psk").value
+          })
+        });
+        setMessage("配置已保存，正在等待设备获得局域网地址…");
+        await waitForLan();
+      } catch (error) {
+        setMessage(`Wi-Fi 配置失败：${error.message}`, true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files[0]) kindInput.value = guessKind(fileInput.files[0].name);
+    });
+    uploadButton.addEventListener("click", uploadSelected);
+    document.querySelector("#refresh-button").addEventListener("click", () => {
+      refreshContent().then(() => setMessage("内容列表已刷新"))
+        .catch(error => setMessage(`刷新失败：${error.message}`, true));
+    });
+
+    (async function restoreSession() {
+      const handoffTicket = takeHandoffTicket();
+      if (handoffTicket) {
+        try {
+          await redeemTicket(handoffTicket);
+          await refreshContent();
+          pairPanel.hidden = true;
+          panel.hidden = false;
+          setMessage("已恢复本地会话");
+          return;
+        } catch (_) {
+          storeToken("");
+        }
+      }
+      if (!token) {
+        try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (_) { token = ""; }
+      }
+      if (!token) return;
+      try {
+        await refreshContent();
+        pairPanel.hidden = true;
+        panel.hidden = false;
+        setMessage("已恢复本地会话");
+      } catch (_) {
+        storeToken("");
+        pairPanel.hidden = false;
+        panel.hidden = true;
+        setMessage("旧会话已失效，请使用设备上的新配对码");
+      }
+    })();
+  </script>
+</body>
+</html>

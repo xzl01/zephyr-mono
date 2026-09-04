@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+
+description: M5Stack M5PM1 power-management controller
+
+compatible: "m5stack,m5pm1"
+
+include: [gpio-controller.yaml, i2c-device.yaml]
+
+properties:
+  "#gpio-cells":
+    const: 2
+
+  interrupt-gpios:
+    type: phandle-array
+    required: true
+    description: ESP32 input connected to the selected M5PM1 IRQ output
+
+  irq-output-pin:
+    type: int
+    required: true
+    description: M5PM1 GPIO configured for the multiplexed IRQ output
+
+gpio-cells:
+  - pin
+  - flags

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+
+description: M5Stack PaperMono microSD slot board control signals
+
+compatible: "m5stack,papermono-sd-slot-control"
+
+properties:
+  detect-gpios:
+    type: phandle-array
+    required: true
+    description: Active-low card-detect input routed through M5IOE1 IO1

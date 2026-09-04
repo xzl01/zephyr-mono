@@ -1,0 +1,34 @@
+From: PaperMono Zephyr contributors
+Subject: [PATCH] soc: esp32s3: recover MWDT before flash setup
+
+PaperMono simple-boot images can inherit an armed MWDT0 after a digital-core
+reset.  Run the watchdog recovery before flash initialization so a surviving
+watchdog cannot reset the CPU again while the boot path is still configuring
+external flash.
+
+This patch targets Zephyr v4.4.1 and is paired with
+hal-espressif-19f979cf-mwdt-disable.patch.
+
+diff --git a/soc/espressif/esp32s3/hw_init.c b/soc/espressif/esp32s3/hw_init.c
+index 0d0d17aaf..6a2a79933 100644
+--- a/soc/espressif/esp32s3/hw_init.c
++++ b/soc/espressif/esp32s3/hw_init.c
+@@ -39,6 +39,8 @@ int hardware_init(void)
+ 	soc_hw_init();
+ 	ana_reset_config();
+ 	super_wdt_auto_feed();
++	/* Recover before flash setup if MWDT0 survived a previous system reset. */
++	config_wdt();
+ 
+ #ifdef CONFIG_BOOTLOADER_REGION_PROTECTION_ENABLE
+ 	esp_cpu_configure_region_protection();
+@@ -94,7 +96,5 @@ int hardware_init(void)
+ 
+ 	check_wdt_reset();
+ 
+-	config_wdt();
+-
+ 	return 0;
+ }
+-- 
+2.51.0

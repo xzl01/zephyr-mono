@@ -1,0 +1,522 @@
+/* SPDX-License-Identifier: MIT */
+
+#include <errno.h>
+#include <string.h>
+
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/services/bas.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/sys/byteorder.h>
+
+#include <papermono/hid.h>
+#include <papermono/ui.h>
+
+LOG_MODULE_REGISTER(papermono_hid, LOG_LEVEL_INF);
+
+enum {
+	HIDS_REMOTE_WAKE = BIT(0),
+	HIDS_NORMALLY_CONNECTABLE = BIT(1),
+	HIDS_INPUT = 0x01,
+};
+
+enum hid_attribute_index {
+	HID_ATTR_MEDIA_VALUE = 6U,
+	HID_ATTR_KEYBOARD_VALUE = 10U,
+	HID_ATTR_MOUSE_VALUE = 14U,
+};
+
+#define HID_NOTIFY_RETRY_COUNT 5U
+#define HID_NOTIFY_RETRY_MS 5U
+#define HID_RELEASE_DELAY_MS 8U
+
+struct hids_info {
+	uint16_t version;
+	uint8_t country;
+	uint8_t flags;
+} __packed;
+
+struct hids_report_reference {
+	uint8_t id;
+	uint8_t type;
+} __packed;
+
+static const struct hids_info hid_info = {
+	.version = sys_cpu_to_le16(0x0111),
+	.country = 0,
+	.flags = HIDS_REMOTE_WAKE | HIDS_NORMALLY_CONNECTABLE,
+};
+static const struct hids_report_reference media_reference = {
+	.id = PAPERMONO_HID_REPORT_MEDIA, .type = HIDS_INPUT,
+};
+static const struct hids_report_reference keyboard_reference = {
+	.id = PAPERMONO_HID_REPORT_KEYBOARD, .type = HIDS_INPUT,
+};
+static const struct hids_report_reference mouse_reference = {
+	.id = PAPERMONO_HID_REPORT_MOUSE, .type = HIDS_INPUT,
+};
+static uint8_t control_point;
+
+static struct papermono_hid_state hid_state;
+static struct bt_conn *active_connection;
+K_MUTEX_DEFINE(hid_lock);
+K_MUTEX_DEFINE(hid_report_lock);
+
+static ssize_t read_info(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
+	uint16_t offset)
+{
+	ARG_UNUSED(attribute);
+	return bt_gatt_attr_read(connection, attribute, buffer, length, offset,
+		&hid_info, sizeof(hid_info));
+}
+
+static ssize_t read_report_map(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
+	uint16_t offset)
+{
+	size_t report_map_length;
+	const uint8_t *report_map = papermono_hid_report_map(
+		&report_map_length);
+
+	return bt_gatt_attr_read(connection, attribute, buffer, length, offset,
+		report_map, report_map_length);
+}
+
+static ssize_t read_media_report(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
+	uint16_t offset)
+{
+	static const uint8_t idle[PAPERMONO_HID_MEDIA_REPORT_SIZE];
+
+	return bt_gatt_attr_read(connection, attribute, buffer, length, offset,
+		idle, sizeof(idle));
+}
+
+static ssize_t read_keyboard_report(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
+	uint16_t offset)
+{
+	static const uint8_t idle[PAPERMONO_HID_KEYBOARD_REPORT_SIZE];
+
+	return bt_gatt_attr_read(connection, attribute, buffer, length, offset,
+		idle, sizeof(idle));
+}
+
+static ssize_t read_mouse_report(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
+	uint16_t offset)
+{
+	static const uint8_t idle[PAPERMONO_HID_MOUSE_REPORT_SIZE];
+
+	return bt_gatt_attr_read(connection, attribute, buffer, length, offset,
+		idle, sizeof(idle));
+}
+
+static ssize_t read_report_reference(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
+	uint16_t offset)
+{
+	return bt_gatt_attr_read(connection, attribute, buffer, length, offset,
+		attribute->user_data, sizeof(struct hids_report_reference));
+}
+
+static ssize_t write_control_point(struct bt_conn *connection,
+	const struct bt_gatt_attr *attribute, const void *buffer, uint16_t length,
+	uint16_t offset, uint8_t flags)
+{
+	ARG_UNUSED(connection);
+	ARG_UNUSED(flags);
+	if (offset != 0U || length != sizeof(control_point)) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	const uint8_t value = *(const uint8_t *)buffer;
+
+	/* HID Control Point: 0=suspend, 1=exit suspend. */
+	if (value > 1U) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+	memcpy(attribute->user_data, &value, sizeof(value));
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.suspended = value == 0U;
+	k_mutex_unlock(&hid_lock);
+	return length;
+}
+
+static void report_ccc_changed(const struct bt_gatt_attr *attribute,
+	uint16_t value)
+{
+	ARG_UNUSED(attribute);
+	ARG_UNUSED(value);
+	/* Subscription state is connection-specific and may be restored from a
+	 * bond. Query bt_gatt_is_subscribed() at send time instead of caching a
+	 * process-global boolean which becomes stale after reconnect.
+	 */
+}
+
+#define HID_READ_ENCRYPT BT_GATT_PERM_READ_ENCRYPT
+#define HID_WRITE_ENCRYPT BT_GATT_PERM_WRITE_ENCRYPT
+
+BT_GATT_SERVICE_DEFINE(papermono_hid_service,
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_HIDS),
+	BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_INFO, BT_GATT_CHRC_READ,
+		BT_GATT_PERM_READ, read_info, NULL, NULL),
+	BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_REPORT_MAP, BT_GATT_CHRC_READ,
+		BT_GATT_PERM_READ, read_report_map, NULL, NULL),
+	BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_REPORT,
+		BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, HID_READ_ENCRYPT,
+		read_media_report, NULL, NULL),
+	BT_GATT_CCC(report_ccc_changed, HID_READ_ENCRYPT | HID_WRITE_ENCRYPT),
+	BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ,
+		read_report_reference, NULL, (void *)&media_reference),
+	BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_REPORT,
+		BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, HID_READ_ENCRYPT,
+		read_keyboard_report, NULL, NULL),
+	BT_GATT_CCC(report_ccc_changed, HID_READ_ENCRYPT | HID_WRITE_ENCRYPT),
+	BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ,
+		read_report_reference, NULL, (void *)&keyboard_reference),
+	BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_REPORT,
+		BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, HID_READ_ENCRYPT,
+		read_mouse_report, NULL, NULL),
+	BT_GATT_CCC(report_ccc_changed, HID_READ_ENCRYPT | HID_WRITE_ENCRYPT),
+	BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ,
+		read_report_reference, NULL, (void *)&mouse_reference),
+	BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_CTRL_POINT,
+		BT_GATT_CHRC_WRITE_WITHOUT_RESP, HID_WRITE_ENCRYPT, NULL,
+		write_control_point, &control_point));
+
+static const struct bt_data advertising_data[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL),
+		BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)),
+};
+static const struct bt_data scan_response[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME,
+		sizeof(CONFIG_BT_DEVICE_NAME) - 1U),
+};
+
+static int start_advertising(void)
+{
+	int ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, advertising_data,
+		ARRAY_SIZE(advertising_data), scan_response,
+		ARRAY_SIZE(scan_response));
+
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (ret == 0 || ret == -EALREADY) {
+		hid_state.advertising = true;
+		ret = 0;
+	} else {
+		hid_state.advertising = false;
+		hid_state.last_error = ret;
+	}
+	k_mutex_unlock(&hid_lock);
+	return ret;
+}
+
+static void connected(struct bt_conn *connection, uint8_t error)
+{
+	if (error != 0U) {
+		k_mutex_lock(&hid_lock, K_FOREVER);
+		hid_state.last_error = -EIO;
+		k_mutex_unlock(&hid_lock);
+		(void)start_advertising();
+		return;
+	}
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (active_connection != NULL) {
+		bt_conn_unref(active_connection);
+	}
+	active_connection = bt_conn_ref(connection);
+	hid_state.connected = true;
+	hid_state.secured = false;
+	hid_state.advertising = false;
+	hid_state.suspended = false;
+	hid_state.passkey_visible = false;
+	k_mutex_unlock(&hid_lock);
+	/* Force authenticated pairing so the passkey callback can put the code on
+	 * the e-paper display. Bonds are restored by Settings on later boots.
+	 */
+	const int security_ret = bt_conn_set_security(connection, BT_SECURITY_L3);
+	if (security_ret < 0) {
+		k_mutex_lock(&hid_lock, K_FOREVER);
+		hid_state.last_error = security_ret;
+		k_mutex_unlock(&hid_lock);
+	}
+	papermono_ui_request_background_refresh();
+}
+
+static void disconnected(struct bt_conn *connection, uint8_t reason)
+{
+	ARG_UNUSED(connection);
+	ARG_UNUSED(reason);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (active_connection != NULL) {
+		bt_conn_unref(active_connection);
+		active_connection = NULL;
+	}
+	hid_state.connected = false;
+	hid_state.secured = false;
+	hid_state.suspended = false;
+	hid_state.passkey_visible = false;
+	k_mutex_unlock(&hid_lock);
+	(void)start_advertising();
+	papermono_ui_request_background_refresh();
+}
+
+static void security_changed(struct bt_conn *connection, bt_security_t level,
+	enum bt_security_err error)
+{
+	bool active;
+
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	active = active_connection == connection;
+	if (active) {
+		hid_state.secured = error == BT_SECURITY_ERR_SUCCESS &&
+			level >= BT_SECURITY_L2;
+		hid_state.last_error = error == BT_SECURITY_ERR_SUCCESS ? 0 :
+			-(int)error;
+	}
+	k_mutex_unlock(&hid_lock);
+	if (active) {
+		papermono_ui_request_background_refresh();
+	}
+}
+
+BT_CONN_CB_DEFINE(connection_callbacks) = {
+	.connected = connected,
+	.disconnected = disconnected,
+	.security_changed = security_changed,
+};
+
+static void passkey_display(struct bt_conn *connection, unsigned int passkey)
+{
+	ARG_UNUSED(connection);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.passkey = passkey;
+	hid_state.passkey_visible = true;
+	k_mutex_unlock(&hid_lock);
+	papermono_ui_request_background_refresh();
+}
+
+static void pairing_cancelled(struct bt_conn *connection)
+{
+	ARG_UNUSED(connection);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.passkey_visible = false;
+	k_mutex_unlock(&hid_lock);
+	papermono_ui_request_background_refresh();
+}
+
+static struct bt_conn_auth_cb authentication_callbacks = {
+	.passkey_display = passkey_display,
+	.cancel = pairing_cancelled,
+};
+
+static void pairing_complete(struct bt_conn *connection, bool bonded)
+{
+	ARG_UNUSED(connection);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.bonded = bonded;
+	hid_state.passkey_visible = false;
+	k_mutex_unlock(&hid_lock);
+	papermono_ui_request_background_refresh();
+}
+
+static void pairing_failed(struct bt_conn *connection,
+	enum bt_security_err reason)
+{
+	ARG_UNUSED(connection);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.last_error = -(int)reason;
+	hid_state.passkey_visible = false;
+	k_mutex_unlock(&hid_lock);
+	papermono_ui_request_background_refresh();
+}
+
+static void bond_deleted(uint8_t identity, const bt_addr_le_t *peer)
+{
+	ARG_UNUSED(identity);
+	ARG_UNUSED(peer);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.bonded = false;
+	k_mutex_unlock(&hid_lock);
+	papermono_ui_request_background_refresh();
+}
+
+static struct bt_conn_auth_info_cb authentication_info_callbacks = {
+	.pairing_complete = pairing_complete,
+	.pairing_failed = pairing_failed,
+	.bond_deleted = bond_deleted,
+};
+
+static void count_bond(const struct bt_bond_info *information, void *user_data)
+{
+	ARG_UNUSED(information);
+	*(bool *)user_data = true;
+}
+
+int papermono_hid_init(void)
+{
+	bool bonded = false;
+	int ret;
+
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (hid_state.initialized) {
+		k_mutex_unlock(&hid_lock);
+		return 0;
+	}
+	k_mutex_unlock(&hid_lock);
+	ret = bt_conn_auth_cb_register(&authentication_callbacks);
+	ret = ret ?: bt_conn_auth_info_cb_register(
+		&authentication_info_callbacks);
+	ret = ret ?: bt_enable(NULL);
+	ret = ret ?: settings_load_subtree("bt");
+	if (ret < 0) {
+		k_mutex_lock(&hid_lock, K_FOREVER);
+		hid_state.last_error = ret;
+		k_mutex_unlock(&hid_lock);
+		return ret;
+	}
+	bt_foreach_bond(BT_ID_DEFAULT, count_bond, &bonded);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.initialized = true;
+	hid_state.bonded = bonded;
+	k_mutex_unlock(&hid_lock);
+	ret = start_advertising();
+	LOG_INF("BLE HID ready, bonded=%d", bonded);
+	papermono_ui_request_background_refresh();
+	return ret;
+}
+
+static int notify_report(size_t attribute_index, const void *report,
+	size_t length)
+{
+	struct bt_conn *connection;
+	bool suspended;
+	int ret;
+
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	connection = active_connection == NULL ? NULL :
+		bt_conn_ref(active_connection);
+	suspended = hid_state.suspended;
+	k_mutex_unlock(&hid_lock);
+	if (connection == NULL) {
+		return -ENOTCONN;
+	}
+	if (suspended) {
+		bt_conn_unref(connection);
+		return -EHOSTDOWN;
+	}
+	const struct bt_gatt_attr *attribute =
+		&papermono_hid_service.attrs[attribute_index];
+	if (!bt_gatt_is_subscribed(connection, attribute,
+		BT_GATT_CCC_NOTIFY)) {
+		bt_conn_unref(connection);
+		return -EACCES;
+	}
+	for (uint8_t attempt = 0U; attempt < HID_NOTIFY_RETRY_COUNT; ++attempt) {
+		ret = bt_gatt_notify(connection, attribute, report, length);
+		if (ret != -ENOMEM && ret != -EAGAIN) {
+			break;
+		}
+		k_msleep(HID_NOTIFY_RETRY_MS);
+	}
+	bt_conn_unref(connection);
+	return ret;
+}
+
+static int notify_encoded_report(const struct papermono_hid_report *report)
+{
+	uint8_t released[PAPERMONO_HID_REPORT_MAX_SIZE] = { 0 };
+	size_t attribute_index;
+	int ret;
+
+	switch (report->id) {
+	case PAPERMONO_HID_REPORT_MEDIA:
+		attribute_index = HID_ATTR_MEDIA_VALUE;
+		break;
+	case PAPERMONO_HID_REPORT_KEYBOARD:
+		attribute_index = HID_ATTR_KEYBOARD_VALUE;
+		break;
+	case PAPERMONO_HID_REPORT_MOUSE:
+		attribute_index = HID_ATTR_MOUSE_VALUE;
+		break;
+	default:
+		return -EINVAL;
+	}
+	if (report->length == 0U || report->length > sizeof(released)) {
+		return -EMSGSIZE;
+	}
+	ret = notify_report(attribute_index, report->data, report->length);
+	if (ret == 0 && report->release_required) {
+		/* Space the release from the press and retry temporary ATT buffer
+		 * exhaustion. Losing this packet leaves a key/button held on the host.
+		 */
+		k_msleep(HID_RELEASE_DELAY_MS);
+		ret = notify_report(attribute_index, released, report->length);
+	}
+	return ret;
+}
+
+int papermono_hid_send_action(const struct papermono_hid_action *action)
+{
+	struct papermono_hid_report report;
+	int ret = papermono_hid_encode_action(action, &report);
+
+	if (ret == 0) {
+		k_mutex_lock(&hid_report_lock, K_FOREVER);
+		ret = notify_encoded_report(&report);
+		k_mutex_unlock(&hid_report_lock);
+	}
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	hid_state.last_error = ret;
+	k_mutex_unlock(&hid_lock);
+	return ret;
+}
+
+int papermono_hid_clear_bonds(void)
+{
+	struct bt_conn *connection;
+
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	connection = active_connection == NULL ? NULL :
+		bt_conn_ref(active_connection);
+	k_mutex_unlock(&hid_lock);
+	if (connection != NULL) {
+		(void)bt_conn_disconnect(connection,
+			BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_unref(connection);
+	}
+	int ret = bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
+	if (ret == 0) {
+		k_mutex_lock(&hid_lock, K_FOREVER);
+		hid_state.bonded = false;
+		hid_state.secured = false;
+		hid_state.suspended = false;
+		hid_state.passkey_visible = false;
+		k_mutex_unlock(&hid_lock);
+		(void)start_advertising();
+		papermono_ui_request_background_refresh();
+	}
+	return ret;
+}
+
+int papermono_hid_set_battery_level(uint8_t percent)
+{
+	return bt_bas_set_battery_level(MIN(percent, 100U));
+}
+
+void papermono_hid_get_state(struct papermono_hid_state *state)
+{
+	if (state == NULL) {
+		return;
+	}
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	*state = hid_state;
+	k_mutex_unlock(&hid_lock);
+}

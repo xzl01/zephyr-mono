@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+
+description: M5Stack M5IOE1 I2C GPIO and peripheral expander
+
+compatible: "m5stack,m5ioe1"
+
+include: [gpio-controller.yaml, i2c-device.yaml]
+
+properties:
+  "#gpio-cells":
+    const: 2
+
+  interrupt-gpios:
+    type: phandle-array
+    description: Active-low open-drain interrupt output
+
+gpio-cells:
+  - pin
+  - flags

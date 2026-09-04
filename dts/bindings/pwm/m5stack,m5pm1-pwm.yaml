@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+
+description: PWM function of an M5Stack M5PM1 power manager
+
+compatible: "m5stack,m5pm1-pwm"
+
+include: pwm-controller.yaml
+
+properties:
+  "#pwm-cells":
+    const: 2
+
+  channels:
+    const: 2
+
+pwm-cells:
+  - channel
+  - period

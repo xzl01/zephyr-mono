@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT
+
+description: M5Stack PaperMono ESP32-S3 PDM microphone
+
+compatible: "m5stack,papermono-pdm-mic"
+
+include: base.yaml
+
+properties:
+  i2s:
+    type: phandle
+    required: true
+    description: ESP32-S3 I2S controller used for PDM reception
+
+  power-gpios:
+    type: phandle-array
+    required: true
+    description: Active-high M5IOE1 microphone power enable
+
+  sample-rate-hz:
+    type: int
+    required: true
+    description: PCM output sample rate
+
+  power-on-delay-ms:
+    type: int
+    default: 20
+    description: Delay after changing microphone power

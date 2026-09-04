@@ -1,0 +1,20 @@
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.1
+      import:
+        name-allowlist:
+          - fatfs
+          - hal_espressif
+          - lvgl
+          - mbedtls
+          - mcuboot
+          - tf-psa-crypto
+
+  self:
+    path: zephyr-mono

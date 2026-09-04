@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+
+description: PaperMono IP2315 USB fast battery charger with gated I2C access
+
+compatible: "m5stack,papermono-ip2315"
+
+include: [i2c-device.yaml]
+
+properties:
+  enable-gpios:
+    type: phandle-array
+    required: true
+    description: Gate that connects the charger to the shared I2C bus
+
+  pmic:
+    type: phandle
+    required: true
+    description: M5PM1 device used to determine the active power source

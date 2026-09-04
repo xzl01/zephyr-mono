@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Bosch BMI270 using the base feature configuration.  This configuration is
+  required for the any-motion feature routed through INT1.
+
+compatible: "bosch,bmi270-base"
+
+include: [i2c-device.yaml, "bosch,bmi270.yaml"]
