@@ -1,20 +1,18 @@
 /* SPDX-License-Identifier: MIT */
 
-/*
- * PAPERMONO MONO EDITORIAL UI CONTRACT
- * THESIS: Daily information reads like a hand-made monochrome zine; refuse the
- * repeated card dashboard while letting a strict 3 x 3 launcher grid carry a
- * different editorial composition in every cell.
- * OWN-WORLD: Pure paper and ink, oversized numerals, ruled lists, dot matrices,
- * short ink tabs, aligned rules, and one licensed ink-cat mark.
- * STORY: Read time and battery, resume a book, scan the next event and tasks, then
- * enter a function through its own visual grammar.
- * FIRST VIEWPORT: A borderless 96 px clock, open outlined reading field, ruled
- * agenda, crossed task list, and uneven bottom controls fill the 480 x 800 page.
- * FORM: User-pinned monochrome editorial collage, direct reference override,
- * seed 9baf230e.
- * FINISH: unreviewed and undocumented is unfinished; this build ends with the finish
- * review, the verdict, DESIGN.md, and every shipping raster carrying its provenance.
+/* THESIS: Extend the approved Field Notes paper interface to every device page.
+ * OWN-WORLD: White I1 paper, black serif 48px titles and 24px primary text,
+ * 40px empty-state titles, 16px metadata, ruled lists, original outline icons and square action buttons.
+ * STORY: Read local content, see actual device state, and operate familiar
+ * controls with explicit confirmation and a consistent way back.
+ * FIRST VIEWPORT: 22px side margins; brand/date at 18px, title at 58px,
+ * rule at 116px, content from 148px, return footer from 724px. Reader keeps
+ * its approved quiet chrome. Visible geometry also drives hit testing.
+ * FORM: Approved reference series field-notes-expanded/field-notes-remaining;
+ * fixed 480x800 portrait Zephyr/LVGL, no gray, motion or simulated live data.
+ * FINISH: unreviewed and undocumented is unfinished; this build ends with the
+ * finish review, the verdict, DESIGN.md, and every shipping raster carrying
+ * its provenance.
  */
 
 #include <errno.h>
@@ -56,22 +54,60 @@
 #include <papermono/sync.h>
 #include <papermono/touch_gesture.h>
 #include <papermono/ui.h>
+#include <papermono/ui_layout.h>
 #include <papermono/weread.h>
 
 LOG_MODULE_REGISTER(papermono_ui, LOG_LEVEL_INF);
 
 LV_FONT_DECLARE(papermono_cjk_16);
-LV_FONT_DECLARE(papermono_digits_58);
-LV_FONT_DECLARE(papermono_digits_96);
-LV_FONT_DECLARE(papermono_titles_28);
-LV_IMAGE_DECLARE(papermono_cat_64);
+LV_FONT_DECLARE(papermono_clock_148);
+LV_FONT_DECLARE(papermono_reading_24);
+LV_FONT_DECLARE(papermono_heading_48);
+LV_FONT_DECLARE(papermono_state_40);
+LV_IMAGE_DECLARE(papermono_icon_library);
+LV_IMAGE_DECLARE(papermono_icon_weread);
+LV_IMAGE_DECLARE(papermono_icon_calendar);
+LV_IMAGE_DECLARE(papermono_icon_tasks);
+LV_IMAGE_DECLARE(papermono_icon_notes);
+LV_IMAGE_DECLARE(papermono_icon_remote);
+LV_IMAGE_DECLARE(papermono_icon_content);
+LV_IMAGE_DECLARE(papermono_icon_info);
+LV_IMAGE_DECLARE(papermono_icon_tools);
+LV_IMAGE_DECLARE(papermono_icon_settings);
+LV_IMAGE_DECLARE(papermono_icon_power);
+LV_IMAGE_DECLARE(papermono_icon_sleep);
+LV_IMAGE_DECLARE(papermono_icon_bookmark);
+LV_IMAGE_DECLARE(papermono_icon_document);
+LV_IMAGE_DECLARE(papermono_icon_wifi);
+LV_IMAGE_DECLARE(papermono_icon_bluetooth);
+LV_IMAGE_DECLARE(papermono_icon_restore);
+LV_IMAGE_DECLARE(papermono_icon_book_small);
+LV_IMAGE_DECLARE(papermono_icon_headphones_small);
+LV_IMAGE_DECLARE(papermono_icon_bookmark_small);
+LV_IMAGE_DECLARE(papermono_icon_settings_small);
+LV_IMAGE_DECLARE(papermono_icon_sun_small);
+LV_IMAGE_DECLARE(papermono_icon_toc_small);
+LV_IMAGE_DECLARE(papermono_icon_return_small);
+LV_IMAGE_DECLARE(papermono_icon_library_small);
+LV_IMAGE_DECLARE(papermono_icon_document_small);
+LV_IMAGE_DECLARE(papermono_icon_info_small);
+LV_IMAGE_DECLARE(papermono_icon_library_focal);
+LV_IMAGE_DECLARE(papermono_icon_weread_focal);
+LV_IMAGE_DECLARE(papermono_icon_calendar_focal);
+LV_IMAGE_DECLARE(papermono_icon_tasks_focal);
+LV_IMAGE_DECLARE(papermono_icon_document_focal);
+LV_IMAGE_DECLARE(papermono_icon_bookmark_focal);
 
-#define UI_WIDTH  480
-#define UI_HEIGHT 800
-#define UI_HEADER_HEIGHT 72
-#define UI_FOOTER_TOP 742
+#define UI_WIDTH PAPERMONO_UI_WIDTH
+#define UI_HEIGHT PAPERMONO_UI_HEIGHT
+#define UI_HEADER_HEIGHT PAPERMONO_UI_HEADER_HEIGHT
+#define UI_FOOTER_TOP PAPERMONO_UI_FOOTER_TOP
 #define UI_TOUCH_ACTION_COOLDOWN_MS 120U
 #define UI_CARD_RADIUS 0
+/* LV_LABEL_LONG_DOT reserves three dot cells before it shortens a string, so a
+ * lane sized to the bare advance still loses characters on a 1-bit panel.
+ */
+#define UI_DOT_RESERVE 24
 
 static const lv_color_t ink = LV_COLOR_MAKE(0x00, 0x00, 0x00);
 static const lv_color_t paper = LV_COLOR_MAKE(0xFF, 0xFF, 0xFF);
@@ -154,6 +190,7 @@ struct library_ui_state {
 };
 
 static struct library_ui_state library_state PAPERMONO_LARGE_BSS;
+static bool library_resume_requested;
 static struct papermono_note note_view PAPERMONO_LARGE_BSS;
 
 enum confirmation_kind {
@@ -169,12 +206,15 @@ static struct papermono_app_router app_router;
 static lv_obj_t *clock_label;
 static lv_obj_t *footer_label;
 static enum confirmation_kind confirmation;
+static enum papermono_app_id confirmation_origin = PAPERMONO_APP_POWER;
 static int power_last_error;
 static int frontlight_last_error;
 static int64_t last_activity_ms;
 static int64_t last_refresh_ms;
 
 static void request_redraw(struct papermono_app_command *command);
+static void read_snapshot(struct papermono_ui_snapshot *snapshot);
+static void make_chevron(lv_obj_t *screen, int32_t x, int32_t y);
 
 #if defined(CONFIG_PAPERMONO_INTERACTIVE_UI)
 static const struct device *const touch = DEVICE_DT_GET(DT_CHOSEN(zephyr_touch));
@@ -197,7 +237,7 @@ static bool deferred_touch_valid;
 K_MSGQ_DEFINE(ui_events, sizeof(struct papermono_app_event), 12, 4);
 #endif
 
-#define UI_FIXED_LINE_CAPACITY 32U
+#define UI_FIXED_LINE_CAPACITY 96U
 static lv_point_precise_t ui_fixed_line_points[UI_FIXED_LINE_CAPACITY][2];
 static size_t ui_fixed_line_count;
 
@@ -276,53 +316,6 @@ static lv_obj_t *make_fixed_line(lv_obj_t *parent, int32_t x1, int32_t y1,
 	return line;
 }
 
-static void make_dot_row(lv_obj_t *parent, int32_t x, int32_t y,
-	uint8_t count, uint8_t filled, int32_t size, int32_t gap)
-{
-	for (uint8_t index = 0U; index < count; ++index) {
-		lv_obj_t *dot;
-
-		if (index < filled) {
-			dot = make_ink_shape(parent, x + index * (size + gap), y,
-				size, size, ink, size / 2);
-		} else {
-			dot = make_outline_shape(parent,
-				x + index * (size + gap), y, size, size, 2,
-				size / 2);
-		}
-		ARG_UNUSED(dot);
-	}
-}
-
-/* Launcher matrices use one crisp dashed rule per row instead of allocating a
- * separate LVGL object per mark. This keeps the dense 3 x 3 page inside the
- * 32 KiB LVGL heap while preserving the reference's rhythmic dot-grid motif.
- */
-static void make_square_mark_row(lv_obj_t *parent, int32_t x, int32_t y,
-	uint8_t count, int32_t size, int32_t gap, lv_color_t color)
-{
-	const int32_t period = size + gap;
-	/* LVGL phases dashes from the absolute x coordinate.  Snap the requested
-	 * origin to that phase so both ends are complete squares instead of a
-	 * truncated terminal stroke on the 1-bit framebuffer.
-	 */
-	const int32_t aligned_x = ((x + period / 2) / period) * period;
-	const int32_t end_x = aligned_x + (count - 1) * period + size;
-
-	(void)make_fixed_line(parent, aligned_x, y + size / 2, end_x,
-		y + size / 2, size, size, gap, color);
-}
-
-static void make_centered_square_mark_row(lv_obj_t *parent, int32_t x,
-	int32_t width, int32_t y, uint8_t count, int32_t size, int32_t gap,
-	lv_color_t color)
-{
-	const int32_t row_width = count * size + (count - 1) * gap;
-
-	make_square_mark_row(parent, x + (width - row_width) / 2, y,
-		count, size, gap, color);
-}
-
 static void make_checkbox(lv_obj_t *parent, int32_t x, int32_t y,
 	bool checked)
 {
@@ -352,20 +345,7 @@ static lv_obj_t *make_chinese_label(lv_obj_t *parent, const char *text)
 	return make_label(parent, text, &papermono_cjk_16, ink);
 }
 
-static lv_obj_t *make_card(lv_obj_t *parent, int32_t x, int32_t y,
-	int32_t width, int32_t height)
-{
-	lv_obj_t *card = lv_obj_create(parent);
 
-	lv_obj_set_pos(card, x, y);
-	lv_obj_set_size(card, width, height);
-	set_box_style(card, paper, 2, UI_CARD_RADIUS);
-	/* A single square-ended brush rule gives legacy detail panels the shared
-	 * monochrome editorial character without adding canvas buffers.
-	 */
-	(void)make_ink_shape(card, 16, 0, 42, 6, ink, 0);
-	return card;
-}
 
 /* Abbreviated TF state for the shared header row; the full sentence is used
  * on the pages that have room for it.
@@ -416,49 +396,161 @@ static void format_connectivity_status(char *status, size_t status_size)
 
 static void make_header(lv_obj_t *screen, const char *title)
 {
-	lv_obj_t *header = lv_obj_create(screen);
+	struct papermono_ui_snapshot snapshot;
+	char date[48];
 	lv_obj_t *label;
-	char status[48];
-
-	format_connectivity_status(status, sizeof(status));
-
-	lv_obj_set_pos(header, 0, 0);
-	lv_obj_set_size(header, UI_WIDTH, UI_HEADER_HEIGHT);
-	set_box_style(header, paper, 0, 0);
-	/* Paper dominates every detail page.  A short rule carries the editorial
-	 * identity without forcing a full black-to-white refresh on navigation.
-	 */
-	(void)make_ink_shape(header, 18, 10, 6, 34, ink, 0);
-	(void)make_ink_shape(header, 18, 54, 266, 2, ink, 0);
-	label = make_label(header, title, &papermono_cjk_16,
-		ink);
-	lv_obj_set_pos(label, 38, 17);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 244, 24);
-	/* The custom CJK font is 1 bpp and also contains ASCII.  Using it for
-	 * small status text avoids the broken hairlines produced when LVGL's
-	 * antialiased Montserrat 14 is thresholded onto a 1-bit framebuffer.
-	 */
-	label = make_label(header, status, &papermono_cjk_16, ink);
-	lv_obj_set_pos(label, 286, 15);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 180, 24);
+	read_snapshot(&snapshot);
+	if (snapshot.rtc_valid) {
+		static const char *const days[] = {"周日","周一","周二","周三","周四","周五","周六"};
+		(void)snprintf(date, sizeof(date), "%02d月%02d日 %s",
+			snapshot.time.tm_mon + 1, snapshot.time.tm_mday,
+			days[CLAMP(snapshot.time.tm_wday, 0, 6)]);
+	} else {
+		(void)snprintf(date, sizeof(date), "时钟尚未校准");
+	}
+	label = make_label(screen, "PAPERMONO", &lv_font_montserrat_18, ink);
+	lv_obj_set_pos(label, 22, 18);
+	label = make_chinese_label(screen, date);
+	lv_obj_set_pos(label, 242, 18);
+	lv_obj_set_size(label, 216, 24);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-	(void)make_ink_shape(header, 286, 48, 172, 2, ink, 0);
+	label = make_label(screen, title, &papermono_heading_48, ink);
+	lv_obj_set_pos(label, 22, 58);
+	lv_obj_set_size(label, 436, 54);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	(void)make_ink_shape(screen, 22, 116, 436, 1, ink, 0);
 }
 
 static void make_footer(lv_obj_t *screen, const char *hint)
 {
-	lv_obj_t *line = lv_obj_create(screen);
-
-	lv_obj_set_pos(line, 0, UI_FOOTER_TOP);
-	lv_obj_set_size(line, UI_WIDTH, 2);
-	set_box_style(line, ink, 0, 0);
-	(void)make_ink_shape(screen, 22, 760, 42, 4, ink, 0);
+	(void)make_ink_shape(screen, 22, UI_DETAIL_FOOTER_TOP, 436, 1, ink, 0);
+	(void)make_fixed_line(screen, 29, 750, 22, 757, 2, 0, 0, ink);
+	(void)make_fixed_line(screen, 22, 757, 29, 764, 2, 0, 0, ink);
+	lv_obj_t *label = make_label(screen, "返回", &papermono_reading_24, ink);
+	lv_obj_set_pos(label, 42, 742);
+	lv_obj_set_size(label, 80, 34);
 	footer_label = make_chinese_label(screen, hint);
-	lv_obj_set_pos(footer_label, 78, 756);
-	lv_label_set_long_mode(footer_label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(footer_label, 380, 24);
+	lv_obj_set_pos(footer_label, 138, 738);
+	lv_obj_set_size(footer_label, 320, 48);
+	lv_label_set_long_mode(footer_label, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_align(footer_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+}
+
+
+/* Shared ruled detail components: only actual buttons receive a border. */
+static lv_obj_t *detail_text(lv_obj_t *parent, const char *text,
+	int32_t x, int32_t y, int32_t width, int32_t height, bool primary)
+{
+	lv_obj_t *label = make_label(parent, text,
+		primary ? &papermono_reading_24 : &papermono_cjk_16, ink);
+	lv_obj_set_pos(label, x, y);
+	lv_obj_set_size(label, width, height);
+	lv_label_set_long_mode(label, height > 34 ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
+	return label;
+}
+
+static lv_obj_t *detail_row(lv_obj_t *screen, const struct papermono_rect *rect,
+	const char *title, const char *meta, bool selected, bool arrow)
+{
+	lv_obj_t *row = lv_obj_create(screen);
+	lv_obj_set_pos(row, rect->x, rect->y);
+	lv_obj_set_size(row, rect->width, rect->height);
+	set_box_style(row, paper, 0, 0);
+	(void)make_ink_shape(row, 0, rect->height - 1, rect->width, 1, ink, 0);
+	if (selected) {
+		(void)make_ink_shape(row, 0, 10, 4, rect->height - 26, ink, 0);
+	}
+	(void)detail_text(row, title, 14, 10, rect->width - (arrow ? 52 : 28), 34, true);
+	if (meta != NULL && meta[0] != '\0') {
+		(void)detail_text(row, meta, 14, rect->height >= 96 ? 52 : 43,
+			rect->width - 28, rect->height >= 96 ? 44 : 24, false);
+	}
+	if (arrow) {
+		make_chevron(row, rect->width - 18, 20);
+	}
+	return row;
+}
+
+static void detail_button(lv_obj_t *screen, const struct papermono_rect *rect,
+	const char *text, bool primary)
+{
+	lv_obj_t *button = make_outline_shape(screen, rect->x, rect->y,
+		rect->width, rect->height, primary ? 2 : 1, 0);
+	lv_obj_t *label = make_label(button, text, &papermono_reading_24, ink);
+	lv_obj_set_width(label, rect->width - 24);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	lv_obj_center(label);
+}
+
+static void detail_image_at(lv_obj_t *parent, const lv_image_dsc_t *icon, int32_t x, int32_t y)
+{
+	lv_obj_t *image = lv_image_create(parent);
+	lv_image_set_src(image, icon);
+	lv_obj_set_style_image_recolor(image, ink, LV_PART_MAIN);
+	lv_obj_set_style_image_recolor_opa(image, LV_OPA_COVER, LV_PART_MAIN);
+	lv_obj_set_pos(image, x, y);
+}
+
+static void detail_icon(lv_obj_t *screen, const lv_image_dsc_t *icon, int32_t y)
+{
+	detail_image_at(screen, icon, (UI_WIDTH - icon->header.w) / 2, y);
+}
+
+static void detail_state_title(lv_obj_t *screen, const char *title, int32_t y)
+{
+	lv_obj_t *label = make_label(screen, title, &papermono_state_40, ink);
+	lv_obj_set_pos(label, 22, y);
+	lv_obj_set_size(label, 436, 50);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+}
+
+static void detail_empty(lv_obj_t *screen, const lv_image_dsc_t *icon,
+	const char *title, const char *body)
+{
+	detail_icon(screen, icon, 180);
+	detail_state_title(screen, title, 384);
+	lv_obj_t *label = detail_text(screen, body, 32, 450, 416, 64, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+}
+
+static lv_obj_t *detail_icon_row(lv_obj_t *screen, const struct papermono_rect *rect,
+	const lv_image_dsc_t *icon, const char *title, const char *meta, bool selected, bool arrow)
+{
+	lv_obj_t *row = detail_row(screen, rect, "", NULL, selected, arrow);
+	detail_image_at(row, icon, 14, 12);
+	(void)detail_text(row, title, 76, 10, rect->width - (arrow ? 114 : 90), 34, true);
+	if (meta && meta[0]) (void)detail_text(row, meta, 76, rect->height >= 96 ? 52 : 43,
+		rect->width - 90, rect->height >= 96 ? 44 : 24, false);
+	return row;
+}
+
+static void detail_power_option(lv_obj_t *screen, const struct papermono_rect *rect,
+	const lv_image_dsc_t *icon, const char *title, const char *body)
+{
+	lv_obj_t *row = detail_row(screen, rect, "", NULL, false, true);
+	detail_image_at(row, icon, 8, 26);
+	(void)detail_text(row, title, 128, 28, 276, 38, true);
+	(void)detail_text(row, body, 128, 82, 294, 66, false);
+}
+
+static void detail_number(lv_obj_t *screen, const char *value, int32_t x, int32_t y, int32_t width)
+{
+	lv_obj_t *label = make_label(screen, value, &papermono_heading_48, ink);
+	lv_obj_set_pos(label, x, y);
+	lv_obj_set_size(label, width, 58);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+}
+
+static void detail_section(lv_obj_t *screen, int32_t y, const char *title)
+{
+	(void)detail_text(screen, title, 22, y, 436, 30, true);
+}
+
+static void detail_value(lv_obj_t *screen, int32_t y, const char *key, const char *value)
+{
+	(void)detail_text(screen, key, 22, y, 200, 30, false);
+	lv_obj_t *label = detail_text(screen, value, 226, y, 232, 30, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 }
 
 static void format_voltage(char *buffer, size_t length, bool valid,
@@ -515,104 +607,34 @@ static const char *reader_density_name(enum papermono_reader_density density)
 		density == PAPERMONO_READER_DENSITY_RELAXED ? "宽松" : "标准";
 }
 
-static void reader_visual_layout(enum papermono_reader_density density,
-	int32_t *margin, int32_t *line_space)
+
+
+
+
+static void make_navigation(lv_obj_t *screen, enum papermono_app_id active)
 {
-	if (density == PAPERMONO_READER_DENSITY_COMPACT) {
-		*margin = 16;
-		*line_space = 2;
-	} else if (density == PAPERMONO_READER_DENSITY_RELAXED) {
-		*margin = 32;
-		*line_space = 8;
-	} else {
-		*margin = 22;
-		*line_space = 4;
+	static const char *const titles[] = { "首页", "应用", "设置" };
+
+	(void)make_ink_shape(screen, 0, UI_NAV_TOP, UI_WIDTH, 1, ink, 0);
+	for (size_t index = 0; index < ARRAY_SIZE(navigation_regions); ++index) {
+		const struct papermono_rect *rect = &navigation_regions[index].rect;
+		lv_obj_t *label = make_label(screen, titles[index], &papermono_reading_24, ink);
+
+		lv_obj_set_pos(label, rect->x, rect->y + 20);
+		lv_obj_set_size(label, rect->width, 34);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		if (navigation_regions[index].action == active) {
+			(void)make_ink_shape(screen, rect->x + 56, rect->y + 60,
+				48, 4, ink, 0);
+		}
 	}
 }
 
-static void add_card_text_tone(lv_obj_t *card, const char *title,
-	const char *body, const char *meta, lv_color_t color)
+static void make_chevron(lv_obj_t *screen, int32_t x, int32_t y)
 {
-	int32_t width;
-	int32_t height;
-	int32_t body_y;
-	int32_t body_height;
-	bool compact_meta;
-	lv_obj_t *label;
-
-	/* LVGL resolves object coordinates lazily. Reading a newly-created card's
-	 * width or height before a layout pass returns zero, which collapses the
-	 * body label and places metadata above the card. The title happened not to
-	 * depend on those values, making the cards look half-rendered.
-	 */
-	lv_obj_update_layout(card);
-	width = MAX(lv_obj_get_width(card) - 32, 1);
-	height = lv_obj_get_height(card);
-	compact_meta = meta != NULL && height <= 120;
-
-	label = make_label(card, title, &papermono_cjk_16, color);
-	lv_obj_set_pos(label, 16, 12);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, width, 22);
-	if (compact_meta) {
-		lv_obj_set_width(label, MAX(width / 2 - 8, 1));
-	}
-	if (height <= 72) {
-		const int32_t title_width = MAX((width * 2) / 5, 1);
-
-		lv_obj_set_size(label, title_width, 22);
-		label = make_label(card, body, &papermono_cjk_16, color);
-		lv_obj_set_pos(label, 24 + title_width, 12);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, MAX(width - title_width - 8, 1), 22);
-		return;
-	}
-	label = make_label(card, body, &papermono_cjk_16, color);
-	body_y = compact_meta ? 44 : 47;
-	body_height = compact_meta ? height - body_y - 8 :
-		meta != NULL ? height - 32 - body_y : height - body_y - 10;
-	lv_obj_set_pos(label, 16, body_y);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-	lv_obj_set_size(label, width, MAX(body_height, 1));
-	if (meta != NULL) {
-		label = make_label(card, meta, &papermono_cjk_16, color);
-		lv_obj_set_pos(label, compact_meta ? 16 + width / 2 : 16,
-			compact_meta ? 12 : height - 28);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, compact_meta ? MAX(width / 2, 1) : width,
-			18);
-	}
+	(void)make_fixed_line(screen, x, y, x + 7, y + 7, 2, 0, 0, ink);
+	(void)make_fixed_line(screen, x + 7, y + 7, x, y + 14, 2, 0, 0, ink);
 }
-
-static void add_card_text(lv_obj_t *card, const char *title,
-	const char *body, const char *meta)
-{
-	add_card_text_tone(card, title, body, meta, ink);
-}
-
-enum home_region_index {
-	HOME_REGION_READER,
-	HOME_REGION_CALENDAR,
-	HOME_REGION_TASKS,
-	HOME_REGION_LAUNCHER,
-	HOME_REGION_SYSTEM,
-	HOME_REGION_POWER,
-};
-
-static const struct papermono_interaction_region home_regions[] = {
-	[HOME_REGION_READER] = { { 18, 194, 444, 176 },
-		PAPERMONO_APP_LIBRARY, 0, PAPERMONO_INTERACTION_TAP },
-	[HOME_REGION_CALENDAR] = { { 18, 394, 444, 112 },
-		PAPERMONO_APP_CALENDAR, 0, PAPERMONO_INTERACTION_TAP },
-	[HOME_REGION_TASKS] = { { 18, 522, 444, 104 },
-		PAPERMONO_APP_TASKS, 0, PAPERMONO_INTERACTION_TAP },
-	[HOME_REGION_LAUNCHER] = { { 18, 644, 252, 88 },
-		PAPERMONO_APP_LAUNCHER, 0, PAPERMONO_INTERACTION_TAP },
-	[HOME_REGION_SYSTEM] = { { 278, 644, 88, 88 },
-		PAPERMONO_APP_SYSTEM, 0, PAPERMONO_INTERACTION_TAP },
-	[HOME_REGION_POWER] = { { 374, 644, 88, 88 },
-		PAPERMONO_APP_POWER, 0, PAPERMONO_INTERACTION_TAP },
-};
 
 enum launcher_motif {
 	LAUNCHER_MOTIF_LIBRARY,
@@ -634,17 +656,6 @@ struct launcher_layout_item {
 };
 
 #define LAUNCHER_PAGE_SIZE 9U
-
-static const struct papermono_interaction_grid_layout launcher_grid = {
-	.x = 18,
-	.y = 112,
-	.cell_width = 148,
-	.cell_height = 210,
-	.column_gap = 0,
-	.row_gap = 0,
-	.columns = 3,
-	.rows = 3,
-};
 
 static const struct launcher_layout_item launcher_items[] = {
 	{ PAPERMONO_APP_LIBRARY, LAUNCHER_MOTIF_LIBRARY },
@@ -676,275 +687,150 @@ static int render_home(void *context, lv_obj_t *screen)
 	struct papermono_ui_snapshot snapshot;
 	struct papermono_content_entry recent_book;
 	struct papermono_calendar_event next_event;
-	struct papermono_task active_task = { 0 };
-	struct papermono_task completed_task = { 0 };
-	const struct papermono_rect *reader =
-		&home_regions[HOME_REGION_READER].rect;
-	const struct papermono_rect *calendar =
-		&home_regions[HOME_REGION_CALENDAR].rect;
-	const struct papermono_rect *tasks =
-		&home_regions[HOME_REGION_TASKS].rect;
+	const struct papermono_rect *reader = &home_regions[HOME_REGION_READER].rect;
+	const struct papermono_rect *calendar = &home_regions[HOME_REGION_CALENDAR].rect;
+	const struct papermono_rect *tasks = &home_regions[HOME_REGION_TASKS].rect;
 	lv_obj_t *label;
-	lv_obj_t *button;
-	lv_obj_t *brand_mark;
 	char status[48];
 	char battery[16];
-	char event_time[16];
-	char event_date[24];
-	bool have_active_task = false;
-	bool have_completed_task = false;
 	const int recent_ret = papermono_reader_recent(&recent_book);
-	uint8_t reader_progress = 0U;
-	bool reader_progress_valid = false;
+	const bool progress_valid = recent_ret == 0 && library_state.reader.page_loaded &&
+		strcmp(library_state.reader.book.id, recent_book.id) == 0;
+	const uint8_t progress = progress_valid ? library_state.page.approximate_percent : 0;
 
 	ARG_UNUSED(context);
 	read_snapshot(&snapshot);
 	format_connectivity_status(status, sizeof(status));
-	format_voltage(battery, sizeof(battery), snapshot.battery_valid,
-		snapshot.battery_mv);
-
-	/* Reference-led masthead: a real icon, one wordmark and a hairline. */
-	brand_mark = lv_image_create(screen);
-	lv_image_set_src(brand_mark, &papermono_cat_64);
-	lv_obj_set_pos(brand_mark, 12, -4);
-	label = make_label(screen, "PAPER MONO", &lv_font_montserrat_18, ink);
-	lv_obj_set_pos(label, 74, 12);
+	format_voltage(battery, sizeof(battery), snapshot.battery_valid, snapshot.battery_mv);
+	label = make_label(screen, "PAPERMONO", &lv_font_montserrat_18, ink);
+	lv_obj_set_pos(label, 22, 14);
 	lv_obj_set_style_text_letter_space(label, 1, LV_PART_MAIN);
-	label = make_label(screen, status, &papermono_cjk_16, ink);
-	lv_obj_set_pos(label, 286, 13);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 176, 22);
+	label = make_chinese_label(screen, status);
+	lv_obj_set_pos(label, 184, 12);
+	lv_obj_set_size(label, 274, 22);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-	/* Keep the masthead rule clear of the cat silhouette. */
-	(void)make_fixed_line(screen, 74, 46, 462, 46, 2, 0, 0, ink);
+	label = make_chinese_label(screen, battery);
+	lv_obj_set_pos(label, 352, 38);
+	lv_obj_set_size(label, 106, 22);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 
-	clock_label = snapshot.rtc_valid ?
-		make_label(screen, "00:00", &papermono_digits_96, ink) :
-		make_label(screen, "TIME", &lv_font_montserrat_48, ink);
-	lv_obj_set_pos(clock_label, snapshot.rtc_valid ? 14 : 20,
-		snapshot.rtc_valid ? 45 : 72);
-	lv_obj_set_size(clock_label, 360, snapshot.rtc_valid ? 92 : 56);
 	label = make_chinese_label(screen, "时钟尚未校准");
-	lv_obj_set_pos(label, 20, snapshot.rtc_valid ? 150 : 134);
+	lv_obj_set_pos(label, 22, 66);
+	clock_label = make_label(screen, snapshot.rtc_valid ? "00:00" : "TIME",
+		snapshot.rtc_valid ? &papermono_clock_148 : &lv_font_montserrat_48, ink);
+	lv_obj_set_pos(clock_label, 18, snapshot.rtc_valid ? 94 : 120);
+	lv_obj_set_size(clock_label, 440, snapshot.rtc_valid ? 122 : 64);
 	if (snapshot.rtc_valid) {
+		static const char *const weekdays[] = {
+			"周日", "周一", "周二", "周三", "周四", "周五", "周六",
+		};
 		const struct papermono_preferences *prefs = papermono_settings_get();
 		int hour = snapshot.time.tm_hour;
-		const char *period = NULL;
-
+		const char *period = "";
 		if (!prefs->use_24_hour) {
-			period = hour >= 12 ? "PM" : "AM";
+			period = hour >= 12 ? " PM" : " AM";
 			hour %= 12;
 			hour = hour == 0 ? 12 : hour;
 		}
-		lv_label_set_text_fmt(clock_label, "%02d:%02d", hour,
-			snapshot.time.tm_min);
-		lv_label_set_text_fmt(label, "%04d / %02d / %02d  %s",
-			snapshot.time.tm_year + 1900, snapshot.time.tm_mon + 1,
-			snapshot.time.tm_mday, period == NULL ? "24H" : period);
+		lv_label_set_text_fmt(clock_label, "%02d:%02d", hour, snapshot.time.tm_min);
+		lv_label_set_text_fmt(label, "%02d月%02d日  %s%s",
+			snapshot.time.tm_mon + 1, snapshot.time.tm_mday,
+			snapshot.time.tm_wday >= 0 && snapshot.time.tm_wday < 7 ?
+			weekdays[snapshot.time.tm_wday] : "", period);
 	}
-	label = make_label(screen, battery, &lv_font_montserrat_18, ink);
-	lv_obj_set_pos(label, 374, 62);
-	lv_obj_set_size(label, 82, 24);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-	label = make_label(screen, "BATTERY", &lv_font_montserrat_14, ink);
-	lv_obj_set_pos(label, 388, 88);
-	(void)make_fixed_line(screen, 386, 112, 456, 112, 2, 0, 0, ink);
 
-	if (recent_ret == 0 && library_state.reader.page_loaded &&
-	    strcmp(library_state.reader.book.id, recent_book.id) == 0) {
-		reader_progress = library_state.page.approximate_percent;
-		reader_progress_valid = true;
-	}
-	(void)make_outline_shape(screen, reader->x, reader->y,
-		reader->width, reader->height, 2, 0);
-	(void)make_ink_shape(screen, reader->x + 310, reader->y,
-		2, reader->height, ink, 0);
-	button = make_outline_shape(screen, reader->x + 18, reader->y + 16,
-		72, 28, 2, 0);
-	label = make_label(button, "READ", &lv_font_montserrat_14, ink);
-	lv_obj_center(label);
-	label = make_label(screen, "最近阅读", &papermono_titles_28, ink);
-	lv_obj_set_pos(label, reader->x + 104, reader->y + 12);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 184, 34);
-	label = make_label(screen, recent_ret == 0 ? recent_book.title :
-		"还没有最近阅读", &papermono_cjk_16, ink);
-	lv_obj_set_pos(label, reader->x + 18, reader->y + 62);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 274, 44);
-	if (recent_ret == 0) {
-		label = make_label(screen,
-			recent_book.kind == PAPERMONO_CONTENT_EPUB ?
-			"EPUB · 最近阅读" : "TXT · 最近阅读",
-			&papermono_cjk_16, ink);
-		lv_obj_set_pos(label, reader->x + 18, reader->y + 116);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, 154, 22);
-	}
-	button = make_outline_shape(screen, reader->x + 188, reader->y + 132,
-		104, 34, 2, 0);
-	label = make_label(button, "打开书库", &papermono_cjk_16, ink);
-	lv_obj_center(label);
-
-	label = make_chinese_label(screen, "进度");
-	lv_obj_set_pos(label, 332, reader->y + 8);
-	lv_obj_set_size(label, 128, 22);
+	(void)make_ink_shape(screen, reader->x, reader->y, reader->width, 1, ink, 0);
+	label = make_label(screen, recent_ret == 0 ? "继续阅读" : "打开书库", &papermono_reading_24, ink);
+	lv_obj_set_pos(label, reader->x, reader->y + 18);
+	make_chevron(screen, reader->x + reader->width - 12, reader->y + 20);
+	/* An outlined text spine, not a fabricated book-cover image. */
+	(void)make_outline_shape(screen, reader->x, reader->y + 58, 88, 136, 2, 0);
+	(void)make_ink_shape(screen, reader->x + 10, reader->y + 58, 2, 136, ink, 0);
+	label = make_chinese_label(screen, recent_ret == 0 ?
+		(recent_book.kind == PAPERMONO_CONTENT_EPUB ? "EPUB" : "TXT") : "书库");
+	lv_obj_set_pos(label, reader->x + 20, reader->y + 112);
+	lv_obj_set_size(label, 60, 24);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-	if (reader_progress_valid) {
-		label = make_label(screen, "00", &papermono_digits_58, ink);
-		lv_obj_set_pos(label, 340, reader->y + 30);
-		lv_label_set_text_fmt(label, "%02u", reader_progress);
-		label = make_label(screen, "%", &lv_font_montserrat_28, ink);
-		lv_obj_set_pos(label, 424, reader->y + 60);
-		make_dot_row(screen, 346, reader->y + 128, 7U,
-			(uint8_t)CLAMP((reader_progress + 14U) / 15U, 0U, 7U),
-			10, 6);
+	label = make_label(screen, recent_ret == 0 ? recent_book.title : "还没有最近阅读", &papermono_reading_24, ink);
+	lv_obj_set_pos(label, reader->x + 112, reader->y + 66);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	lv_obj_set_size(label, reader->width - 112, 60);
+	label = make_chinese_label(screen, recent_ret == 0 ?
+		"轻触继续阅读" : "从内容中心导入书籍");
+	lv_obj_set_pos(label, reader->x + 112, reader->y + 132);
+	lv_obj_set_size(label, reader->width - 112, 24);
+	if (progress_valid) {
+		(void)make_ink_shape(screen, reader->x + 112, reader->y + 176, 244, 1, ink, 0);
+		if (progress > 0) {
+			(void)make_ink_shape(screen, reader->x + 112, reader->y + 174,
+				MAX(1, 244 * MIN(progress, 100) / 100), 4, ink, 0);
+		}
+		label = make_chinese_label(screen, "");
+		lv_label_set_text_fmt(label, "%u%%", progress);
 	} else {
-		label = make_chinese_label(screen,
-			recent_ret == 0 ? "已有记录" : "未开始");
-		lv_obj_set_pos(label, 332, reader->y + 64);
-		lv_obj_set_size(label, 128, 22);
-		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER,
-			LV_PART_MAIN);
+		label = make_chinese_label(screen, recent_ret == 0 ? "已有记录" : "未开始");
 	}
+	lv_obj_set_pos(label, reader->x + 364, reader->y + 166);
+	lv_obj_set_size(label, 72, 24);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 
 	const struct papermono_calendar_time now = {
-		.year = snapshot.time.tm_year + 1900,
-		.month = snapshot.time.tm_mon + 1,
-		.day = snapshot.time.tm_mday,
-		.hour = snapshot.time.tm_hour,
-		.minute = snapshot.time.tm_min,
-		.second = snapshot.time.tm_sec,
+		.year = snapshot.time.tm_year + 1900, .month = snapshot.time.tm_mon + 1,
+		.day = snapshot.time.tm_mday, .hour = snapshot.time.tm_hour,
+		.minute = snapshot.time.tm_min, .second = snapshot.time.tm_sec,
 	};
 	const bool have_event = snapshot.rtc_valid &&
 		papermono_organizer_get_next_event(&now, &next_event) == 0;
-	label = make_label(screen, "下一日程", &papermono_titles_28, ink);
-	lv_obj_set_pos(label, calendar->x, calendar->y);
-	label = make_label(screen, "NEXT", &lv_font_montserrat_14, ink);
-	lv_obj_set_pos(label, calendar->x + 144, calendar->y + 8);
-	(void)make_ink_shape(screen, calendar->x, calendar->y + 40,
-		calendar->width, 2, ink, 0);
+	(void)make_ink_shape(screen, calendar->x, calendar->y, calendar->width, 1, ink, 0);
+	label = make_label(screen, "下一日程", &papermono_reading_24, ink);
+	lv_obj_set_pos(label, calendar->x, calendar->y + 18);
+	make_chevron(screen, calendar->x + calendar->width - 12, calendar->y + 20);
 	if (have_event) {
-		(void)snprintf(event_date, sizeof(event_date), "%04d/%02u/%02u",
-			next_event.start.year, next_event.start.month,
-			next_event.start.day);
-		label = make_label(screen, event_date, &lv_font_montserrat_14, ink);
-		lv_obj_set_pos(label, calendar->x + 328, calendar->y + 8);
-		(void)snprintf(event_time, sizeof(event_time), "%02u:%02u",
-			next_event.start.hour, next_event.start.minute);
-		button = make_outline_shape(screen, calendar->x + 4,
-			calendar->y + 56, 78, 48, 2, 0);
-		label = make_label(button, event_time, &lv_font_montserrat_18, ink);
-		lv_obj_center(label);
-		label = make_label(screen, next_event.title, &papermono_cjk_16, ink);
-		lv_obj_set_pos(label, calendar->x + 104, calendar->y + 60);
+		(void)make_ink_shape(screen, calendar->x + 6, calendar->y + 60, 3, 34, ink, 0);
+		label = make_chinese_label(screen, "");
+		lv_label_set_text_fmt(label, "%02u:%02u", next_event.start.hour, next_event.start.minute);
+		lv_obj_set_pos(label, calendar->x + 24, calendar->y + 66);
+		label = make_chinese_label(screen, next_event.title);
+		lv_obj_set_pos(label, calendar->x + 128, calendar->y + 66);
 		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, 324, 22);
+		lv_obj_set_size(label, calendar->width - 128, 24);
+		/* Keep tomorrow's event distinguishable from today's. */
+		if (next_event.start.year != now.year || next_event.start.month != now.month ||
+		    next_event.start.day != now.day) {
+			label = make_chinese_label(screen, "");
+			lv_label_set_text_fmt(label, "%04d/%02u/%02u", next_event.start.year,
+				next_event.start.month, next_event.start.day);
+			lv_obj_set_pos(label, calendar->x + 128, calendar->y + 92);
+		}
 	} else {
-		label = make_chinese_label(screen, snapshot.rtc_valid ?
-			"暂无日程" : "时间未校准");
-		lv_obj_set_pos(label, calendar->x + 4, calendar->y + 60);
-		label = make_chinese_label(screen, snapshot.rtc_valid ?
-			"从内容中心同步" : "校时后显示下一日程");
-		lv_obj_set_pos(label, calendar->x + 104, calendar->y + 60);
+		label = make_chinese_label(screen, snapshot.rtc_valid ? "暂无日程" : "校时后显示下一日程");
+		lv_obj_set_pos(label, calendar->x + 4, calendar->y + 66);
 	}
 
-	for (size_t index = 0U; index < papermono_organizer_task_count(); ++index) {
-		struct papermono_task candidate;
-
-		if (papermono_organizer_get_task(index, &candidate) < 0) {
+	(void)make_ink_shape(screen, tasks->x, tasks->y, tasks->width, 1, ink, 0);
+	label = make_label(screen, "待办", &papermono_reading_24, ink);
+	lv_obj_set_pos(label, tasks->x, tasks->y + 18);
+	make_chevron(screen, tasks->x + tasks->width - 12, tasks->y + 20);
+	size_t visible_tasks = 0;
+	for (size_t index = 0; index < papermono_organizer_task_count() && visible_tasks < 2; ++index) {
+		struct papermono_task task;
+		if (papermono_organizer_get_task(index, &task) < 0 || task.done) {
 			continue;
 		}
-		if (!candidate.done && !have_active_task) {
-			active_task = candidate;
-			have_active_task = true;
-		} else if (candidate.done && !have_completed_task) {
-			completed_task = candidate;
-			have_completed_task = true;
-		}
-		if (have_active_task && have_completed_task) {
-			break;
-		}
+		const int32_t y = tasks->y + 60 + visible_tasks * 40;
+		make_checkbox(screen, tasks->x + 4, y, false);
+		label = make_label(screen, task.title, &papermono_reading_24, ink);
+		lv_obj_set_pos(label, tasks->x + 40, y);
+		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+		lv_obj_set_size(label, tasks->width - 40, 34);
+		++visible_tasks;
 	}
-	label = make_label(screen, "待办", &papermono_titles_28, ink);
-	lv_obj_set_pos(label, tasks->x, tasks->y);
-	label = make_label(screen, "TO DO", &lv_font_montserrat_14, ink);
-	lv_obj_set_pos(label, tasks->x + 144, tasks->y + 8);
-	(void)make_ink_shape(screen, tasks->x, tasks->y + 40,
-		tasks->width, 2, ink, 0);
-	if (have_active_task) {
-		make_checkbox(screen, tasks->x + 4, tasks->y + 46, false);
+	if (visible_tasks == 0) {
+		label = make_chinese_label(screen, papermono_organizer_task_count() > 0 ?
+			"所有待办已完成" : "没有未完成待办");
+		lv_obj_set_pos(label, tasks->x + 4, tasks->y + 60);
 	}
-	label = make_label(screen, have_active_task ? active_task.title :
-		have_completed_task ? "所有待办已完成" : "没有未完成待办",
-		&papermono_cjk_16, ink);
-	lv_obj_set_pos(label, tasks->x + (have_active_task ? 36 : 4),
-		tasks->y + 46);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 392, 22);
-	(void)make_ink_shape(screen, tasks->x + (have_active_task ? 36 : 4),
-		tasks->y + 72, tasks->width - (have_active_task ? 36 : 4),
-		1, ink, 0);
-	if (have_completed_task) {
-		make_checkbox(screen, tasks->x + 4, tasks->y + 78, true);
-	}
-	label = make_label(screen, have_completed_task ? completed_task.title :
-		"轻触查看全部待办", &papermono_cjk_16, ink);
-	lv_obj_set_pos(label, tasks->x + (have_completed_task ? 36 : 4),
-		tasks->y + 78);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label,
-		tasks->width - (have_completed_task ? 36 : 4), 22);
-	if (have_completed_task) {
-		(void)make_fixed_line(screen, tasks->x + 36, tasks->y + 90,
-			tasks->x + 280, tasks->y + 90, 4, 0, 0, ink);
-	}
-
-	const struct papermono_rect *launcher =
-		&home_regions[HOME_REGION_LAUNCHER].rect;
-	(void)make_outline_shape(screen, launcher->x, launcher->y,
-		launcher->width, launcher->height, 2, 0);
-	label = make_label(screen, "全部应用", &papermono_titles_28, ink);
-	lv_obj_set_pos(label, launcher->x + 16, launcher->y + 12);
-	label = make_label(screen, "00", &papermono_digits_58, ink);
-	lv_obj_set_pos(label, launcher->x + 176, launcher->y + 8);
-	lv_label_set_text_fmt(label, "%02u",
-		(unsigned int)ARRAY_SIZE(launcher_items));
-	button = make_outline_shape(screen, launcher->x + 16, launcher->y + 56,
-		104, 24, 2, 0);
-	label = make_label(button, "OPEN", &lv_font_montserrat_14, ink);
-	lv_obj_center(label);
-
-	const struct papermono_rect *system =
-		&home_regions[HOME_REGION_SYSTEM].rect;
-	(void)make_outline_shape(screen, system->x, system->y,
-		system->width, system->height, 2, 0);
-	label = make_chinese_label(screen, "系统");
-	lv_obj_set_pos(label, system->x + 28, system->y + 12);
-	(void)make_fixed_line(screen, system->x + 22, system->y + 48,
-		system->x + 66, system->y + 48, 2, 0, 0, ink);
-	(void)make_fixed_line(screen, system->x + 22, system->y + 60,
-		system->x + 54, system->y + 60, 4, 0, 0, ink);
-	(void)make_fixed_line(screen, system->x + 22, system->y + 74,
-		system->x + 78, system->y + 74, 2, 0, 0, ink);
-
-	const struct papermono_rect *power =
-		&home_regions[HOME_REGION_POWER].rect;
-	(void)make_outline_shape(screen, power->x, power->y,
-		power->width, power->height, 2, 0);
-	label = make_label(screen, "OFF", &lv_font_montserrat_28, ink);
-	lv_obj_set_pos(label, power->x, power->y + 12);
-	lv_obj_set_size(label, power->width, 34);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-	label = make_chinese_label(screen, "休眠");
-	lv_obj_set_pos(label, power->x, power->y + 52);
-	lv_obj_set_size(label, power->width, 22);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-
-	(void)make_fixed_line(screen, 18, 752, 462, 752, 1, 0, 0, ink);
-	footer_label = make_chinese_label(screen, "轻触打开 · 边缘右滑返回");
-	lv_obj_set_pos(footer_label, 18, 768);
-	lv_obj_set_size(footer_label, 444, 22);
+	make_navigation(screen, PAPERMONO_APP_HOME);
 	return 0;
 }
 
@@ -953,246 +839,66 @@ static void render_launcher_item(lv_obj_t *screen,
 	const struct papermono_rect *rect,
 	const struct papermono_ui_snapshot *snapshot)
 {
-	const struct papermono_app_descriptor *app =
-		find_app_descriptor(item->id);
-	lv_obj_t *label;
-	lv_obj_t *button;
-
+	static const lv_image_dsc_t *const icons[] = {
+		&papermono_icon_library, &papermono_icon_weread, &papermono_icon_calendar,
+		&papermono_icon_tasks, &papermono_icon_notes, &papermono_icon_remote,
+		&papermono_icon_content, &papermono_icon_info, &papermono_icon_tools,
+		&papermono_icon_settings, &papermono_icon_power,
+	};
+	const struct papermono_app_descriptor *app = find_app_descriptor(item->id);
 	if (app == NULL) {
 		return;
 	}
-	/* Every cell shares one title rail and one content baseline.  The motif may
-	 * vary below it, but its structure never drifts from the grid.
-	 */
-	label = make_label(screen, app->title, &papermono_titles_28, ink);
-	lv_obj_set_pos(label, rect->x + 12, rect->y + 12);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 124, 34);
-	(void)make_ink_shape(screen, rect->x + 12, rect->y + 52,
-		124, 2, ink, 0);
-	switch (item->motif) {
-	case LAUNCHER_MOTIF_LIBRARY: {
-		struct papermono_content_entry recent;
-		const int recent_ret = papermono_reader_recent(&recent);
-
-		label = make_label(screen, "READ", &lv_font_montserrat_18, ink);
-		lv_obj_set_pos(label, rect->x + 12, rect->y + 68);
-		for (uint8_t index = 0U; index < 3U; ++index) {
-			lv_obj_t *spine = make_outline_shape(screen,
-				rect->x + 72 + index * 20, rect->y + 68,
-				16, 64, 2, 0);
-
-			(void)make_ink_shape(spine, 3, 8, 10, 2, ink, 0);
-			(void)make_ink_shape(spine, 3, 52, 10, 2, ink, 0);
-		}
-		(void)make_ink_shape(screen, rect->x + 12, rect->y + 144,
-			120, 2, ink, 0);
-		label = make_label(screen, recent_ret == 0 ? recent.title :
-			"尚无最近阅读", &papermono_cjk_16, ink);
-		lv_obj_set_pos(label, rect->x + 12, rect->y + 172);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, 124, 24);
-		break;
-	}
-	case LAUNCHER_MOTIF_WEREAD:
-		(void)make_outline_shape(screen, rect->x + 12, rect->y + 68,
-			124, 48, 2, 0);
-		label = make_label(screen, "LOCAL", &lv_font_montserrat_18, ink);
-		lv_obj_set_pos(label, rect->x + 40, rect->y + 82);
-		label = make_chinese_label(screen, "本地书架");
-		lv_obj_set_pos(label, rect->x + 34, rect->y + 128);
-		make_centered_square_mark_row(screen, rect->x,
-			rect->width, rect->y + 172, 7U, 8, 6, ink);
-		break;
-	case LAUNCHER_MOTIF_CALENDAR: {
-		char day[4] = "--";
-
+	(void)make_outline_shape(screen, rect->x, rect->y, rect->width, rect->height, 1, 0);
+	lv_obj_t *image = lv_image_create(screen);
+	lv_image_set_src(image, icons[item->motif]);
+	lv_obj_set_style_image_recolor(image, ink, LV_PART_MAIN);
+	lv_obj_set_style_image_recolor_opa(image, LV_OPA_COVER, LV_PART_MAIN);
+	lv_obj_set_pos(image, rect->x + (rect->width - 96) / 2, rect->y + 22);
+	if (item->motif == LAUNCHER_MOTIF_CALENDAR) {
+		lv_obj_t *day = make_chinese_label(screen, "--");
 		if (snapshot->rtc_valid) {
-			(void)snprintf(day, sizeof(day), "%02d", snapshot->time.tm_mday);
+			lv_label_set_text_fmt(day, "%02d", snapshot->time.tm_mday);
 		}
-		label = make_label(screen, day, &papermono_digits_58, ink);
-		lv_obj_set_pos(label, rect->x + 12, rect->y + 64);
-		label = make_label(screen, "DAY", &lv_font_montserrat_14, ink);
-		lv_obj_set_pos(label, rect->x + 96, rect->y + 96);
-		make_square_mark_row(screen, rect->x + 16, rect->y + 144, 7U,
-			8, 6, ink);
-		make_centered_square_mark_row(screen, rect->x, rect->width,
-			rect->y + 172, snapshot->rtc_valid ? 6U : 3U,
-			8, snapshot->rtc_valid ? 6 : 4, ink);
-		break;
+		lv_obj_set_pos(day, rect->x, rect->y + 72);
+		lv_obj_set_size(day, rect->width, 34);
+		lv_obj_set_style_text_align(day, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 	}
-	case LAUNCHER_MOTIF_TASKS:
-		make_checkbox(screen, rect->x + 12, rect->y + 68, false);
-		(void)make_fixed_line(screen, rect->x + 42, rect->y + 78,
-			rect->x + 132, rect->y + 78, 2, 0, 0, ink);
-		make_checkbox(screen, rect->x + 12, rect->y + 104, false);
-		(void)make_fixed_line(screen, rect->x + 42, rect->y + 114,
-			rect->x + 128, rect->y + 114, 2, 0, 0, ink);
-		make_checkbox(screen, rect->x + 12, rect->y + 144, false);
-		(void)make_fixed_line(screen, rect->x + 42, rect->y + 154,
-			rect->x + 118, rect->y + 154, 2, 0, 0, ink);
-		break;
-	case LAUNCHER_MOTIF_NOTES:
-		(void)make_ink_shape(screen, rect->x + 12, rect->y + 68,
-			4, 104, ink, 0);
-		for (uint8_t index = 0U; index < 5U; ++index) {
-			(void)make_fixed_line(screen, rect->x + 32,
-				rect->y + 76 + index * 24, rect->x + 132,
-				rect->y + 76 + index * 24, index == 2U ? 4 : 2,
-				0, 0, ink);
-		}
-		break;
-	case LAUNCHER_MOTIF_REMOTE:
-		button = make_outline_shape(screen, rect->x + 40, rect->y + 68,
-			68, 24, 2, 0);
-		label = make_label(button, "HID", &lv_font_montserrat_14, ink);
-		lv_obj_center(label);
-		for (uint8_t index = 0U; index < 3U; ++index) {
-			lv_obj_t *key = make_outline_shape(screen,
-				rect->x + 10 + index * 44, rect->y + 104,
-				38, 44, index == 1U ? 4 : 2, 0);
-			label = make_label(key, index == 0U ? "<" :
-				index == 1U ? "II" : ">", &lv_font_montserrat_18,
-				ink);
-			lv_obj_center(label);
-		}
-		label = make_label(screen, "BLE HID", &lv_font_montserrat_18, ink);
-		lv_obj_set_pos(label, rect->x, rect->y + 172);
-		lv_obj_set_size(label, rect->width, 22);
-		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER,
-			LV_PART_MAIN);
-		break;
-	case LAUNCHER_MOTIF_CONTENT:
-		label = make_label(screen, "SYNC", &lv_font_montserrat_28, ink);
-		lv_obj_set_pos(label, rect->x, rect->y + 68);
-		lv_obj_set_size(label, rect->width, 34);
-		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER,
-			LV_PART_MAIN);
-		label = make_label(screen, "LOCAL / WIFI", &lv_font_montserrat_14, ink);
-		lv_obj_set_pos(label, rect->x, rect->y + 118);
-		lv_obj_set_size(label, rect->width, 20);
-		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER,
-			LV_PART_MAIN);
-		button = make_outline_shape(screen, rect->x + 26, rect->y + 160,
-			96, 24, 2, 0);
-		label = make_label(button, "UPLOAD", &lv_font_montserrat_14, ink);
-		lv_obj_center(label);
-		break;
-	case LAUNCHER_MOTIF_INFO: {
-		const size_t info_count = papermono_info_count();
-
-		label = make_label(screen, "00", &papermono_digits_58, ink);
-		lv_obj_set_pos(label, rect->x + 12, rect->y + 64);
-		lv_label_set_text_fmt(label, "%02u", (unsigned int)MIN(info_count,
-			(size_t)99U));
-		label = make_label(screen, "CARDS", &lv_font_montserrat_14, ink);
-		lv_obj_set_pos(label, rect->x + 96, rect->y + 96);
-		for (uint8_t index = 0U; index < 3U; ++index) {
-			(void)make_ink_shape(screen, rect->x + 12,
-				rect->y + 144 + index * 16,
-				120 - index * 20, 2, ink, 0);
-		}
-		break;
-	}
-	case LAUNCHER_MOTIF_TOOLS:
-		make_square_mark_row(screen, rect->x + 24, rect->y + 72, 6U,
-			10, 8, ink);
-		make_square_mark_row(screen, rect->x + 32, rect->y + 100, 5U,
-			10, 8, ink);
-		make_square_mark_row(screen, rect->x + 42, rect->y + 128, 4U,
-			10, 8, ink);
-		label = make_label(screen, "I2C / SPI", &lv_font_montserrat_14, ink);
-		lv_obj_set_pos(label, rect->x + 46, rect->y + 172);
-		break;
-	case LAUNCHER_MOTIF_SETTINGS:
-		for (uint8_t index = 0U; index < 3U; ++index) {
-			const int32_t y = rect->y + 76 + index * 40;
-
-			(void)make_fixed_line(screen, rect->x + 14, y,
-				rect->x + 132, y, 2, 0, 0, ink);
-			(void)make_ink_shape(screen,
-				rect->x + 38 + index * 32, y - 5,
-				10, 10, ink, 5);
-		}
-		break;
-	case LAUNCHER_MOTIF_POWER:
-		label = make_label(screen, "OFF", &lv_font_montserrat_48, ink);
-		lv_obj_set_pos(label, rect->x + 12, rect->y + 64);
-		label = make_label(screen, "SLEEP / POWER", &lv_font_montserrat_14,
-			ink);
-		lv_obj_set_pos(label, rect->x + 12, rect->y + 160);
-		(void)make_ink_shape(screen, rect->x + 12, rect->y + 186,
-			108, 4, ink, 0);
-		break;
-	}
+	/* The cell uses the same title the application registers, so the index
+	 * and the page it opens never disagree.
+	 */
+	lv_obj_t *label = make_label(screen, app->title, &papermono_reading_24, ink);
+	lv_obj_set_pos(label, rect->x + 4, rect->y + 138);
+	lv_obj_set_size(label, rect->width - 8, 34);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }
 
 static int render_launcher(void *context, lv_obj_t *screen)
 {
 	struct papermono_ui_snapshot snapshot;
 	struct papermono_rect rect;
-	lv_obj_t *label;
-	char status[48];
-	char page_text[12];
-	const size_t page_count =
-		(ARRAY_SIZE(launcher_items) + LAUNCHER_PAGE_SIZE - 1U) /
-		LAUNCHER_PAGE_SIZE;
+	const size_t page_count = (ARRAY_SIZE(launcher_items) + LAUNCHER_PAGE_SIZE - 1) / LAUNCHER_PAGE_SIZE;
 	const size_t first_item = launcher_page * LAUNCHER_PAGE_SIZE;
 
 	ARG_UNUSED(context);
 	read_snapshot(&snapshot);
-	format_connectivity_status(status, sizeof(status));
-	label = make_label(screen, "PAPER MONO / APP INDEX",
-		&lv_font_montserrat_14, ink);
-	lv_obj_set_pos(label, 18, 14);
-	lv_obj_set_style_text_letter_space(label, 1, LV_PART_MAIN);
-	label = make_label(screen, status, &papermono_cjk_16, ink);
-	lv_obj_set_pos(label, 238, 12);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 224, 22);
+	lv_obj_t *label = make_label(screen, "应用", &papermono_heading_48, ink);
+	lv_obj_set_pos(label, 22, 36);
+	label = make_chinese_label(screen, "");
+	lv_label_set_text_fmt(label, "%02u / %02u", (unsigned int)(launcher_page + 1), (unsigned int)page_count);
+	lv_obj_set_pos(label, 346, 48);
+	lv_obj_set_size(label, 112, 24);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-	label = make_label(screen, "应用", &papermono_titles_28, ink);
-	lv_obj_set_pos(label, 18, 50);
-	label = make_label(screen, "00", &lv_font_montserrat_28, ink);
-	lv_obj_set_pos(label, 366, 48);
-	lv_obj_set_size(label, 96, 34);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-	lv_label_set_text_fmt(label, "%02u",
-		(unsigned int)ARRAY_SIZE(launcher_items));
-	(void)make_ink_shape(screen, 18, 96, 444, 2, ink, 0);
-
-	(void)snprintf(page_text, sizeof(page_text), "%02u / %02u",
-		(unsigned int)(launcher_page + 1U), (unsigned int)page_count);
-	label = make_label(screen, page_text, &lv_font_montserrat_14, ink);
-	lv_obj_set_pos(label, 366, 76);
-	lv_obj_set_size(label, 96, 20);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-	(void)make_outline_shape(screen, launcher_grid.x, launcher_grid.y,
-		launcher_grid.cell_width * launcher_grid.columns,
-		launcher_grid.cell_height * launcher_grid.rows, 2, 0);
-	for (size_t slot = 0U; slot < LAUNCHER_PAGE_SIZE; ++slot) {
+	(void)make_ink_shape(screen, 22, 94, 436, 1, ink, 0);
+	for (size_t slot = 0; slot < LAUNCHER_PAGE_SIZE; ++slot) {
 		const size_t index = first_item + slot;
-
-		if (index >= ARRAY_SIZE(launcher_items) ||
-		    papermono_interaction_grid_cell_rect(&launcher_grid, slot,
-			&rect) < 0) {
-			continue;
+		if (index < ARRAY_SIZE(launcher_items) &&
+		    papermono_interaction_grid_cell_rect(&launcher_grid, slot, &rect) == 0) {
+			render_launcher_item(screen, &launcher_items[index], &rect, &snapshot);
 		}
-		render_launcher_item(screen, &launcher_items[index], &rect,
-			&snapshot);
 	}
-	/* Shared rules are drawn last so every composition lands on the same common
-	 * borders. The result is one true nine-grid, not nine floating cards.
-	 */
-	(void)make_fixed_line(screen, 166, 112, 166, 742, 2, 0, 0, ink);
-	(void)make_fixed_line(screen, 314, 112, 314, 742, 2, 0, 0, ink);
-	(void)make_fixed_line(screen, 18, 322, 462, 322, 2, 0, 0, ink);
-	(void)make_fixed_line(screen, 18, 532, 462, 532, 2, 0, 0, ink);
-	(void)make_fixed_line(screen, 18, 760, 462, 760, 1, 0, 0, ink);
-	footer_label = make_chinese_label(screen,
-		"轻触进入 · 左右键换页 · 边缘右滑返回");
-	lv_obj_set_pos(footer_label, 18, 772);
-	lv_obj_set_size(footer_label, 444, 22);
+	make_navigation(screen, PAPERMONO_APP_LAUNCHER);
 	return 0;
 }
 
@@ -1202,46 +908,40 @@ static int render_content_center(void *context, lv_obj_t *screen)
 	make_header(screen, "内容中心");
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 	struct papermono_content_server_state state;
-	char body[192];
-	lv_obj_t *card;
-
+	char text[192];
 	papermono_content_server_get_state(&state);
-	(void)snprintf(body, sizeof(body), "网络：%s\n密码：%s\n状态：%s",
+	(void)detail_text(screen, "在浏览器中管理内容", 22, 132, 436, 24, false);
+	detail_section(screen, 168, "首次配网");
+	(void)snprintf(text, sizeof(text), "网络：%s\n密码：%s",
 		state.ap_enabled ? state.ap_ssid : "接入点未启用",
-		state.ap_enabled ? state.ap_password : "--",
-		state.ap_verified ? "接口自检通过" :
-		state.ap_enabled ? "正在验证" : "未启用");
-	card = make_card(screen, 22, 96, 436, 154);
-	add_card_text(card, "首次配网接入点", body,
-		state.ap_enabled ? "192.168.4.1" : "SOFTAP OFF");
-
-	(void)snprintf(body, sizeof(body),
-		state.client_paired ? "本地会话已建立\n浏览器刷新会自动恢复" :
-		"浏览器打开设备地址\n输入一次性配对码：%s",
-		state.pairing_code);
-	card = make_card(screen, 22, 270, 436, 154);
-	add_card_text(card, "浏览器会话", body,
-		state.client_paired ? "SESSION READY" : state.pairing_code);
-
-	const char *address = state.station_ipv4[0] == '\0' ? "等待 DHCP 地址" :
-		state.station_ipv4;
-	(void)snprintf(body, sizeof(body), "局域网：%s\n内容版本：%u",
-		state.station_connected ? address :
-		state.station_connecting ? "正在连接" : "未连接",
-		state.content_generation);
-	card = make_card(screen, 22, 444, 436, 154);
-	add_card_text(card, "连接状态", body,
-		state.station_connected ? "LAN READY" :
-		state.ap_enabled ? "SETUP MODE" : "OFFLINE");
-
-	card = make_card(screen, 22, 618, 436, 96);
-	add_card_text(card, "管理范围", "书籍 · 日历 · 待办 · 便签", NULL);
+		state.ap_enabled ? state.ap_password : "--");
+	(void)detail_text(screen, text, 22, 208, 436, 52, false);
+	(void)detail_text(screen, state.ap_enabled ? "192.168.4.1" : "接入点已关闭",
+		22, 266, 436, 38, true);
+	(void)detail_text(screen, state.ap_verified ? "接口自检通过" :
+		state.ap_enabled ? "正在验证接入点" : "", 22, 308, 436, 24, false);
+	(void)make_ink_shape(screen, 22, 346, 436, 1, ink, 0);
+	detail_section(screen, 362, "浏览器会话");
+	if (state.client_paired) {
+		(void)detail_text(screen, "本地会话已建立", 22, 406, 436, 34, true);
+		(void)detail_text(screen, "浏览器刷新会自动恢复", 22, 446, 436, 24, false);
+	} else {
+		(void)detail_text(screen, "打开设备地址，输入一次性配对码", 22, 402, 436, 24, false);
+		detail_number(screen, state.pairing_code, 22, 430, 436);
+	}
+	(void)make_ink_shape(screen, 22, 498, 436, 1, ink, 0);
+	detail_section(screen, 512, "局域网");
+	(void)snprintf(text, sizeof(text), "%s\n内容版本：%u",
+		state.station_connected ? (state.station_ipv4[0] ? state.station_ipv4 : "等待 DHCP 地址") :
+		state.station_connecting ? "正在连接" : "未连接", state.content_generation);
+	(void)detail_text(screen, text, 22, 552, 436, 68, state.station_connected);
+	(void)make_ink_shape(screen, 22, 630, 436, 1, ink, 0);
+	detail_section(screen, 642, "管理范围");
+	(void)detail_text(screen, "书籍 · 日历 · 待办 · 便签", 22, 680, 436, 24, false);
 #else
-	lv_obj_t *card = make_card(screen, 22, 116, 436, 230);
-	add_card_text(card, "内容中心未启用", "当前构建未包含本地 HTTP 服务。",
-		"CONFIG DISABLED");
+	detail_empty(screen, &papermono_icon_content, "内容中心未启用", "当前固件未包含本地 HTTP 服务。");
 #endif
-	make_footer(screen, "浏览器传输在后台执行  ·  左键返回");
+	make_footer(screen, "浏览器传输在后台执行");
 	return 0;
 }
 
@@ -1293,144 +993,103 @@ static int weread_open(void *context)
 
 static const struct papermono_interaction_grid_layout weread_book_grid = {
 	.x = 22,
-	.y = 132,
+	.y = 186,
 	.cell_width = 436,
-	.cell_height = 104,
+	.cell_height = 98,
 	.column_gap = 0,
-	.row_gap = 12,
+	.row_gap = 6,
 	.columns = 1,
 	.rows = PAPERMONO_WEREAD_VISIBLE_BOOKS,
 };
 
-static int render_weread_empty(struct weread_ui_state *state,
-	lv_obj_t *screen)
+static int render_weread_empty(struct weread_ui_state *state, lv_obj_t *screen)
 {
-	lv_obj_t *card;
-	char body[192];
-
-	make_header(screen, "微信读书 · 实验");
-	card = make_card(screen, 22, 104, 436, 166);
-	add_card_text(card, "本地书架不可用",
-		weread_error_text(state->last_error), "LOCAL ONLY");
-	card = make_card(screen, 22, 294, 436, 190);
-	add_card_text(card, "从内容中心导入",
-		"上传固定文件名 weread-v1.json\n内容类型选择“微信读书书架”",
-		"点按打开内容中心");
-	card = make_card(screen, 22, 508, 436, 184);
-	(void)snprintf(body, sizeof(body),
-		"路径：/papermono/weread/%s\n不保存账号、Cookie 或书籍正文",
-		PAPERMONO_WEREAD_CATALOG_NAME);
-	add_card_text(card, "当前安全边界", body, "CREDENTIAL FREE");
-	make_footer(screen, "长按重载 · 边缘右滑或点按底部返回");
+	make_header(screen, "微信读书");
+	detail_icon(screen, &papermono_icon_weread_focal, 174);
+	detail_state_title(screen, "本地书架不可用", 376);
+	lv_obj_t *label = detail_text(screen, weread_error_text(state->last_error), 22, 440, 436, 24, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	detail_button(screen, &weread_import_rect, "打开内容中心", true);
+	label = detail_text(screen, "上传 weread-v1.json\n类型选择「微信读书书架」", 22, 570, 436, 52, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	(void)make_ink_shape(screen, 22, 644, 436, 1, ink, 0);
+	detail_section(screen, 662, "只读书架摘要");
+	(void)detail_text(screen, "通过手机或电脑导入摘要信息", 22, 698, 436, 24, false);
+	make_footer(screen, "长按重载");
 	return 0;
 }
 
 static int render_weread_list(struct weread_ui_state *state,
 	lv_obj_t *screen, const struct papermono_weread_status *status)
 {
-	char summary[160];
-	lv_obj_t *label;
+	char text[192];
 	const size_t first = papermono_weread_view_first(&state->view);
-
-	make_header(screen, "微信读书 · 本地书架");
-	(void)snprintf(summary, sizeof(summary), "%s · %zu/%zu 本%s",
-		status->source[0] == '\0' ? "LOCAL" : status->source,
-		status->count, status->total, status->truncated ? " · 已截断" : "");
-	label = make_chinese_label(screen, summary);
-	lv_obj_set_pos(label, 24, 78);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 432, 20);
-	(void)snprintf(summary, sizeof(summary), "同步时间：%s",
-		status->synced_at[0] == '\0' ? "--" : status->synced_at);
-	label = make_chinese_label(screen, summary);
-	lv_obj_set_pos(label, 24, 102);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	lv_obj_set_size(label, 432, 20);
-
-	for (size_t row = 0U; row < PAPERMONO_WEREAD_VISIBLE_BOOKS; ++row) {
-		const size_t index = first + row;
+	make_header(screen, "微信读书");
+	(void)snprintf(text, sizeof(text), "本地书架 · %zu / %zu 本%s", status->count,
+		status->total, status->truncated ? " · 已截断" : "");
+	(void)detail_text(screen, text, 22, 128, 436, 24, false);
+	(void)snprintf(text, sizeof(text), "同步时间：%s", status->synced_at[0] ? status->synced_at : "--");
+	(void)detail_text(screen, text, 22, 154, 436, 24, false);
+	for (size_t row = 0; row < PAPERMONO_WEREAD_VISIBLE_BOOKS; ++row) {
 		struct papermono_weread_book book;
-		char meta[160];
-		char progress[48];
-		lv_obj_t *card;
-
-		if (index >= status->count || papermono_weread_get(index, &book) < 0) {
-			break;
-		}
-		card = make_card(screen, 22, 132 + (int32_t)row * 116, 436, 104);
-		if (index == state->view.selected) {
-			lv_obj_set_style_border_width(card, 4, LV_PART_MAIN);
-		}
-		label = make_chinese_label(card, book.title);
-		lv_obj_set_pos(label, 14, 10);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, 292, 22);
-		(void)snprintf(meta, sizeof(meta), "%s · %s",
-			book.author[0] == '\0' ? "作者未知" : book.author,
-			weread_kind_text(book.kind));
-		label = make_chinese_label(card, meta);
-		lv_obj_set_pos(label, 14, 42);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, 310, 20);
-		(void)snprintf(meta, sizeof(meta), "%s%s",
-			book.updated_at[0] == '\0' ? "未提供更新时间" : book.updated_at,
-			book.finished ? " · 已读完" : "");
-		label = make_chinese_label(card, meta);
-		lv_obj_set_pos(label, 14, 72);
-		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, 300, 20);
-		if (book.has_progress) {
-			(void)snprintf(progress, sizeof(progress), "%u%%", book.progress);
-		} else {
-			(void)snprintf(progress, sizeof(progress), "--");
-		}
-		label = make_label(card, progress, &lv_font_montserrat_28, ink);
-		lv_obj_align(label, LV_ALIGN_TOP_RIGHT, -16, 18);
+		struct papermono_rect rect;
+		const size_t index = first + row;
+		if (index >= status->count || papermono_weread_get(index, &book) < 0) break;
+		(void)papermono_interaction_grid_cell_rect(&weread_book_grid, row, &rect);
+		char progress[32];
+		if (book.has_progress) (void)snprintf(progress, sizeof(progress), "%u%%", book.progress);
+		else (void)snprintf(progress, sizeof(progress), "未提供进度");
+		(void)snprintf(text, sizeof(text), "%s · %s · %s%s",
+			book.author[0] ? book.author : "作者未知", weread_kind_text(book.kind),
+			progress, book.finished ? " · 已读完" : "");
+		lv_obj_t *item = detail_icon_row(screen, &rect, book.kind == PAPERMONO_WEREAD_AUDIO ?
+			&papermono_icon_headphones_small : book.kind == PAPERMONO_WEREAD_ARTICLES ?
+			&papermono_icon_document_small : &papermono_icon_book_small, book.title, NULL,
+			index == state->view.selected, true);
+		(void)detail_text(item, text, 76, 46, 346, 24, false);
+		(void)snprintf(text, sizeof(text), "更新：%s", book.updated_at[0] ? book.updated_at : "--");
+		(void)detail_text(item, text, 76, 72, 346, 24, false);
 	}
-	make_footer(screen, "点按查看详情 · 左右键选择 · 边缘右滑返回");
+	(void)snprintf(text, sizeof(text), "%02u / %02u · 轻触查看详情",
+		(unsigned)(first / PAPERMONO_WEREAD_VISIBLE_BOOKS + 1),
+		(unsigned)((status->count + PAPERMONO_WEREAD_VISIBLE_BOOKS - 1) / PAPERMONO_WEREAD_VISIBLE_BOOKS));
+	make_footer(screen, text);
 	return 0;
 }
 
-static int render_weread_detail(struct weread_ui_state *state,
-	lv_obj_t *screen)
+static int render_weread_detail(struct weread_ui_state *state, lv_obj_t *screen)
 {
 	struct papermono_weread_book book;
-	char body[320];
-	char duration[64];
-	lv_obj_t *card;
-
+	char value[96];
 	if (papermono_weread_get(state->view.selected, &book) < 0) {
 		state->view.mode = PAPERMONO_WEREAD_VIEW_LIST;
 		state->last_error = -ENOENT;
 		return render_weread_empty(state, screen);
 	}
-	make_header(screen, "微信读书 · 书籍详情");
+	make_header(screen, "微信读书");
+	(void)detail_text(screen, "书籍详情", 22, 132, 436, 24, false);
+	(void)make_outline_shape(screen, 22, 188, 80, 116, 2, 0);
+	(void)make_ink_shape(screen, 32, 188, 1, 116, ink, 0);
+	(void)detail_text(screen, book.title, 124, 186, 334, 72, true);
+	(void)detail_text(screen, book.author[0] ? book.author : "作者未知", 124, 270, 334, 24, false);
+	if (book.has_progress) (void)snprintf(value, sizeof(value), "%u%%", book.progress);
+	else (void)snprintf(value, sizeof(value), "未提供进度");
+	if (book.has_progress) detail_number(screen, value, 124, 310, 334);
+	else (void)detail_text(screen, value, 124, 310, 334, 34, true);
+	(void)make_ink_shape(screen, 22, 370, 436, 1, ink, 0);
+	if (book.has_progress && book.progress > 0) {
+		(void)make_ink_shape(screen, 22, 367, 436 * MIN(book.progress, 100U) / 100, 4, ink, 0);
+	}
+	detail_value(screen, 402, "类型", weread_kind_text(book.kind));
 	const uint32_t minutes = book.reading_seconds / 60U;
-	if (minutes >= 60U) {
-		(void)snprintf(duration, sizeof(duration), "%u 小时 %u 分钟",
-			minutes / 60U, minutes % 60U);
-	} else {
-		(void)snprintf(duration, sizeof(duration), "%u 分钟", minutes);
-	}
-	char progress[32];
-
-	if (book.has_progress) {
-		(void)snprintf(progress, sizeof(progress), "%u%%", book.progress);
-	} else {
-		(void)snprintf(progress, sizeof(progress), "未提供");
-	}
-	(void)snprintf(body, sizeof(body),
-		"作者：%s\n类型：%s\n阅读进度：%s\n累计阅读：%s\n更新时间：%s",
-		book.author[0] == '\0' ? "未知" : book.author,
-		weread_kind_text(book.kind), progress, duration,
-		book.updated_at[0] == '\0' ? "--" : book.updated_at);
-	card = make_card(screen, 22, 104, 436, 292);
-	add_card_text(card, book.title, body, book.finished ? "已读完" : book.id);
-	card = make_card(screen, 22, 424, 436, 232);
-	add_card_text(card, "第一阶段说明",
-		"当前只显示电脑或手机同步的书架摘要。\n不连接私有接口，不下载微信读书正文。",
-		"后续直连能力将独立评审");
-	make_footer(screen, "边缘右滑返回书架 · 左右键切换书籍");
+	(void)snprintf(value, sizeof(value), "%u 小时 %u 分钟", minutes / 60U, minutes % 60U);
+	detail_value(screen, 446, "累计阅读", value);
+	detail_value(screen, 490, "更新时间", book.updated_at[0] ? book.updated_at : "--");
+	detail_value(screen, 534, "阅读状态", book.finished ? "已读完" : "未读完");
+	(void)make_ink_shape(screen, 22, 594, 436, 1, ink, 0);
+	detail_section(screen, 614, "本地书架摘要");
+	(void)detail_text(screen, "正文请在手机或电脑端阅读。", 22, 658, 436, 28, false);
+	make_footer(screen, "左右键切换书籍");
 	return 0;
 }
 
@@ -1484,8 +1143,10 @@ static int library_open(void *context)
 {
 	struct library_ui_state *state = context;
 	const struct papermono_preferences *prefs = papermono_settings_get();
-	const bool resume_reader = prefs->active_app == PAPERMONO_APP_LIBRARY &&
-		prefs->reader_resume;
+	const bool resume_reader = library_resume_requested ||
+		(prefs->active_app == PAPERMONO_APP_LIBRARY && prefs->reader_resume);
+
+	library_resume_requested = false;
 
 	if (!resume_reader && prefs->reader_resume &&
 	    papermono_settings_set_reader_resume(false) < 0) {
@@ -1522,6 +1183,7 @@ static int library_open(void *context)
 					&state->books[state->selected]);
 				if (state->last_error == 0) {
 					state->mode = LIBRARY_MODE_READER;
+					(void)papermono_settings_set_reader_resume(true);
 				} else {
 					(void)papermono_settings_set_reader_resume(false);
 				}
@@ -1552,113 +1214,100 @@ static void library_return_to_list(struct library_ui_state *state)
 	state->mode = LIBRARY_MODE_LIST;
 }
 
-static int render_library_list(struct library_ui_state *state,
-	lv_obj_t *screen)
+static int render_library_list(struct library_ui_state *state, lv_obj_t *screen)
 {
-	lv_obj_t *label;
-	char summary[80];
-
+	char text[128];
 	make_header(screen, "书库");
 	if (state->book_count == 0U) {
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 260);
-		const enum papermono_media_state media =
-			papermono_content_store_media_state();
-
-		add_card_text(card, "没有可显示的书籍",
-			papermono_content_store_state_text(media),
-			"/SD/PAPERMONO/BOOKS");
-		card = make_card(screen, 22, 424, 436, 170);
-		add_card_text(card, "支持格式",
-			"UTF-8 / GBK TXT，以及无 DRM 的文字型 EPUB。单本上限 64 MiB。",
-			"TXT · EPUB");
-		make_footer(screen, "长按首卡重新扫描  ·  向右滑动返回");
+		detail_empty(screen, &papermono_icon_library_focal, "没有可显示的书籍",
+			papermono_content_store_state_text(papermono_content_store_media_state()));
+		(void)make_ink_shape(screen, 22, 532, 436, 1, ink, 0);
+		detail_section(screen, 552, "支持格式");
+		(void)detail_text(screen, "UTF-8 / GBK TXT\n无 DRM 的文字型 EPUB\n单本上限 64 MiB", 22, 596, 436, 90, false);
+		make_footer(screen, "长按重新扫描");
 		return 0;
 	}
-
-	const size_t first = (state->selected / LIBRARY_VISIBLE_BOOKS) *
-		LIBRARY_VISIBLE_BOOKS;
-	if (state->last_error < 0) {
-		(void)snprintf(summary, sizeof(summary),
-			"打开或扫描失败（%d） · 仍显示 %u 本书", state->last_error,
-			(unsigned int)state->book_count);
-	} else {
-		(void)snprintf(summary, sizeof(summary), "%u 本书%s",
-			(unsigned int)state->total_books,
-			state->total_books > state->book_count ?
-				"（仅显示前 32 本）" : "");
-	}
-	label = make_chinese_label(screen, summary);
-	lv_obj_set_pos(label, 24, 84);
-	for (size_t row = 0U; row < LIBRARY_VISIBLE_BOOKS; ++row) {
+	(void)snprintf(text, sizeof(text), state->last_error < 0 ?
+		"打开或扫描失败 · 仍显示 %u 本书" : "%u 本书%s",
+		(unsigned)(state->last_error < 0 ? state->book_count : state->total_books),
+		state->total_books > state->book_count ? " · 仅显示前 32 本" : "");
+	(void)detail_text(screen, text, 22, 124, 436, 24, false);
+	const size_t first = (state->selected / LIBRARY_VISIBLE_BOOKS) * LIBRARY_VISIBLE_BOOKS;
+	for (size_t row = 0; row < LIBRARY_VISIBLE_BOOKS && first + row < state->book_count; ++row) {
+		struct papermono_rect rect;
 		const size_t index = first + row;
-		lv_obj_t *card;
-		char meta[48];
-
-		if (index >= state->book_count) {
-			break;
-		}
-		card = make_card(screen, 22, 116 + (int32_t)row * 120, 436, 102);
-		if (index == state->selected) {
-			lv_obj_set_style_border_width(card, 5, LV_PART_MAIN);
-		}
-		(void)snprintf(meta, sizeof(meta), "%s · %llu KiB",
-			state->books[index].kind == PAPERMONO_CONTENT_TXT ?
-				"TXT" : "EPUB",
-			(unsigned long long)((state->books[index].size + 1023U) /
-				1024U));
-		add_card_text(card, state->books[index].title, "轻触打开", meta);
+		(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
+		(void)snprintf(text, sizeof(text), "%s · %llu KiB",
+			state->books[index].kind == PAPERMONO_CONTENT_TXT ? "TXT" : "EPUB",
+			(unsigned long long)((state->books[index].size + 1023U) / 1024U));
+		lv_obj_t *item = detail_row(screen, &rect, "", NULL, index == state->selected, true);
+		(void)make_outline_shape(item, 18, 18, 30, 62, 1, 0);
+		(void)make_ink_shape(item, 24, 18, 1, 62, ink, 0);
+		(void)detail_text(item, state->books[index].title, 68, 10, 326, 34, true);
+		(void)detail_text(item, text, 68, 54, 340, 24, false);
 	}
-	make_footer(screen, state->last_error < 0 ?
-		"文件可能损坏或已移除  ·  长按重新扫描" :
-		"左右键选择  ·  轻触打开  ·  长按重新扫描");
+	(void)snprintf(text, sizeof(text), "%02u / %02u · 轻触打开\n%s",
+		(unsigned)(first / 5 + 1), (unsigned)((state->book_count + 4) / 5),
+		state->last_error < 0 ? "文件可能损坏 · 长按重新扫描" : "长按重新扫描");
+	make_footer(screen, text);
 	return 0;
 }
 
 static int render_library_reader(struct library_ui_state *state,
 	lv_obj_t *screen)
 {
-	const enum papermono_reader_density density =
-		papermono_settings_get()->reader_density;
-	lv_obj_t *label;
-	char footer[128];
-	int32_t margin;
-	int32_t line_space;
+	const struct papermono_reader_layout layout = papermono_reader_layout_for(
+		papermono_settings_get()->reader_density);
+	const bool epub = state->reader.book.kind == PAPERMONO_CONTENT_EPUB;
+	const struct papermono_rect *menu = &reader_regions[0].rect;
+	lv_obj_t *label = make_label(screen, state->reader.book.title, &papermono_reading_24, ink);
 
-	reader_visual_layout(density, &margin, &line_space);
+	lv_obj_set_pos(label, 22, 22);
+	lv_obj_set_size(label, 336, 34);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	lv_obj_t *button = make_outline_shape(screen, menu->x, menu->y,
+		menu->width, menu->height, 1, 0);
+	label = make_chinese_label(button, epub ? "目录" : "菜单");
+	lv_obj_center(label);
+	(void)make_ink_shape(screen, 22, 66, 436, 1, ink, 0);
 
-	make_header(screen, state->reader.book.kind == PAPERMONO_CONTENT_EPUB ?
-		state->reader.epub.chapters[state->reader.chapter].title :
-		state->reader.book.title);
 	state->last_error = papermono_reader_read_page(&state->reader,
 		state->page_text, sizeof(state->page_text), &state->page);
 	if (state->last_error < 0) {
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 250);
+		lv_obj_t *card = make_outline_shape(screen, 22, 132, 436, 250, 0, 0);
 		char error[48];
-
-		(void)snprintf(error, sizeof(error), "读取失败（%d）",
-			state->last_error);
-		add_card_text(card, "无法读取书籍", error,
-			papermono_content_store_state_text(
-				papermono_content_store_media_state()));
+		(void)snprintf(error, sizeof(error), "读取失败（%d）", state->last_error);
+		(void)detail_text(card, "无法读取书籍", 0, 0, 436, 38, true);
+		(void)detail_text(card, error, 0, 54, 436, 64, false);
+		(void)detail_text(card, papermono_content_store_state_text(papermono_content_store_media_state()), 0, 132, 436, 70, false);
 	} else {
-		label = make_chinese_label(screen, state->page_text);
-		lv_obj_set_pos(label, margin, 88);
-		lv_obj_set_size(label, UI_WIDTH - margin * 2, 636);
+		label = make_label(screen, state->page_text, &papermono_reading_24, ink);
+		lv_obj_set_pos(label, layout.margin, PAPERMONO_READER_BODY_TOP);
+		lv_obj_set_size(label, UI_WIDTH - layout.margin * 2, PAPERMONO_READER_BODY_HEIGHT);
 		lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-		lv_obj_set_style_text_line_space(label, line_space, LV_PART_MAIN);
+		lv_obj_set_style_text_line_space(label, layout.line_space, LV_PART_MAIN);
 	}
-	/* Only the current page number is shown: the total would require paging
-	 * through the whole book, which is far too costly on an e-paper device.
-	 * Density is omitted here because the reading menu already shows it.
-	 */
-	(void)snprintf(footer, sizeof(footer),
-		"第 %u 页 · %u%% · %s · %s · 左右键翻页",
-		(unsigned int)(state->reader.page_number + 1U),
-		state->page.approximate_percent,
-		papermono_text_encoding_name(state->reader.encoding),
-		papermono_reader_is_bookmarked(&state->reader) ?
-			"已加书签" : "未加书签");
-	make_footer(screen, footer);
+	(void)make_ink_shape(screen, 22, UI_FOOTER_TOP, 436, 1, ink, 0);
+	footer_label = make_chinese_label(screen, "");
+	if (state->last_error < 0) {
+		lv_label_set_text(footer_label, "读取失败 · 轻触菜单");
+	} else {
+		/* No invented total: EPUB/TXT are indexed incrementally. */
+		lv_label_set_text_fmt(footer_label, "第 %u 页 · %u%%",
+			(unsigned int)(state->reader.page_number + 1), state->page.approximate_percent);
+	}
+	lv_obj_set_pos(footer_label, 22, 758);
+	lv_obj_set_size(footer_label, 324, 24);
+	label = make_chinese_label(screen, papermono_reader_is_bookmarked(&state->reader) ?
+		"已加书签" : "书签");
+	lv_obj_set_pos(label, 360, 758);
+	lv_obj_set_size(label, 98, 24);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+	(void)make_ink_shape(screen, 22, 790, 436, 1, ink, 0);
+	if (state->last_error == 0 && state->page.approximate_percent > 0) {
+		(void)make_ink_shape(screen, 22, 788,
+			MAX(1, 436 * MIN(state->page.approximate_percent, 100) / 100), 4, ink, 0);
+	}
 	return 0;
 }
 
@@ -1720,137 +1369,89 @@ static int set_frontlight(uint8_t percent)
 	return ret;
 }
 
-static int render_library_menu(struct library_ui_state *state,
-	lv_obj_t *screen)
+static int render_library_menu(struct library_ui_state *state, lv_obj_t *screen)
 {
 	const struct papermono_preferences *prefs = papermono_settings_get();
-	lv_obj_t *card;
-	char body[96];
-
+	const char *titles[] = {
+		papermono_reader_is_bookmarked(&state->reader) ? "移除当前页书签" : "添加当前页书签",
+		"目录", "排版与编码", "前光亮度", "书签列表", "返回阅读", "返回书库",
+	};
+	char density[96], light[64], marks[48];
+	(void)snprintf(density, sizeof(density), "%s · %s · %s",
+		reader_density_name(prefs->reader_density), papermono_text_encoding_name(state->reader.encoding),
+		state->reader.book.kind == PAPERMONO_CONTENT_TXT ? "长按切换编码" : "轻触切换密度");
+	(void)snprintf(light, sizeof(light), "亮度 %u%%%s", prefs->frontlight_percent,
+		frontlight_last_error < 0 ? " · 调整失败" : " · 长按关闭");
+	(void)snprintf(marks, sizeof(marks), "%u 个位置", state->reader.bookmark_count);
+	const char *meta[] = {NULL, state->reader.book.kind == PAPERMONO_CONTENT_EPUB ?
+		"浏览并跳转章节" : "TXT 没有内置目录", density, light, marks, NULL, NULL};
+	const lv_image_dsc_t *icons[] = {&papermono_icon_bookmark_small, &papermono_icon_toc_small,
+		&papermono_icon_settings_small, &papermono_icon_sun_small, &papermono_icon_bookmark_small,
+		&papermono_icon_book_small, &papermono_icon_library_small};
 	make_header(screen, "阅读菜单");
-	card = make_card(screen, 22, 86, 436, 84);
-	add_card_text(card, papermono_reader_is_bookmarked(&state->reader) ?
-		"移除当前页书签" : "添加当前页书签",
-		"保存当前书籍位置", NULL);
-	card = make_card(screen, 22, 178, 436, 84);
-	add_card_text(card, "目录",
-		state->reader.book.kind == PAPERMONO_CONTENT_EPUB ?
-			"浏览并跳转章节" : "TXT 没有内置目录", NULL);
-	(void)snprintf(body, sizeof(body), "密度：%s；编码：%s",
-		reader_density_name(papermono_settings_get()->reader_density),
-		papermono_text_encoding_name(state->reader.encoding));
-	card = make_card(screen, 22, 270, 436, 84);
-	add_card_text(card, "排版与编码", body,
-		state->reader.book.kind == PAPERMONO_CONTENT_TXT ?
-			"轻触密度 · 长按编码" : "轻触切换密度");
-	(void)snprintf(body, sizeof(body), prefs->frontlight_percent == 0U ?
-		"已关闭" : "%u%%", prefs->frontlight_percent);
-	card = make_card(screen, 22, 362, 436, 84);
-	add_card_text(card, "前光亮度", body, frontlight_last_error < 0 ?
-		"调整失败 · 请重试" : "轻触/右滑增加 · 左滑减少 · 长按关闭");
-	card = make_card(screen, 22, 454, 436, 84);
-	(void)snprintf(body, sizeof(body), "已保存 %u / %u 个位置",
-		state->reader.bookmark_count, PAPERMONO_READER_BOOKMARK_LIMIT);
-	add_card_text(card, "书签列表", body, NULL);
-	card = make_card(screen, 22, 546, 436, 84);
-	add_card_text(card, "返回阅读", "关闭此菜单", NULL);
-	card = make_card(screen, 22, 638, 436, 84);
-	add_card_text(card, "返回书库", "保留当前阅读进度", NULL);
-	make_footer(screen, "阅读进度和书签保存在内部 NVS");
+	(void)detail_text(screen, state->reader.book.title, 22, 124, 436, 24, false);
+	for (size_t row = 0; row < 7; ++row) {
+		struct papermono_rect rect;
+		(void)papermono_interaction_grid_cell_rect(&detail_menu_grid, row, &rect);
+		(void)detail_icon_row(screen, &rect, icons[row], titles[row], meta[row], false,
+			row != 1 || state->reader.book.kind == PAPERMONO_CONTENT_EPUB);
+	}
+	make_footer(screen, "进度与书签自动保存");
 	return 0;
 }
 
-static int render_library_toc(struct library_ui_state *state,
-	lv_obj_t *screen)
+static int render_library_toc(struct library_ui_state *state, lv_obj_t *screen)
 {
 	make_header(screen, "目录");
+	(void)detail_text(screen, state->reader.book.title, 22, 124, 436, 24, false);
 	const uint16_t first = (state->auxiliary_selected / 5U) * 5U;
-	const uint16_t toc_count = state->reader.epub.toc_count > 0U ?
-		state->reader.epub.toc_count : state->reader.epub.chapter_count;
-
-	for (uint16_t row = 0U; row < 5U; ++row) {
-		const uint16_t toc_index = first + row;
-
-		if (toc_index >= toc_count) {
-			break;
-		}
-		const struct papermono_epub_toc_entry *toc =
-			state->reader.epub.toc_count > 0U ?
-			&state->reader.epub.toc[toc_index] : NULL;
-		const uint16_t chapter = toc == NULL ? toc_index : toc->chapter;
-		const uint8_t level = toc == NULL ? 0U : toc->level;
-		const int32_t indent = MIN(level, 4U) * 16;
-		lv_obj_t *card;
-		char meta[48];
-
-		if (chapter >= state->reader.epub.chapter_count) {
-			break;
-		}
-		card = make_card(screen, 22 + indent, 96 + (int32_t)row * 124,
-			436 - indent, 106);
-		if (toc_index == state->auxiliary_selected) {
-			lv_obj_set_style_border_width(card, 5, LV_PART_MAIN);
-		}
-		(void)snprintf(meta, sizeof(meta), "层级 %u · 章节 %u / %u",
-			level + 1U, chapter + 1U, state->reader.epub.chapter_count);
-		add_card_text(card, toc == NULL ?
-			state->reader.epub.chapters[chapter].title : toc->title,
-			chapter == state->reader.chapter ? "当前章节" : "轻触跳转",
-			meta);
+	const uint16_t count = state->reader.epub.toc_count > 0U ? state->reader.epub.toc_count : state->reader.epub.chapter_count;
+	for (uint16_t row = 0; row < 5 && first + row < count; ++row) {
+		const uint16_t index = first + row;
+		const struct papermono_epub_toc_entry *toc = state->reader.epub.toc_count ? &state->reader.epub.toc[index] : NULL;
+		const uint16_t chapter = toc ? toc->chapter : index;
+		if (chapter >= state->reader.epub.chapter_count) break;
+		struct papermono_rect rect;
+		char meta[80];
+		(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
+		const int32_t indent = toc ? MIN(toc->level, 4U) * 16 : 0;
+		rect.x += indent; rect.width -= indent;
+		(void)snprintf(meta, sizeof(meta), "%s · 章节 %u / %u",
+			chapter == state->reader.chapter ? "当前章节" : "轻触跳转", chapter + 1U, state->reader.epub.chapter_count);
+		(void)detail_row(screen, &rect, toc ? toc->title : state->reader.epub.chapters[chapter].title,
+			meta, index == state->auxiliary_selected, true);
 	}
-	make_footer(screen, "左右键选择  ·  轻触跳转  ·  左边界返回");
+	char footer[64];
+	(void)snprintf(footer, sizeof(footer), "%02u / %02u · 轻触跳转", first / 5U + 1U, (count + 4U) / 5U);
+	make_footer(screen, footer);
 	return 0;
 }
 
-static int render_library_bookmarks(struct library_ui_state *state,
-	lv_obj_t *screen)
+static int render_library_bookmarks(struct library_ui_state *state, lv_obj_t *screen)
 {
 	make_header(screen, "书签");
-	if (state->reader.bookmark_count == 0U) {
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 220);
-
-		add_card_text(card, "尚无书签",
-			"阅读时长按页面，或在阅读菜单中添加当前页书签。", NULL);
-		make_footer(screen, "左键返回阅读菜单");
+	(void)detail_text(screen, state->reader.book.title, 22, 124, 436, 24, false);
+	if (state->reader.bookmark_count == 0) {
+		detail_empty(screen, &papermono_icon_bookmark_focal, "尚无书签", "阅读时长按页面，\n或在阅读菜单中添加当前页书签。");
+		make_footer(screen, "返回阅读菜单");
 		return 0;
 	}
-	const uint16_t first = (state->auxiliary_selected / 5U) * 5U;
-
-	for (uint16_t row = 0U; row < 5U; ++row) {
+	const uint16_t first = state->auxiliary_selected / 5U * 5U;
+	for (uint16_t row = 0; row < 5 && first + row < state->reader.bookmark_count; ++row) {
 		const uint16_t index = first + row;
-		const struct papermono_reader_bookmark *mark;
-		lv_obj_t *card;
-		char title[48];
-		char meta[48];
-
-		if (index >= state->reader.bookmark_count) {
-			break;
-		}
-		mark = &state->reader.bookmarks[index];
-		card = make_card(screen, 22, 96 + (int32_t)row * 124, 436, 106);
-		if (index == state->auxiliary_selected) {
-			lv_obj_set_style_border_width(card, 5, LV_PART_MAIN);
-		}
-		/* Lead with the stored snippet; fall back to the ordinal for
-		 * bookmarks saved before previews existed.
-		 */
-		if (mark->preview[0] != '\0') {
-			(void)snprintf(title, sizeof(title), "%s", mark->preview);
-		} else {
-			(void)snprintf(title, sizeof(title), "书签 %u",
-				index + 1U);
-		}
-		if (state->reader.book.kind == PAPERMONO_CONTENT_EPUB &&
-		    mark->chapter < state->reader.epub.chapter_count) {
-			(void)snprintf(meta, sizeof(meta), "%s · 位置 %u",
-				state->reader.epub.chapters[mark->chapter].title,
-				mark->offset);
-		} else {
-			(void)snprintf(meta, sizeof(meta), "文件位置 %u", mark->offset);
-		}
-		add_card_text(card, title, "轻触跳转", meta);
+		const struct papermono_reader_bookmark *mark = &state->reader.bookmarks[index];
+		struct papermono_rect rect;
+		char title[96], meta[96];
+		(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
+		if (mark->preview[0]) (void)snprintf(title, sizeof(title), "%s", mark->preview);
+		else (void)snprintf(title, sizeof(title), "书签 %u", index + 1U);
+		if (state->reader.book.kind == PAPERMONO_CONTENT_EPUB && mark->chapter < state->reader.epub.chapter_count)
+			(void)snprintf(meta, sizeof(meta), "%s · 位置 %u", state->reader.epub.chapters[mark->chapter].title, mark->offset);
+		else (void)snprintf(meta, sizeof(meta), "文件位置 %u", mark->offset);
+		(void)detail_icon_row(screen, &rect, &papermono_icon_bookmark_small, title, meta,
+			index == state->auxiliary_selected, true);
 	}
-	make_footer(screen, "左右键选择  ·  轻触跳转  ·  左边界返回");
+	make_footer(screen, "轻触跳转 · 左右键选择");
 	return 0;
 }
 
@@ -1896,130 +1497,148 @@ static const struct papermono_interaction_grid_layout remote_action_grid = {
 };
 
 static const struct papermono_rect remote_mouse_pad = {
-	22, 296, 436, 372,
+	22, 296, 436, 250,
 };
 
 static void remote_action_card(lv_obj_t *screen, int column, int row,
 	const char *title, const char *meta)
 {
 	struct papermono_rect rect;
-
 	if (papermono_interaction_grid_cell_rect(&remote_action_grid,
-		(size_t)row * remote_action_grid.columns + (size_t)column,
-		&rect) < 0) {
-		return;
+		(size_t)row * remote_action_grid.columns + (size_t)column, &rect) < 0) return;
+	lv_obj_t *button = make_outline_shape(screen, rect.x, rect.y, rect.width, rect.height, 1, 0);
+	const int32_t x = rect.width / 2 - 20;
+	/* Authored monochrome controls share the launcher's geometric vocabulary. */
+	if (strcmp(meta, "PLAY") == 0 || strcmp(meta, "F5") == 0) {
+		(void)make_fixed_line(button, x+8, 14, x+8, 48, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+8, 14, x+34, 31, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+34, 31, x+8, 48, 2, 0, 0, ink);
+	} else if (strcmp(meta, "PREVIOUS") == 0 || strcmp(meta, "PAGE UP") == 0 || strcmp(meta, "NEXT") == 0 || strcmp(meta, "PAGE DOWN") == 0) {
+		const bool previous = strcmp(meta, "PREVIOUS") == 0 || strcmp(meta, "PAGE UP") == 0;
+		int32_t a = previous ? x+30 : x+10, b = previous ? x+10 : x+30;
+		(void)make_fixed_line(button, a, 14, b, 31, 2, 0, 0, ink);
+		(void)make_fixed_line(button, b, 31, a, 48, 2, 0, 0, ink);
+		(void)make_fixed_line(button, a, 48, a, 14, 2, 0, 0, ink);
+	} else if (strcmp(meta, "MUTE") == 0) {
+		(void)make_outline_shape(button, x, 24, 12, 16, 2, 0);
+		(void)make_fixed_line(button, x+12, 24, x+24, 14, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+24, 14, x+24, 48, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+24, 48, x+12, 40, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+32, 24, x+44, 40, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+44, 24, x+32, 40, 2, 0, 0, ink);
+	} else if (strcmp(meta, "VOLUME -") == 0 || strcmp(meta, "VOLUME +") == 0) {
+		(void)make_fixed_line(button, x, 31, x+40, 31, 3, 0, 0, ink);
+		if (strcmp(meta, "VOLUME +") == 0) (void)make_fixed_line(button, x+20, 11, x+20, 51, 3, 0, 0, ink);
+	} else if (strcmp(meta, "B") == 0) {
+		(void)make_outline_shape(button, x, 14, 40, 28, 2, 0);
+		(void)make_fixed_line(button, x+20, 42, x+20, 51, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+8, 51, x+32, 51, 2, 0, 0, ink);
+	} else {
+		(void)make_fixed_line(button, x+6, 16, x+34, 46, 2, 0, 0, ink);
+		(void)make_fixed_line(button, x+34, 16, x+6, 46, 2, 0, 0, ink);
 	}
-	lv_obj_t *card = make_card(screen, rect.x, rect.y, rect.width,
-		rect.height);
-
-	add_card_text(card, title, "轻触发送", meta);
+	lv_obj_t *label = detail_text(button, title, 8, 66, rect.width-16, 34, true);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 }
 
 static void remote_status_card(lv_obj_t *screen, int column, int row,
 	const char *title, const char *body, const char *meta)
 {
+	ARG_UNUSED(meta);
 	struct papermono_rect rect;
-
 	if (papermono_interaction_grid_cell_rect(&remote_action_grid,
-		(size_t)row * remote_action_grid.columns + (size_t)column,
-		&rect) < 0) {
-		return;
-	}
-	lv_obj_t *card = make_card(screen, rect.x, rect.y, rect.width,
-		rect.height);
+		(size_t)row * remote_action_grid.columns + (size_t)column, &rect) < 0) return;
+	lv_obj_t *label = detail_text(screen, title, rect.x+8, rect.y+20, rect.width-16, 34, true);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	label = detail_text(screen, body, rect.x+8, rect.y+60, rect.width-16, 44, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+}
 
-	add_card_text(card, title, body, meta);
+static bool remote_ready(const struct papermono_hid_state *state)
+{
+	return state->initialized && state->connected && state->secured &&
+		!state->suspended && !state->passkey_visible;
 }
 
 static int render_remote(void *context, lv_obj_t *screen)
 {
 	struct remote_ui_state *remote = context;
+	struct papermono_hid_state state = {0};
 	struct papermono_ui_snapshot snapshot;
-	lv_obj_t *card;
-	lv_obj_t *label;
-	char body[128];
-	struct papermono_hid_state state = { 0 };
-
-	make_header(screen, "电脑遥控器");
-	read_snapshot(&snapshot);
+	char body[192];
+	make_header(screen, "遥控器");
 #if defined(CONFIG_PAPERMONO_BLE_HID)
 	papermono_hid_get_state(&state);
 #endif
 	if (state.passkey_visible) {
-		(void)snprintf(body, sizeof(body),
-			"在电脑上输入配对码\n%06u", state.passkey);
-	} else if (state.connected) {
-		(void)snprintf(body, sizeof(body), "已连接%s%s%s%s",
-			state.secured ? " · 安全连接" : " · 正在完成配对",
-			state.bonded ? " · 已保存主机" : "",
-			state.suspended ? " · 主机已挂起" : "",
-			remote->last_error < 0 ? " · 操作失败" : "");
-	} else if (state.advertising) {
-		(void)snprintf(body, sizeof(body),
-			"正在等待电脑连接\n蓝牙名称：PaperMono C153");
+		(void)detail_text(screen, "在电脑上输入配对码", 22, 130, 436, 24, false);
+		(void)snprintf(body, sizeof(body), "%06u", state.passkey);
+		detail_number(screen, body, 22, 154, 436);
 	} else {
-		(void)snprintf(body, sizeof(body), "蓝牙 HID 未就绪 · 错误 %d",
-			state.last_error);
+		if (state.connected) (void)snprintf(body, sizeof(body), "已连接%s%s%s%s",
+			state.secured ? " · 安全连接" : " · 正在完成配对", state.bonded ? " · 已保存主机" : "",
+			state.suspended ? " · 主机已挂起" : "", remote->last_error < 0 ? " · 操作失败" : "");
+		else if (state.advertising) (void)snprintf(body, sizeof(body), "等待电脑连接\n蓝牙名称：PaperMono C153");
+		else (void)snprintf(body, sizeof(body), "%s", state.initialized ? "尚未连接电脑" : "蓝牙 HID 未启用");
+		const int error = remote->last_error < 0 ? remote->last_error : state.last_error;
+		if (error < 0) {
+			const size_t used = strlen(body);
+			(void)snprintf(body + used, sizeof(body) - used, "\n上次发送或连接失败（%d）", error);
+		}
+		(void)detail_text(screen, body, 22, 132, 436, 72, false);
 	}
-	if (snapshot.battery_valid) {
-		const uint8_t percent = (uint8_t)CLAMP(
-			((int)snapshot.battery_mv - 3300) * 100 / 900, 0, 100);
-		const size_t used = strlen(body);
-		(void)snprintf(body + used, sizeof(body) - used, "\n电池：%u%%",
-			percent);
+	read_snapshot(&snapshot);
 #if defined(CONFIG_PAPERMONO_BLE_HID)
-		if (state.initialized) {
-			(void)papermono_hid_set_battery_level(percent);
-		}
+	/* Preserve the existing HID battery report; the UI shows no estimated %. */
+	if (snapshot.battery_valid && state.initialized) {
+		(void)papermono_hid_set_battery_level((uint8_t)CLAMP(((int)snapshot.battery_mv - 3300) * 100 / 900, 0, 100));
+	}
 #endif
-	}
-	card = make_card(screen, 22, 84, 436, 120);
-	add_card_text(card, state.passkey_visible ? "蓝牙配对" : "连接状态",
-		body, state.connected ? "CONNECTED" : "HID OVER GATT");
-
-	static const char *const tabs[] = { "媒体", "演示", "鼠标" };
-	for (int index = 0; index < 3; ++index) {
+	static const char *const tabs[] = {"媒体", "演示", "鼠标"};
+	for (size_t i = 0; i < 3; ++i) {
 		struct papermono_rect rect;
-
-		if (papermono_interaction_grid_cell_rect(&remote_tab_grid,
-			(size_t)index, &rect) < 0) {
-			continue;
-		}
-		card = make_card(screen, rect.x, rect.y, rect.width, rect.height);
-		if (remote->mode == (enum remote_mode)index) {
-			lv_obj_set_style_border_width(card, 4, LV_PART_MAIN);
-			(void)make_ink_shape(card, 18, rect.height - 10,
-				rect.width - 36, 4, ink, 0);
-		}
-		label = make_chinese_label(card, tabs[index]);
-		lv_obj_center(label);
+		(void)papermono_interaction_grid_cell_rect(&remote_tab_grid, i, &rect);
+		lv_obj_t *label = detail_text(screen, tabs[i], rect.x, rect.y+14, rect.width, 34, true);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		if (remote->mode == (enum remote_mode)i) (void)make_ink_shape(screen, rect.x+30, rect.y+rect.height-5, rect.width-60, 3, ink, 0);
 	}
-
+	(void)make_ink_shape(screen, 22, 280, 436, 1, ink, 0);
+	if (!remote_ready(&state)) {
+		detail_icon(screen, &papermono_icon_remote, 340);
+		lv_obj_t *label = detail_text(screen, state.suspended ? "等待电脑恢复" : "完成连接后可操作",
+			22, 472, 436, 38, true);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		label = detail_text(screen, state.passkey_visible ? "在电脑上输入上方配对码。\n完成安全配对后，遥控按钮才会启用。" :
+			state.connected && !state.secured ? "正在完成安全配对。\n请在电脑蓝牙设置中确认。" :
+			state.suspended ? "主机已挂起，当前无法发送指令。" :
+			"在电脑的蓝牙设置中连接\nPaperMono C153。", 22, 534, 436, 70, false);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		if (state.passkey_visible && remote->last_error < 0) {
+			(void)snprintf(body, sizeof(body), "上次发送失败（%d）", remote->last_error);
+			(void)detail_text(screen, body, 22, 626, 436, 24, false);
+		}
+		make_footer(screen, "顶部切换模式 · 连接后可使用");
+		return 0;
+	}
 	if (remote->mode == REMOTE_MODE_MEDIA) {
-		remote_action_card(screen, 0, 0, "播放 / 暂停", "PLAY");
-		remote_action_card(screen, 1, 0, "静音", "MUTE");
-		remote_action_card(screen, 0, 1, "上一首", "PREVIOUS");
-		remote_action_card(screen, 1, 1, "下一首", "NEXT");
-		remote_action_card(screen, 0, 2, "减小音量", "VOLUME -");
-		remote_action_card(screen, 1, 2, "增大音量", "VOLUME +");
+		remote_action_card(screen,0,0,"播放 / 暂停","PLAY"); remote_action_card(screen,1,0,"静音","MUTE");
+		remote_action_card(screen,0,1,"上一首","PREVIOUS"); remote_action_card(screen,1,1,"下一首","NEXT");
+		remote_action_card(screen,0,2,"减小音量","VOLUME -"); remote_action_card(screen,1,2,"增大音量","VOLUME +");
 	} else if (remote->mode == REMOTE_MODE_PRESENTATION) {
-		remote_action_card(screen, 0, 0, "上一页", "PAGE UP");
-		remote_action_card(screen, 1, 0, "下一页", "PAGE DOWN");
-		remote_action_card(screen, 0, 1, "开始放映", "F5");
-		remote_action_card(screen, 1, 1, "退出放映", "ESC");
-		remote_action_card(screen, 0, 2, "黑屏切换", "B");
-		remote_status_card(screen, 1, 2, "连接状态",
-			state.connected ? "已连接，可以发送指令" : "请先完成电脑配对",
-			state.connected ? "READY" : "PAIR FIRST");
+		remote_action_card(screen,0,0,"上一页","PAGE UP"); remote_action_card(screen,1,0,"下一页","PAGE DOWN");
+		remote_action_card(screen,0,1,"开始放映","F5"); remote_action_card(screen,1,1,"退出放映","ESC");
+		remote_action_card(screen,0,2,"黑屏切换","B");
+		remote_status_card(screen,1,2,"连接状态", state.connected ? "已连接，可以发送指令" : "请先完成电脑配对", NULL);
 	} else {
-		card = make_card(screen, 22, 296, 436, 372);
-		add_card_text(card, "触摸板",
-			"轻触：左键\n长按：右键\n中部滑动：移动指针\n右侧上下滑动：滚轮",
-			"RELATIVE MOUSE");
-		card = make_card(screen, 22, 684, 436, 42);
-		add_card_text(card, "实体键", "左键 / 右键点击", NULL);
+		(void)make_outline_shape(screen, remote_mouse_pad.x, remote_mouse_pad.y, remote_mouse_pad.width, remote_mouse_pad.height, 1, 0);
+		(void)make_fixed_line(screen, 360, remote_mouse_pad.y, 360, remote_mouse_pad.y+remote_mouse_pad.height, 1, 0, 0, ink);
+		(void)make_fixed_line(screen, 206, 392, 246, 392, 1, 0, 0, ink);
+		(void)make_fixed_line(screen, 226, 372, 226, 412, 1, 0, 0, ink);
+		lv_obj_t *label = detail_text(screen, "触摸板", 22, 450, 338, 34, true);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		(void)detail_text(screen, "轻触：左键 · 长按：右键\n中部滑动：移动指针\n右侧上下滑动：滚轮\n实体键：左键 / 右键", 22, 570, 436, 110, false);
 	}
-	make_footer(screen, "顶部切换模式  ·  轻触页脚返回");
+	make_footer(screen, "顶部切换模式 · 轻触发送");
 	return 0;
 }
 
@@ -2028,6 +1647,12 @@ static int remote_send(struct remote_ui_state *remote,
 	uint8_t buttons)
 {
 #if defined(CONFIG_PAPERMONO_BLE_HID)
+	struct papermono_hid_state state;
+	papermono_hid_get_state(&state);
+	if (!remote_ready(&state)) {
+		remote->last_error = state.suspended ? -EHOSTDOWN : state.connected ? -EACCES : -ENOTCONN;
+		return remote->last_error;
+	}
 	const struct papermono_hid_action action = {
 		.type = type,
 		.mouse_x = x,
@@ -2059,7 +1684,7 @@ static int remote_event(void *context,
 
 	if (event->type == PAPERMONO_APP_EVENT_BACK ||
 	    (event->type == PAPERMONO_APP_EVENT_TAP &&
-	     event->y >= UI_FOOTER_TOP)) {
+	     event->y >= UI_DETAIL_FOOTER_TOP)) {
 		command->type = PAPERMONO_APP_COMMAND_BACK;
 		return 0;
 	}
@@ -2069,6 +1694,12 @@ static int remote_event(void *context,
 		request_redraw(command);
 		return 0;
 	}
+
+	struct papermono_hid_state state = {0};
+#if defined(CONFIG_PAPERMONO_BLE_HID)
+	papermono_hid_get_state(&state);
+#endif
+	if (!remote_ready(&state)) return 0;
 
 	if (remote->mode == REMOTE_MODE_MEDIA) {
 		if (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
@@ -2236,47 +1867,39 @@ static int render_calendar(void *context, lv_obj_t *screen)
 {
 	struct organizer_ui_state *ui = context;
 	const size_t count = papermono_organizer_calendar_count();
-
+	struct papermono_ui_snapshot snapshot;
 	make_header(screen, "日历");
-	if (count == 0U) {
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 220);
-		add_card_text(card, "暂无日程",
-			"通过内容中心上传 .ics 文件。支持全天事件、开始/结束时间和基础重复规则。",
-			"ICS VEVENT");
-	} else {
-		if (ui->calendar_first >= count) {
-			ui->calendar_first = ((count - 1U) / 5U) * 5U;
-		}
-		for (size_t row = 0U; row < 5U; ++row) {
-			const size_t index = ui->calendar_first + row;
-			struct papermono_calendar_event event;
-			char body[160];
-			char meta[64];
-			lv_obj_t *card;
-
-			if (papermono_organizer_get_event(index, &event) < 0) {
-				break;
-			}
-			card = make_card(screen, 22, 92 + (int32_t)row * 126,
-				436, 110);
-			(void)snprintf(body, sizeof(body),
-				event.start.all_day ? "%04d-%02u-%02u · 全天" :
-				"%04d-%02u-%02u · %02u:%02u",
-				event.start.year, event.start.month, event.start.day,
-				event.start.hour, event.start.minute);
-			const char *repeat = recurrence_name(event.recurrence);
-			if (repeat == NULL) {
-				(void)snprintf(meta, sizeof(meta), "EVENT %u / %u",
-					(unsigned int)(index + 1U), (unsigned int)count);
-			} else {
-				(void)snprintf(meta, sizeof(meta), "%s · EVENT %u / %u",
-					repeat, (unsigned int)(index + 1U),
-					(unsigned int)count);
-			}
-			add_card_text(card, event.title, body, meta);
-		}
+	if (!count) {
+		detail_empty(screen, &papermono_icon_calendar_focal, "暂无日程", "通过内容中心上传 .ics 文件。\n支持全天日程与基础重复规则。");
+		make_footer(screen, "右滑返回");
+		return 0;
 	}
-	make_footer(screen, "实体键或上下滑动翻页  ·  轻触页脚返回");
+	read_snapshot(&snapshot);
+	char date[64];
+	(void)snprintf(date, sizeof(date), snapshot.rtc_valid ? "%02d" : "--", snapshot.time.tm_mday);
+	lv_obj_t *label = make_label(screen, date, &papermono_clock_148, ink);
+	lv_obj_set_pos(label, 22, 132); lv_obj_set_size(label, 200, 122);
+	if (snapshot.rtc_valid) {
+		(void)snprintf(date, sizeof(date), "%d 年 %02d 月", snapshot.time.tm_year + 1900, snapshot.time.tm_mon + 1);
+	} else (void)snprintf(date, sizeof(date), "时钟尚未校准");
+	(void)detail_text(screen, date, 234, 190, 224, 34, true);
+	if (ui->calendar_first >= count) ui->calendar_first = (count - 1U) / 5U * 5U;
+	for (size_t row = 0; row < 5 && ui->calendar_first + row < count; ++row) {
+		struct papermono_calendar_event event;
+		char meta[96];
+		if (papermono_organizer_get_event(ui->calendar_first + row, &event) < 0) break;
+		const struct papermono_rect rect = {22, 272 + (int32_t)row * 86, 436, 84};
+		if (event.start.all_day) (void)snprintf(meta, sizeof(meta), "%04d-%02u-%02u · 全天", event.start.year, event.start.month, event.start.day);
+		else (void)snprintf(meta, sizeof(meta), "%04d-%02u-%02u · %02u:%02u", event.start.year, event.start.month, event.start.day, event.start.hour, event.start.minute);
+		const char *repeat = recurrence_name(event.recurrence);
+		if (repeat) {
+			const size_t used = strlen(meta);
+			(void)snprintf(meta + used, sizeof(meta) - used, " · %s", repeat);
+		}
+		(void)detail_row(screen, &rect, event.title, meta, false, false);
+	}
+	(void)snprintf(date, sizeof(date), "%02u / %02u · 实体键翻页", (unsigned)(ui->calendar_first / 5 + 1), (unsigned)((count + 4) / 5));
+	make_footer(screen, date);
 	return 0;
 }
 
@@ -2304,7 +1927,7 @@ static int calendar_event(void *context,
 		   (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
 		    papermono_app_event_is_touch(event)) ||
 		   (event->type == PAPERMONO_APP_EVENT_TAP &&
-		    event->y >= UI_FOOTER_TOP)) {
+		    event->y >= UI_DETAIL_FOOTER_TOP)) {
 		/* This list is the app root, so back leaves the app. Handling
 		 * EVENT_BACK explicitly matters because the edge-swipe gesture
 		 * is otherwise swallowed and leaves the user stranded.
@@ -2314,54 +1937,35 @@ static int calendar_event(void *context,
 	return 0;
 }
 
-static const struct papermono_interaction_grid_layout organizer_list_grid = {
-	.x = 22,
-	.y = 92,
-	.cell_width = 436,
-	.cell_height = 110,
-	.column_gap = 0,
-	.row_gap = 16,
-	.columns = 1,
-	.rows = 5,
-};
+#define organizer_list_grid detail_list_grid
 
 static int render_tasks(void *context, lv_obj_t *screen)
 {
 	struct organizer_ui_state *ui = context;
 	const size_t count = papermono_organizer_task_count();
-
+	char text[96];
 	make_header(screen, "待办");
-	if (count == 0U) {
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 220);
-		add_card_text(card, "暂无待办",
-			"通过内容中心上传 tasks-v1.json；设备只修改独立完成状态，不改写源文件。",
-			"TASKS V1");
-	} else {
-		if (ui->task_first >= count) {
-			ui->task_first = ((count - 1U) / 5U) * 5U;
-		}
-		for (size_t row = 0U; row < 5U; ++row) {
-			const size_t index = ui->task_first + row;
-			struct papermono_task task;
-			char title[150];
-			char meta[64];
-			lv_obj_t *card;
-
-			if (papermono_organizer_get_task(index, &task) < 0) {
-				break;
-			}
-			card = make_card(screen, 22, 92 + (int32_t)row * 126,
-				436, 110);
-			(void)snprintf(title, sizeof(title), "%s %s",
-				task.done ? "[x]" : "[ ]", task.title);
-			(void)snprintf(meta, sizeof(meta), "优先级 %d · %u / %u",
-				task.priority, (unsigned int)(index + 1U),
-				(unsigned int)count);
-			add_card_text(card, title,
-				task.due[0] == '\0' ? "无截止日期" : task.due, meta);
-		}
+	if (!count) {
+		detail_empty(screen, &papermono_icon_tasks_focal, "暂无待办", "通过内容中心上传待办资料。\ntasks-v1.json");
+		make_footer(screen, "右滑返回");
+		return 0;
 	}
-	make_footer(screen, "轻触勾选  ·  实体键翻页  ·  页脚返回");
+	if (ui->task_first >= count) ui->task_first = (count - 1U) / 5U * 5U;
+	(void)snprintf(text, sizeof(text), "%u 项待办", (unsigned)count);
+	(void)detail_text(screen, text, 22, 124, 436, 24, false);
+	for (size_t row = 0; row < 5 && ui->task_first + row < count; ++row) {
+		struct papermono_task task;
+		struct papermono_rect rect;
+		if (papermono_organizer_get_task(ui->task_first + row, &task) < 0) break;
+		(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
+		lv_obj_t *item = detail_row(screen, &rect, "", NULL, false, false);
+		make_checkbox(item, 12, 15, task.done);
+		(void)detail_text(item, task.title, 50, 10, 372, 34, true);
+		(void)snprintf(text, sizeof(text), task.done ? "已完成" : "%s · 优先级 %d", task.due[0] ? task.due : "无截止日期", task.priority);
+		(void)detail_text(item, text, 50, 54, 372, 24, false);
+	}
+	(void)snprintf(text, sizeof(text), "%02u / %02u · 轻触勾选", (unsigned)(ui->task_first / 5 + 1), (unsigned)((count + 4) / 5));
+	make_footer(screen, text);
 	return 0;
 }
 
@@ -2396,7 +2000,7 @@ static int tasks_event(void *context, const struct papermono_app_event *event,
 		   (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
 		    papermono_app_event_is_touch(event)) ||
 		   (event->type == PAPERMONO_APP_EVENT_TAP &&
-		    event->y >= UI_FOOTER_TOP)) {
+		    event->y >= UI_DETAIL_FOOTER_TOP)) {
 		/* This list is the app root, so back leaves the app. Handling
 		 * EVENT_BACK explicitly matters because the edge-swipe gesture
 		 * is otherwise swallowed and leaves the user stranded.
@@ -2416,79 +2020,57 @@ static int render_notes(void *context, lv_obj_t *screen)
 {
 	struct organizer_ui_state *ui = context;
 	const size_t count = papermono_organizer_note_count();
-
+	bool favorite = false;
 	make_header(screen, ui->note_open ? "便签内容" : "便签");
-	if (ui->note_open &&
-	    papermono_organizer_get_note(ui->note_selected, &note_view,
-		NULL, NULL) == 0) {
-		lv_obj_t *title = make_chinese_label(screen, note_view.title);
-		lv_obj_set_pos(title, 24, 94);
-		lv_obj_set_width(title, 432);
-		int32_t y = 138;
-		for (size_t index = 0U; index < note_view.block_count && y < 704;
-		     ++index) {
+	if (ui->note_open && papermono_organizer_get_note(ui->note_selected, &note_view, &favorite, NULL) == 0) {
+		(void)detail_text(screen, note_view.title, 22, 140, 436, 38, true);
+		if (favorite) (void)make_ink_shape(screen, 442, 130, 12, 18, ink, 0);
+		int32_t y = 200;
+		for (size_t index = 0; index < note_view.block_count && y <= 670; ++index) {
 			const struct papermono_note_block *block = &note_view.blocks[index];
 			if (block->type == PAPERMONO_NOTE_SEPARATOR) {
-				lv_obj_t *line = lv_obj_create(screen);
-				lv_obj_set_pos(line, 24, y + 8);
-				lv_obj_set_size(line, 432, 2);
-				set_box_style(line, ink, 0, 0);
-				y += 30;
-				continue;
+				(void)make_ink_shape(screen, 22, y + 8, 436, 1, ink, 0);
+				y += 30; continue;
 			}
 			char text[180];
-			(void)snprintf(text, sizeof(text), "%s%s",
-				note_block_prefix(block->type), block->text);
-			lv_obj_t *label = make_chinese_label(screen, text);
-			lv_obj_set_pos(label, block->type == PAPERMONO_NOTE_QUOTE ? 34 : 24,
-				y);
-			lv_obj_set_width(label, block->type == PAPERMONO_NOTE_QUOTE ? 418 : 432);
+			(void)snprintf(text, sizeof(text), "%s%s", note_block_prefix(block->type), block->text);
+			const bool quote = block->type == PAPERMONO_NOTE_QUOTE;
+			lv_obj_t *label = make_label(screen, text, &papermono_reading_24, ink);
+			lv_obj_set_pos(label, quote ? 40 : 22, y);
+			lv_obj_set_width(label, quote ? 418 : 436);
 			lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+			lv_obj_set_style_text_line_space(label, 6, LV_PART_MAIN);
 			lv_obj_update_layout(label);
-			const int32_t block_height = MAX(lv_obj_get_height(label), 22);
-			if (y + block_height > 704) {
-				lv_obj_set_height(label, MAX(704 - y, 1));
-				y = 704;
-			} else {
-				y += block_height +
-					(block->type == PAPERMONO_NOTE_HEADING ? 14 : 12);
-			}
+			const int32_t height = MAX(lv_obj_get_height(label), 30);
+			const int32_t available = (700 - y + 6) / 36 * 36 - 6;
+			if (quote) (void)make_ink_shape(screen, 22, y, 3, MIN(height, available), ink, 0);
+			if (height > available) { lv_obj_set_height(label, available); y = 700; }
+			else y += height + (block->type == PAPERMONO_NOTE_HEADING ? 24 : 18);
 		}
-		make_footer(screen, "长按切换收藏  ·  左键或页脚返回列表");
+		make_footer(screen, favorite ? "已收藏 · 长按切换收藏" : "长按切换收藏");
 		return 0;
 	}
 	ui->note_open = false;
-	if (count == 0U) {
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 220);
-		add_card_text(card, "暂无便签",
-			"上传 Markdown 或 TXT。仅显示标题、段落、列表、引用和分隔线。",
-			"READ ONLY");
+	if (!count) {
+		detail_empty(screen, &papermono_icon_document_focal, "暂无便签", "通过内容中心上传 Markdown 或 TXT。\n支持标题、段落、列表与引用。");
 	} else {
-		if (ui->note_first >= count) {
-			ui->note_first = ((count - 1U) / 5U) * 5U;
-		}
-		for (size_t row = 0U; row < 5U; ++row) {
-			const size_t index = ui->note_first + row;
-			bool favorite;
+		if (ui->note_first >= count) ui->note_first = (count - 1U) / 5U * 5U;
+		char text[96];
+		(void)snprintf(text, sizeof(text), "%u 篇便签", (unsigned)count);
+		(void)detail_text(screen, text, 22, 124, 436, 24, false);
+		for (size_t row = 0; row < 5 && ui->note_first + row < count; ++row) {
+			struct papermono_rect rect;
 			bool read;
-			lv_obj_t *card;
-			char meta[64];
-
-			if (papermono_organizer_get_note(index, &note_view, &favorite,
-				&read) < 0) {
-				break;
-			}
-			card = make_card(screen, 22, 92 + (int32_t)row * 126,
-				436, 110);
-			(void)snprintf(meta, sizeof(meta), "%s%s · %u / %u",
-				favorite ? "收藏 " : "", read ? "已读" : "未读",
-				(unsigned int)(index + 1U), (unsigned int)count);
-			add_card_text(card, note_view.title,
-				note_view.block_count > 0U ? note_view.blocks[0].text :
-				"空便签", meta);
+			if (papermono_organizer_get_note(ui->note_first + row, &note_view, &favorite, &read) < 0) break;
+			(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
+			(void)snprintf(text, sizeof(text), "%s%s", favorite ? "已收藏 · " : "", read ? "已读" : "未读");
+			lv_obj_t *item = detail_row(screen, &rect, "", NULL, false, true);
+			detail_image_at(item, &papermono_icon_document_small, 12, 12);
+			(void)detail_text(item, note_view.title, 64, 10, 330, 34, true);
+			(void)detail_text(item, text, 64, 54, 348, 24, false);
 		}
 	}
-	make_footer(screen, "轻触打开  ·  长按收藏  ·  实体键翻页");
+	make_footer(screen, "轻触打开 · 长按收藏");
 	return 0;
 }
 
@@ -2509,7 +2091,7 @@ static int notes_event(void *context, const struct papermono_app_event *event,
 		} else if (event->type == PAPERMONO_APP_EVENT_BACK ||
 			   event->type == PAPERMONO_APP_EVENT_PREVIOUS ||
 			   (event->type == PAPERMONO_APP_EVENT_TAP &&
-			    event->y >= UI_FOOTER_TOP)) {
+			    event->y >= UI_DETAIL_FOOTER_TOP)) {
 			/* Match the reader's hierarchical return: the edge-swipe
 			 * back gesture closes the open note rather than being
 			 * swallowed, so it returns to the list instead of
@@ -2555,7 +2137,7 @@ static int notes_event(void *context, const struct papermono_app_event *event,
 		   (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
 		    papermono_app_event_is_touch(event)) ||
 		   (event->type == PAPERMONO_APP_EVENT_TAP &&
-		    event->y >= UI_FOOTER_TOP)) {
+		    event->y >= UI_DETAIL_FOOTER_TOP)) {
 		/* This list is the app root, so back leaves the app. Handling
 		 * EVENT_BACK explicitly matters because the edge-swipe gesture
 		 * is otherwise swallowed and leaves the user stranded.
@@ -2572,54 +2154,60 @@ static const char *info_status_name(enum papermono_info_status status)
 		status == PAPERMONO_INFO_ERROR ? "获取失败" : "空";
 }
 
+/* Show the provider's Unix timestamp in explicit UTC without depending on
+ * the RTC being set, or assigning a timezone that the source never supplied.
+ */
+static void format_info_time(char *output, size_t size, int64_t timestamp)
+{
+	if (timestamp <= 0 || timestamp > 253402300799LL) {
+		(void)snprintf(output, size, "--");
+		return;
+	}
+	const int64_t days = timestamp / 86400 + 719468;
+	const int64_t era = days / 146097;
+	const unsigned doe = (unsigned)(days - era * 146097);
+	const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	const unsigned mp = (5 * doy + 2) / 153;
+	const unsigned day = doy - (153 * mp + 2) / 5 + 1;
+	const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+	const int year = (int)(yoe + era * 400) + (month <= 2);
+	(void)snprintf(output, size, "%04d-%02u-%02u %02u:%02u UTC", year, month,
+		day, (unsigned)(timestamp % 86400 / 3600), (unsigned)(timestamp % 3600 / 60));
+}
+
 static int render_info(void *context, lv_obj_t *screen)
 {
 	struct organizer_ui_state *ui = context;
 	const size_t count = papermono_info_count();
-
 	make_header(screen, "信息卡片");
-	if (count == 0U) {
-		lv_obj_t *card = make_card(screen, 22, 112, 436, 194);
-		add_card_text(card, "尚未配置数据源",
-			"信息槽位已经就绪；确定 RSS 地址、股票市场和数据源后再加载 Provider。",
-			"PROVIDER NEUTRAL");
-		card = make_card(screen, 22, 330, 436, 154);
-		add_card_text(card, "统一数据模型",
-			"标题 · 摘要 · 时间 · 来源 · 状态 · 可选数值变化",
-			"MODEL V1");
-		card = make_card(screen, 22, 508, 436, 154);
-		add_card_text(card, "离线行为",
-			"网络不可用时保留最后缓存，并明确显示数据更新时间。",
-			"NVS CACHE");
-	} else {
-		if (ui->info_first >= count) {
-			ui->info_first = ((count - 1U) / 4U) * 4U;
-		}
-		for (size_t row = 0U; row < 4U; ++row) {
-			const size_t index = ui->info_first + row;
-			struct papermono_info_card info;
-			char title[140];
-			char meta[96];
-			lv_obj_t *card;
-
-			if (papermono_info_get(index, &info) < 0) {
-				break;
-			}
-			card = make_card(screen, 22, 92 + (int32_t)row * 158,
-				436, 142);
-			if (info.has_value) {
-				(void)snprintf(title, sizeof(title), "%s · %s",
-					info.title, info.value);
-			} else {
-				(void)snprintf(title, sizeof(title), "%s", info.title);
-			}
-			(void)snprintf(meta, sizeof(meta), "%s · %s · %lld",
-				info.source, info_status_name(info.status),
-				(long long)info.updated_at);
-			add_card_text(card, title, info.summary, meta);
-		}
+	if (!count) {
+		detail_empty(screen, &papermono_icon_document_focal, "尚未配置数据源", "添加数据源后，将显示标题、摘要和更新时间。");
+		(void)make_ink_shape(screen, 22, 552, 436, 1, ink, 0);
+		detail_section(screen, 576, "离线时");
+		(void)detail_text(screen, "保留最近缓存，并显示更新时间。", 22, 624, 436, 52, false);
+		make_footer(screen, "等待内容更新");
+		return 0;
 	}
-	make_footer(screen, "Provider 后台更新  ·  实体键翻页  ·  页脚返回");
+	if (ui->info_first >= count) ui->info_first = (count - 1U) / 4U * 4U;
+	for (size_t row = 0; row < 4 && ui->info_first + row < count; ++row) {
+		struct papermono_info_card info;
+		char title[160], meta[128], updated[32];
+		if (papermono_info_get(ui->info_first + row, &info) < 0) break;
+		const int32_t y = 148 + (int32_t)row * 138;
+		(void)snprintf(title, sizeof(title), info.has_value ? "%s · %s" : "%s", info.title, info.value);
+		detail_image_at(screen, &papermono_icon_info_small, 22, y);
+		(void)detail_text(screen, title, 86, y, 372, 34, true);
+		(void)detail_text(screen, info.summary, 86, y + 42, 372, 48, false);
+		format_info_time(updated, sizeof(updated), info.updated_at);
+		(void)snprintf(meta, sizeof(meta), "%s · %s · %s", info.source,
+			info_status_name(info.status), updated);
+		(void)detail_text(screen, meta, 22, y + 96, 436, 24, false);
+		(void)make_ink_shape(screen, 22, y + 130, 436, 1, ink, 0);
+	}
+	char footer[64];
+	(void)snprintf(footer, sizeof(footer), "%02u / %02u · 实体键翻页", (unsigned)(ui->info_first / 4 + 1), (unsigned)((count + 3) / 4));
+	make_footer(screen, footer);
 	return 0;
 }
 
@@ -2645,7 +2233,7 @@ static int info_event(void *context, const struct papermono_app_event *event,
 		   (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
 		    papermono_app_event_is_touch(event)) ||
 		   (event->type == PAPERMONO_APP_EVENT_TAP &&
-		    event->y >= UI_FOOTER_TOP)) {
+		    event->y >= UI_DETAIL_FOOTER_TOP)) {
 		/* This list is the app root, so back leaves the app. Handling
 		 * EVENT_BACK explicitly matters because the edge-swipe gesture
 		 * is otherwise swallowed and leaves the user stranded.
@@ -2675,71 +2263,51 @@ static const char *status_led_text(enum papermono_status_led_state state)
 
 static int render_tools(void *context, lv_obj_t *screen)
 {
+	ARG_UNUSED(context);
 	const struct device *const imu = DEVICE_DT_GET(DT_NODELABEL(imu));
 	const struct device *const nfc = DEVICE_DT_GET(DT_NODELABEL(nfc));
 	const struct device *const lora = DEVICE_DT_GET(DT_NODELABEL(lora));
-	const struct device *const microphone = DEVICE_DT_GET(DT_NODELABEL(microphone));
-	struct papermono_sync_state sync = { 0 };
-	struct papermono_ft6336_status touch_status = { 0 };
-	enum papermono_wakeup_cause wake_cause = PAPERMONO_WAKE_OTHER;
-	char body[160];
-	lv_obj_t *card;
-
-	ARG_UNUSED(context);
+	const struct device *const mic = DEVICE_DT_GET(DT_NODELABEL(microphone));
+	struct papermono_ft6336_status touch_status = {0};
+	struct papermono_sync_state sync = {0};
+	enum papermono_wakeup_cause cause = PAPERMONO_WAKE_OTHER;
+	char body[192];
 	make_header(screen, "硬件工具");
-	const int touch_ret = papermono_ft6336_get_status(&touch_status);
-	const int wake_ret = papermono_power_get_wakeup_cause(&wake_cause);
-	(void)snprintf(body, sizeof(body), "%s · X %d Y %d · %s\n"
-		"帧 %u · I2C %u · 异常 %u · 唤醒 %s",
+	int touch_ret = papermono_ft6336_get_status(&touch_status);
+	int wake_ret = papermono_power_get_wakeup_cause(&cause);
+	(void)snprintf(body, sizeof(body), "%s · X %d Y %d · %s\n帧 %u · I2C %u · 异常 %u · 唤醒 %s",
 		touch_ret == 0 && touch_status.online ? "在线" : "等待恢复",
-		touch_status.x, touch_status.y,
-		touch_status.pressed ? "按下" : "松开", touch_status.frames,
-		touch_status.read_errors, touch_status.invalid_frames,
-		wake_ret == 0 ? papermono_wakeup_cause_name(wake_cause) : "不可用");
-	card = make_card(screen, 22, 88, 436, 112);
-	add_card_text(card, "系统、触摸与 TF", body,
-		papermono_content_store_state_text(
-			papermono_content_store_media_state()));
-
-	int sample = device_is_ready(imu) ? sensor_sample_fetch(imu) : -ENODEV;
-	(void)snprintf(body, sizeof(body), "%s · %s",
-		ready_text(imu), sample == 0 ? "实时采样成功" : "尚无有效采样");
-	card = make_card(screen, 22, 216, 436, 112);
-	add_card_text(card, "IMU", body, "BMI270");
-
-	(void)snprintf(body, sizeof(body), "NFC：%s · 未做真实标签 RF 验收\n"
-		"LoRa：%s · 默认禁止发射", ready_text(nfc), ready_text(lora));
-	card = make_card(screen, 22, 344, 436, 128);
-	add_card_text(card, "RF 工具", body, "EXPLICIT HIL ONLY");
-
-	(void)snprintf(body, sizeof(body), "麦克风：%s\n状态灯：%s",
-		ready_text(microphone),
-		status_led_text(papermono_status_led_get_state()));
-	card = make_card(screen, 22, 488, 436, 112);
-	add_card_text(card, "音频与提示", body, "RGB STATUS · BUZZER ISOLATED");
-
+		touch_status.x, touch_status.y, touch_status.pressed ? "按下" : "松开",
+		touch_status.frames, touch_status.read_errors, touch_status.invalid_frames,
+		wake_ret == 0 ? papermono_wakeup_cause_name(cause) : "--");
+	(void)detail_row(screen, &detail_system_rect, "系统与触摸", body, false, true);
+	const int sample = device_is_ready(imu) ? sensor_sample_fetch(imu) : -ENODEV;
+	const char *titles[] = {"TF 存储", "IMU", "NFC", "LoRa", "音频与提示", "BLE 小数据同步"};
+	for (size_t row = 0; row < 6; ++row) {
+		const struct papermono_rect rect = {22, 260 + (int32_t)row * 74, 436, 72};
+		switch (row) {
+		case 0: (void)snprintf(body, sizeof(body), "%s", papermono_content_store_state_text(papermono_content_store_media_state())); break;
+		case 1: (void)snprintf(body, sizeof(body), "%s · %s", ready_text(imu), sample == 0 ? "采样成功" : "尚无有效采样"); break;
+		case 2: (void)snprintf(body, sizeof(body), "%s · 射频未验收", ready_text(nfc)); break;
+		case 3: (void)snprintf(body, sizeof(body), "%s · 默认禁止发射", ready_text(lora)); break;
+		case 4: (void)snprintf(body, sizeof(body), "麦克风 %s · %s", ready_text(mic), status_led_text(papermono_status_led_get_state())); break;
+		default:
 #if defined(CONFIG_PAPERMONO_BLE_SYNC)
-	papermono_sync_get_state(&sync);
+			papermono_sync_get_state(&sync);
 #endif
-	if (sync.active) {
-		(void)snprintf(body, sizeof(body), "正在接收 %llu / %llu 字节",
-			(unsigned long long)sync.received,
-			(unsigned long long)sync.expected);
-	} else {
-		(void)snprintf(body, sizeof(body), "%s · 最近错误 %d",
-			sync.initialized ? "认证服务已就绪" : "同步服务未启用",
-			sync.last_error);
+			if (sync.active) (void)snprintf(body, sizeof(body), "接收 %llu / %llu 字节", (unsigned long long)sync.received, (unsigned long long)sync.expected);
+			else (void)snprintf(body, sizeof(body), "%s · 错误 %d", sync.initialized ? "认证服务已就绪" : "同步服务未启用", sync.last_error);
+		}
+		(void)detail_row(screen, &rect, titles[row], body, false, false);
 	}
-	card = make_card(screen, 22, 616, 436, 110);
-	add_card_text(card, "BLE 小数据同步", body, "NO BOOK TRANSFER");
-	make_footer(screen, "轻触首卡查看系统状态  ·  页脚返回");
+	make_footer(screen, "轻触首项查看系统状态");
 	return 0;
 }
 
 static int tools_event(void *context, const struct papermono_app_event *event,
 	struct papermono_app_command *command)
 {
-	static const struct papermono_rect system_rect = { 22, 88, 436, 112 };
+	const struct papermono_rect system_rect = detail_system_rect;
 
 	ARG_UNUSED(context);
 	if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP,
@@ -2750,7 +2318,7 @@ static int tools_event(void *context, const struct papermono_app_event *event,
 		command->target = PAPERMONO_APP_SYSTEM;
 	} else if (papermono_app_event_is_back_navigation(event) ||
 		   (event->type == PAPERMONO_APP_EVENT_TAP &&
-		    event->y >= UI_FOOTER_TOP)) {
+		    event->y >= UI_DETAIL_FOOTER_TOP)) {
 		command->type = PAPERMONO_APP_COMMAND_BACK;
 	}
 	return 0;
@@ -2758,127 +2326,112 @@ static int tools_event(void *context, const struct papermono_app_event *event,
 
 static int render_power(void *context, lv_obj_t *screen)
 {
-	char status[96];
-
 	ARG_UNUSED(context);
-	make_header(screen, "电源");
+	char text[128];
+	make_header(screen, confirmation == CONFIRM_RESET_WIFI || confirmation == CONFIRM_RESET_BLE ?
+		"连接设置" : confirmation == CONFIRM_RESET_SETTINGS ? "设备设置" : "电源");
 	if (confirmation != CONFIRM_NONE) {
 		const char *title = confirmation == CONFIRM_SLEEP ? "确认休眠？" :
 			confirmation == CONFIRM_SHUTDOWN ? "确认关机？" :
 			confirmation == CONFIRM_RESET_WIFI ? "确认重新配网？" :
-			confirmation == CONFIRM_RESET_BLE ? "确认清除蓝牙配对？" :
-			"确认恢复默认设置？";
-		const char *body = confirmation == CONFIRM_SLEEP ?
-			"屏幕将保留当前画面，触摸或电源键唤醒。" :
-			confirmation == CONFIRM_SHUTDOWN ?
-			"设备将完全关机，仅可通过电源键重新启动。" :
-			"此操作会清除对应的本地状态，内容文件不会删除。";
-		lv_obj_t *card = make_card(screen, 22, 132, 436, 270);
-
-		add_card_text(card, title, body, "CONFIRMATION REQUIRED");
-		card = make_card(screen, 22, 448, 436, 96);
-		add_card_text(card, "确认执行", "轻触此处继续", NULL);
-		card = make_card(screen, 22, 568, 436, 96);
-		add_card_text(card, "取消", "返回上一页", NULL);
-		make_footer(screen, "所有电源操作都需要二次确认");
+			confirmation == CONFIRM_RESET_BLE ? "确认清除配对？" : "恢复默认设置？";
+		const char *body = confirmation == CONFIRM_SLEEP ? "屏幕将保留当前画面。\n触摸或电源键唤醒。" :
+			confirmation == CONFIRM_SHUTDOWN ? "设备将完全关机。\n仅可通过电源键重新启动。" :
+			confirmation == CONFIRM_RESET_WIFI ? "将清除已保存的网络配置。\n内容文件不会删除。" :
+			confirmation == CONFIRM_RESET_BLE ? "将删除已保存的蓝牙主机。\n内容文件不会删除。" :
+			"偏好设置将恢复为默认值。\n内容文件不会删除。";
+		detail_icon(screen, confirmation == CONFIRM_RESET_SETTINGS ? &papermono_icon_restore :
+			confirmation == CONFIRM_RESET_WIFI ? &papermono_icon_wifi :
+			confirmation == CONFIRM_RESET_BLE ? &papermono_icon_bluetooth :
+			confirmation == CONFIRM_SLEEP ? &papermono_icon_sleep : &papermono_icon_power, 216);
+		lv_obj_t *label = make_label(screen, title, &papermono_heading_48, ink);
+		lv_obj_set_pos(label, 22, 352); lv_obj_set_size(label, 436, 58);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		label = detail_text(screen, body, 22, 434, 436, 70, false);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		detail_button(screen, &detail_confirm_rect, confirmation == CONFIRM_SLEEP ? "确认休眠" :
+			confirmation == CONFIRM_SHUTDOWN ? "确认关机" : confirmation == CONFIRM_RESET_WIFI ?
+			"确认重新配网" : confirmation == CONFIRM_RESET_BLE ? "确认清除配对" : "确认恢复", true);
+		detail_button(screen, &detail_cancel_rect, "取消", false);
+		make_footer(screen, "取消可返回上一页");
 		return 0;
 	}
-
-	lv_obj_t *card = make_card(screen, 22, 116, 436, 174);
-	add_card_text(card, "立即休眠", "保留当前墨水屏画面；触摸或电源键唤醒。",
-		"DEEP SLEEP");
-	card = make_card(screen, 22, 316, 436, 174);
-	add_card_text(card, "完全关机", "关闭系统电源；使用电源键重新启动。",
-		"POWER OFF");
-	card = make_card(screen, 22, 516, 436, 154);
-	if (power_last_error < 0) {
-		(void)snprintf(status, sizeof(status),
-			"上次操作未执行（错误 %d）。请松开屏幕后重试。",
-			power_last_error);
-	} else {
-		(void)snprintf(status, sizeof(status),
-			"在设置中选择 1 / 5 / 10 / 30 分钟或关闭。");
+	detail_power_option(screen, &detail_sleep_rect, &papermono_icon_sleep, "立即休眠", "保留当前墨水屏画面。\n触摸或电源键唤醒。");
+	detail_power_option(screen, &detail_shutdown_rect, &papermono_icon_power, "完全关机", "关闭系统电源。\n使用电源键重新启动。");
+	detail_section(screen, 580, power_last_error < 0 ? "电源操作已取消" : "自动休眠");
+	if (power_last_error < 0) (void)snprintf(text, sizeof(text), "上次操作未执行（%d）。\n松开屏幕后重试。", power_last_error);
+	else {
+		const unsigned minutes = papermono_settings_get()->idle_sleep_minutes;
+		if (minutes) (void)snprintf(text, sizeof(text), "%u 分钟 · 在设置中调整休眠时间。", minutes);
+		else (void)snprintf(text, sizeof(text), "已关闭 · 在设置中调整休眠时间。");
 	}
-	add_card_text(card, power_last_error < 0 ? "电源操作已取消" : "自动休眠",
-		status, power_last_error < 0 ? "SYSTEM STILL RUNNING" :
-		"DEFAULT 10 MIN");
-	make_footer(screen, "向右滑动或左键返回");
+	(void)detail_text(screen, text, 22, 632, 436, 64, false);
+	make_footer(screen, "操作需要二次确认");
 	return 0;
 }
 
 static int render_settings(void *context, lv_obj_t *screen)
 {
-	const struct papermono_preferences *prefs = papermono_settings_get();
-	lv_obj_t *card;
-	char value[80];
-
 	ARG_UNUSED(context);
+	const struct papermono_preferences *prefs = papermono_settings_get();
+	char value[96];
 	make_header(screen, "设置");
-	(void)snprintf(value, sizeof(value), prefs->idle_sleep_minutes == 0U ?
-		"已关闭" : "%u 分钟", prefs->idle_sleep_minutes);
-	card = make_card(screen, 22, 88, 436, 84);
-	add_card_text(card, "自动休眠", value, "TAP TO CHANGE");
-	card = make_card(screen, 22, 180, 436, 84);
-	add_card_text(card, "时间格式", prefs->use_24_hour ? "24 小时制" :
-		"12 小时制", "ASIA/SHANGHAI");
-	(void)snprintf(value, sizeof(value), prefs->frontlight_percent == 0U ?
-		"已关闭" : "%u%%", prefs->frontlight_percent);
-	card = make_card(screen, 22, 272, 436, 84);
-	add_card_text(card, "前光亮度", value, frontlight_last_error < 0 ?
-		"设置失败 · 未保存" : "轻触/右滑增加 · 左滑减少 · 长按关闭");
-	card = make_card(screen, 22, 364, 436, 84);
-	add_card_text(card, "重新配置 Wi-Fi", "清除网络配置并重新进入配网页面", NULL);
-	card = make_card(screen, 22, 456, 436, 84);
-	add_card_text(card, "清除蓝牙配对", "删除已保存的电脑主机", NULL);
-	card = make_card(screen, 22, 548, 436, 84);
-	add_card_text(card, "恢复默认设置", "长按后仍需二次确认", NULL);
-	card = make_card(screen, 22, 640, 436, 70);
-	add_card_text(card, "电源选项", "休眠与关机", NULL);
-	if (frontlight_last_error < 0) {
-		(void)snprintf(value, sizeof(value),
-			"前光调整失败（%d） · 向右滑动返回", frontlight_last_error);
-		make_footer(screen, value);
-	} else {
-		make_footer(screen, "轻触修改  ·  前光长按关闭  ·  向右滑动返回");
+	detail_section(screen, 134, "日常偏好");
+	detail_section(screen, 390, "连接");
+	detail_section(screen, 548, "设备");
+	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "重新配置 Wi-Fi", "清除蓝牙配对", "恢复默认设置", "电源选项"};
+	for (size_t i = 0; i < ARRAY_SIZE(detail_setting_rects); ++i) {
+		const struct papermono_rect *rect = &detail_setting_rects[i];
+		(void)detail_text(screen, titles[i], rect->x, rect->y + 10, i <= 2 ? 254 : 398, 34, true);
+		(void)make_ink_shape(screen, rect->x, rect->y + rect->height - 1, rect->width, 1, ink, 0);
+		if (i != DETAIL_SETTING_FRONTLIGHT) make_chevron(screen, 443, rect->y + 20);
+		value[0] = '\0';
+		if (i == DETAIL_SETTING_SLEEP) {
+			if (prefs->idle_sleep_minutes) (void)snprintf(value, sizeof(value), "%u 分钟", prefs->idle_sleep_minutes);
+			else (void)snprintf(value, sizeof(value), "已关闭");
+		} else if (i == DETAIL_SETTING_TIME) (void)snprintf(value, sizeof(value), "%s", prefs->use_24_hour ? "24 小时制" : "12 小时制");
+		else if (i == DETAIL_SETTING_FRONTLIGHT) (void)snprintf(value, sizeof(value), "%u%%", prefs->frontlight_percent);
+		if (value[0]) {
+			lv_obj_t *label = detail_text(screen, value, 276, rect->y + 15, 156, 24, false);
+			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+		}
 	}
+	(void)make_ink_shape(screen, 40, 356, 384, 1, ink, 0);
+	for (int i = 0; i < 5; ++i) {
+		(void)make_outline_shape(screen, 34 + i * 96, 350, 12, 12, 1, 6);
+		if ((int)prefs->frontlight_percent / 25 == i) (void)make_ink_shape(screen, 34 + i * 96, 350, 12, 12, ink, 6);
+	}
+	(void)detail_text(screen, "长按后确认", 306, 614, 130, 24, false);
+	make_footer(screen, frontlight_last_error < 0 ? "前光调整失败 · 未保存" : "轻触修改 · 前光长按关闭");
 	return 0;
 }
 
 static int render_system(void *context, lv_obj_t *screen)
 {
-	struct papermono_ui_snapshot snapshot;
-	char body[192];
-	char battery[20];
-	char input[20];
-	char output[20];
-	lv_obj_t *card;
-
 	ARG_UNUSED(context);
+	struct papermono_ui_snapshot snapshot;
+	char value[96];
 	read_snapshot(&snapshot);
-	format_voltage(battery, sizeof(battery), snapshot.battery_valid,
-		snapshot.battery_mv);
-	format_voltage(input, sizeof(input), snapshot.input_valid,
-		snapshot.input_mv);
-	format_voltage(output, sizeof(output), snapshot.output_valid,
-		snapshot.output_mv);
 	make_header(screen, "系统状态");
-	(void)snprintf(body, sizeof(body),
-		"Zephyr %s\nLVGL 9 · SSD1677 480×800\n运行时间 %u 分钟",
-		KERNEL_VERSION_STRING, snapshot.uptime_minutes);
-	card = make_card(screen, 22, 100, 436, 186);
-	add_card_text(card, "固件", body, "C153 / ESP32-S3");
-	(void)snprintf(body, sizeof(body),
-		"电池 %s\n输入 %s\n5V 输出 %s\n电源来源 %s",
-		battery, input, output,
-		snapshot.power_source_valid ? "可用" : "--");
-	card = make_card(screen, 22, 310, 436, 206);
-	add_card_text(card, "电源与充电", body, "M5PM1 LIVE DATA");
-	card = make_card(screen, 22, 540, 436, 152);
-	add_card_text(card, "存储",
-		papermono_content_store_state_text(
-			papermono_content_store_media_state()),
-		"NVS 192 KIB · TF CONTENT");
-	make_footer(screen, "向右滑动或左键返回");
+	(void)detail_text(screen, "PaperMono C153", 22, 132, 436, 24, false);
+	detail_section(screen, 174, "固件");
+	detail_value(screen, 220, "处理器", "ESP32-S3");
+	detail_value(screen, 252, "系统", "Zephyr " KERNEL_VERSION_STRING);
+	detail_value(screen, 284, "界面", "LVGL 9");
+	detail_value(screen, 316, "屏幕", "SSD1677 · 480 × 800");
+	(void)snprintf(value, sizeof(value), "%u 分钟", snapshot.uptime_minutes);
+	detail_value(screen, 348, "运行时间", value);
+	(void)make_ink_shape(screen, 22, 392, 436, 1, ink, 0);
+	detail_section(screen, 412, "电源");
+	format_voltage(value, sizeof(value), snapshot.battery_valid, snapshot.battery_mv); detail_value(screen, 458, "电池电压", value);
+	format_voltage(value, sizeof(value), snapshot.input_valid, snapshot.input_mv); detail_value(screen, 490, "输入电压", value);
+	format_voltage(value, sizeof(value), snapshot.output_valid, snapshot.output_mv); detail_value(screen, 522, "输出电压", value);
+	detail_value(screen, 554, "电源来源", snapshot.power_source_valid ? "已读取" : "--");
+	(void)make_ink_shape(screen, 22, 596, 436, 1, ink, 0);
+	detail_section(screen, 614, "存储");
+	(void)detail_text(screen, papermono_content_store_state_text(papermono_content_store_media_state()), 22, 656, 436, 28, false);
+	detail_value(screen, 688, "NVS", "192 KiB");
+	make_footer(screen, "右滑返回");
 	return 0;
 }
 
@@ -2914,62 +2467,29 @@ static int library_start_selected(struct library_ui_state *state,
 	return 0;
 }
 
-enum library_touch_action {
-	LIBRARY_TOUCH_PREVIOUS_PAGE = 1,
-	LIBRARY_TOUCH_NEXT_PAGE,
-	LIBRARY_TOUCH_OPEN_MENU,
-	LIBRARY_TOUCH_CLOSE_READER,
-};
+#define library_book_grid detail_list_grid
 
-static const struct papermono_interaction_region reader_regions[] = {
-	{ { 0, 0, 160, UI_FOOTER_TOP }, LIBRARY_TOUCH_PREVIOUS_PAGE, 0,
-		PAPERMONO_INTERACTION_TAP },
-	{ { 320, 0, 160, UI_FOOTER_TOP }, LIBRARY_TOUCH_NEXT_PAGE, 0,
-		PAPERMONO_INTERACTION_TAP },
-	{ { 0, UI_FOOTER_TOP, UI_WIDTH, UI_HEIGHT - UI_FOOTER_TOP },
-		LIBRARY_TOUCH_CLOSE_READER, 0, PAPERMONO_INTERACTION_TAP },
-	{ { 160, 0, 160, UI_FOOTER_TOP }, LIBRARY_TOUCH_OPEN_MENU, 0,
-		PAPERMONO_INTERACTION_TAP },
-};
+#define library_menu_grid detail_menu_grid
 
-static const struct papermono_interaction_grid_layout library_book_grid = {
-	.x = 22,
-	.y = 116,
-	.cell_width = 436,
-	.cell_height = 102,
-	.column_gap = 0,
-	.row_gap = 18,
-	.columns = 1,
-	.rows = LIBRARY_VISIBLE_BOOKS,
-};
-
-static const struct papermono_interaction_grid_layout library_menu_grid = {
-	.x = 22,
-	.y = 86,
-	.cell_width = 436,
-	.cell_height = 84,
-	.column_gap = 0,
-	.row_gap = 8,
-	.columns = 1,
-	.rows = 7,
-};
-
-static const struct papermono_interaction_grid_layout library_auxiliary_grid = {
-	.x = 22,
-	.y = 96,
-	.cell_width = 436,
-	.cell_height = 106,
-	.column_gap = 0,
-	.row_gap = 18,
-	.columns = 1,
-	.rows = 5,
-};
+#define library_auxiliary_grid detail_list_grid
 
 static int library_event(void *context,
 	const struct papermono_app_event *event,
 	struct papermono_app_command *command)
 {
 	struct library_ui_state *state = context;
+	if (state->mode != LIBRARY_MODE_READER &&
+	    event->type == PAPERMONO_APP_EVENT_TAP &&
+	    event->y >= UI_DETAIL_FOOTER_TOP) {
+		if (state->mode == LIBRARY_MODE_LIST) {
+			command->type = PAPERMONO_APP_COMMAND_BACK;
+		} else {
+			state->mode = state->mode == LIBRARY_MODE_MENU ?
+				LIBRARY_MODE_READER : LIBRARY_MODE_MENU;
+			request_redraw(command);
+		}
+		return 0;
+	}
 
 	if (event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED &&
 	    state->mode == LIBRARY_MODE_LIST) {
@@ -2979,9 +2499,7 @@ static int library_event(void *context,
 	}
 
 	if (state->mode == LIBRARY_MODE_LIST) {
-		static const struct papermono_rect empty_rescan_rect = {
-			22, 132, 436, 260,
-		};
+		const struct papermono_rect empty_rescan_rect = library_rescan_rect;
 		size_t tapped_row;
 
 		if (event->type == PAPERMONO_APP_EVENT_BACK) {
@@ -3212,14 +2730,24 @@ static int library_event(void *context,
 		} else if (ret < 0 && ret != -ENOENT) {
 			LOG_WRN("Unable to move to the next reader page (%d)", ret);
 		}
-	} else if (event->type == PAPERMONO_APP_EVENT_LONG_PRESS) {
+	} else if (event->type == PAPERMONO_APP_EVENT_LONG_PRESS ||
+		   (touch_routed && touch_action == LIBRARY_TOUCH_BOOKMARK)) {
 		(void)papermono_reader_toggle_bookmark(&state->reader,
 			state->page_text);
 		request_redraw(command);
-	} else if (touch_routed && touch_action == LIBRARY_TOUCH_CLOSE_READER) {
-		library_return_to_list(state);
+	} else if (touch_routed && touch_action == LIBRARY_TOUCH_OPEN_TOC &&
+		   state->reader.book.kind == PAPERMONO_CONTENT_EPUB) {
+		state->auxiliary_selected = 0U;
+		for (uint16_t toc = 0; toc < state->reader.epub.toc_count; ++toc) {
+			if (state->reader.epub.toc[toc].chapter == state->reader.chapter) {
+				state->auxiliary_selected = toc;
+				break;
+			}
+		}
+		state->mode = LIBRARY_MODE_TOC;
 		request_redraw(command);
-	} else if (touch_routed && touch_action == LIBRARY_TOUCH_OPEN_MENU) {
+	} else if (touch_routed && (touch_action == LIBRARY_TOUCH_OPEN_MENU ||
+				  touch_action == LIBRARY_TOUCH_OPEN_TOC)) {
 		state->mode = LIBRARY_MODE_MENU;
 		request_redraw(command);
 	}
@@ -3236,10 +2764,18 @@ static int home_event(void *context, const struct papermono_app_event *event,
 	    event->type == PAPERMONO_APP_EVENT_NEXT) {
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
 		command->target = PAPERMONO_APP_LAUNCHER;
+	} else if (papermono_interaction_route(event, navigation_regions,
+			ARRAY_SIZE(navigation_regions), &action, NULL) == 0) {
+		command->type = PAPERMONO_APP_COMMAND_OPEN;
+		command->target = (enum papermono_app_id)action;
 	} else if (papermono_interaction_route(event, home_regions,
 			ARRAY_SIZE(home_regions), &action, NULL) == 0) {
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
 		command->target = (enum papermono_app_id)action;
+		if (action == PAPERMONO_APP_LIBRARY) {
+			struct papermono_content_entry recent;
+			library_resume_requested = papermono_reader_recent(&recent) == 0;
+		}
 	}
 	return 0;
 }
@@ -3252,6 +2788,7 @@ static int launcher_event(void *context,
 		(ARRAY_SIZE(launcher_items) + LAUNCHER_PAGE_SIZE - 1U) /
 		LAUNCHER_PAGE_SIZE;
 	size_t index;
+	uint16_t action;
 
 	ARG_UNUSED(context);
 	if (event->type == PAPERMONO_APP_EVENT_BACK) {
@@ -3268,6 +2805,10 @@ static int launcher_event(void *context,
 			++launcher_page;
 			request_redraw(command);
 		}
+	} else if (papermono_interaction_route(event, navigation_regions,
+			ARRAY_SIZE(navigation_regions), &action, NULL) == 0) {
+		command->type = PAPERMONO_APP_COMMAND_OPEN;
+		command->target = (enum papermono_app_id)action;
 	} else if (papermono_interaction_spaced_grid_index(event,
 			PAPERMONO_INTERACTION_TAP, &launcher_grid, &index) == 0) {
 		index += launcher_page * LAUNCHER_PAGE_SIZE;
@@ -3288,7 +2829,7 @@ static int weread_event(void *context,
 	enum papermono_weread_navigation navigation;
 	enum papermono_weread_navigation_result result;
 	const struct papermono_rect footer = {
-		0, UI_FOOTER_TOP, UI_WIDTH, UI_HEIGHT - UI_FOOTER_TOP,
+		0, UI_DETAIL_FOOTER_TOP, UI_WIDTH, UI_HEIGHT - UI_DETAIL_FOOTER_TOP,
 	};
 
 	if (state == NULL || event == NULL || command == NULL) {
@@ -3311,7 +2852,7 @@ static int weread_event(void *context,
 	state->last_error = status.last_error;
 	if ((status.last_error < 0 || status.count == 0U) &&
 	    papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP,
-		&(struct papermono_rect) { 22, 294, 436, 190 })) {
+		&weread_import_rect)) {
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
 		command->target = PAPERMONO_APP_CONTENT;
 		return 0;
@@ -3366,7 +2907,7 @@ static int common_event(void *context, const struct papermono_app_event *event,
 	struct papermono_app_command *command)
 {
 	const struct papermono_rect footer = {
-		0, UI_FOOTER_TOP, UI_WIDTH, UI_HEIGHT - UI_FOOTER_TOP,
+		0, UI_DETAIL_FOOTER_TOP, UI_WIDTH, UI_HEIGHT - UI_DETAIL_FOOTER_TOP,
 	};
 
 	ARG_UNUSED(context);
@@ -3381,10 +2922,10 @@ static int common_event(void *context, const struct papermono_app_event *event,
 static int power_event(void *context, const struct papermono_app_event *event,
 	struct papermono_app_command *command)
 {
-	static const struct papermono_rect confirm_rect = { 22, 448, 436, 96 };
-	static const struct papermono_rect cancel_rect = { 22, 568, 436, 96 };
-	static const struct papermono_rect sleep_rect = { 22, 116, 436, 174 };
-	static const struct papermono_rect shutdown_rect = { 22, 316, 436, 174 };
+	const struct papermono_rect confirm_rect = detail_confirm_rect;
+	const struct papermono_rect cancel_rect = detail_cancel_rect;
+	const struct papermono_rect sleep_rect = detail_sleep_rect;
+	const struct papermono_rect shutdown_rect = detail_shutdown_rect;
 
 	ARG_UNUSED(context);
 	if (confirmation != CONFIRM_NONE) {
@@ -3435,18 +2976,22 @@ static int power_event(void *context, const struct papermono_app_event *event,
 			}
 		} else if (papermono_app_event_is_back_navigation(event) ||
 			   papermono_interaction_contains(event,
-				   PAPERMONO_INTERACTION_TAP, &cancel_rect)) {
+				   PAPERMONO_INTERACTION_TAP, &cancel_rect) ||
+			   (event->type == PAPERMONO_APP_EVENT_TAP && event->y >= UI_DETAIL_FOOTER_TOP)) {
 			confirmation = CONFIRM_NONE;
-			request_redraw(command);
+			if (confirmation_origin == PAPERMONO_APP_SETTINGS) command->type = PAPERMONO_APP_COMMAND_BACK;
+			else request_redraw(command);
 		}
 		return 0;
 	}
 	if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP,
 		&sleep_rect)) {
+		confirmation_origin = PAPERMONO_APP_POWER;
 		confirmation = CONFIRM_SLEEP;
 		request_redraw(command);
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_TAP, &shutdown_rect)) {
+		confirmation_origin = PAPERMONO_APP_POWER;
 		confirmation = CONFIRM_SHUTDOWN;
 		request_redraw(command);
 	} else {
@@ -3463,19 +3008,20 @@ static void power_close(void *context)
 	 * later visit can never resurrect a stale destructive action.
 	 */
 	confirmation = CONFIRM_NONE;
+	confirmation_origin = PAPERMONO_APP_POWER;
 }
 
 static int settings_event(void *context,
 	const struct papermono_app_event *event,
 	struct papermono_app_command *command)
 {
-	static const struct papermono_rect sleep_rect = { 22, 88, 436, 84 };
-	static const struct papermono_rect time_rect = { 22, 180, 436, 84 };
-	static const struct papermono_rect frontlight_rect = { 22, 272, 436, 84 };
-	static const struct papermono_rect wifi_rect = { 22, 364, 436, 84 };
-	static const struct papermono_rect ble_rect = { 22, 456, 436, 84 };
-	static const struct papermono_rect reset_rect = { 22, 548, 436, 84 };
-	static const struct papermono_rect power_rect = { 22, 640, 436, 70 };
+	const struct papermono_rect sleep_rect = detail_setting_rects[DETAIL_SETTING_SLEEP];
+	const struct papermono_rect time_rect = detail_setting_rects[DETAIL_SETTING_TIME];
+	const struct papermono_rect frontlight_rect = detail_setting_rects[DETAIL_SETTING_FRONTLIGHT];
+	const struct papermono_rect wifi_rect = detail_setting_rects[DETAIL_SETTING_WIFI];
+	const struct papermono_rect ble_rect = detail_setting_rects[DETAIL_SETTING_BLE];
+	const struct papermono_rect reset_rect = detail_setting_rects[DETAIL_SETTING_RESET];
+	const struct papermono_rect power_rect = detail_setting_rects[DETAIL_SETTING_POWER];
 	const struct papermono_preferences *prefs = papermono_settings_get();
 
 	ARG_UNUSED(context);
@@ -3519,16 +3065,19 @@ static int settings_event(void *context,
 		request_redraw(command);
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_TAP, &wifi_rect)) {
+		confirmation_origin = PAPERMONO_APP_SETTINGS;
 		confirmation = CONFIRM_RESET_WIFI;
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
 		command->target = PAPERMONO_APP_POWER;
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_TAP, &ble_rect)) {
+		confirmation_origin = PAPERMONO_APP_SETTINGS;
 		confirmation = CONFIRM_RESET_BLE;
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
 		command->target = PAPERMONO_APP_POWER;
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_LONG_PRESS, &reset_rect)) {
+		confirmation_origin = PAPERMONO_APP_SETTINGS;
 		confirmation = CONFIRM_RESET_SETTINGS;
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
 		command->target = PAPERMONO_APP_POWER;
@@ -3959,12 +3508,13 @@ int papermono_ui_init(const struct device *display)
 
 int papermono_ui_demo_update(uint32_t update, uint32_t total)
 {
-	if (clock_label == NULL || footer_label == NULL) {
+	if (clock_label == NULL) {
 		return -EFAULT;
 	}
 	lv_label_set_text_fmt(clock_label, "10:%02u", (28U + update) % 60U);
-	lv_label_set_text_fmt(footer_label, "PARTIAL %02u / %02u", update,
-		total);
+	if (footer_label != NULL) {
+		lv_label_set_text_fmt(footer_label, "PARTIAL %02u / %02u", update, total);
+	}
 	return papermono_display_refresh(PAPERMONO_REFRESH_FAST);
 }
 

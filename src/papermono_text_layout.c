@@ -2,7 +2,6 @@
 
 #include <papermono/text_layout.h>
 
-#define PAPERMONO_TEXT_PUNCTUATION_OVERFLOW 2U
 
 static bool codepoint_in(const uint32_t *values, uint8_t count,
 	uint32_t codepoint)

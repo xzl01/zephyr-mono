@@ -10,6 +10,7 @@
 #include <papermono/content_store.h>
 #include <papermono/epub.h>
 #include <papermono/reader_cache.h>
+#include <papermono/reader_layout.h>
 #include <papermono/text_codec.h>
 
 #ifdef __cplusplus
@@ -18,8 +19,8 @@ extern "C" {
 
 #define PAPERMONO_READER_HISTORY_DEPTH 32U
 #define PAPERMONO_READER_BOOKMARK_LIMIT 8U
-#define PAPERMONO_READER_COLUMNS 26U
-#define PAPERMONO_READER_LINES 30U
+#define PAPERMONO_READER_COLUMNS 16U
+#define PAPERMONO_READER_LINES 16U
 
 struct papermono_reader_history_entry {
 	uint32_t offset;

@@ -341,21 +341,11 @@ int papermono_reader_open(struct papermono_reader_session *session,
 
 static void reader_layout(uint8_t *columns, uint8_t *lines)
 {
-	switch (papermono_settings_get()->reader_density) {
-	case PAPERMONO_READER_DENSITY_COMPACT:
-		*columns = 28U;
-		*lines = 31U;
-		break;
-	case PAPERMONO_READER_DENSITY_RELAXED:
-		*columns = 24U;
-		*lines = 24U;
-		break;
-	case PAPERMONO_READER_DENSITY_STANDARD:
-	default:
-		*columns = PAPERMONO_READER_COLUMNS;
-		*lines = PAPERMONO_READER_LINES;
-		break;
-	}
+	const struct papermono_reader_layout layout = papermono_reader_layout_for(
+		papermono_settings_get()->reader_density);
+
+	*columns = layout.columns;
+	*lines = layout.lines;
 }
 
 static int refill(struct fs_file_t *file, uint8_t *buffer, size_t *position,

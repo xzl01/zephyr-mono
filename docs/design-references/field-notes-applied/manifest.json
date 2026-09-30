@@ -1,0 +1,179 @@
+{
+  "renderer": "actual Zephyr UI + LVGL I1 host harness; synthetic filesystem and hardware fixtures; not device photos",
+  "viewport": [
+    480,
+    800
+  ],
+  "lvgl_heap_bytes": 65536,
+  "source_sha256": "43934dbfe2c7a3541f1271231ef830656c5b8c26ece6948ecc3f94e264ed2506",
+  "images": {
+    "library": {
+      "black_pixels": 8613,
+      "sha256": "052f2834c4330a9c893dec35c207ba3b04aa7a1eb1f8fdf5f42c720f3bca0e7e"
+    },
+    "weread": {
+      "black_pixels": 13328,
+      "sha256": "2d44162d4956237c73d267c238c52bfed6396e57c75ecd05caf6bc2180a20abf"
+    },
+    "calendar": {
+      "black_pixels": 13739,
+      "sha256": "a52fea7dd1bcdf166edc62f3ef5c48f54376685d62d8c4eeb9ff1ccb4ce1d466"
+    },
+    "tasks": {
+      "black_pixels": 10105,
+      "sha256": "9095243568bf50c4d889a3248f05bf8f5c367074fc89ac1137fbd37dd8e18dc4"
+    },
+    "notes": {
+      "black_pixels": 8491,
+      "sha256": "617acb2b40295ee44f1c9a683f749fd9a544572669d045df17f8ea6cb2421345"
+    },
+    "content-center": {
+      "black_pixels": 13647,
+      "sha256": "256ebed816bb617af4934482cbb5b2eaa2cddb9a1e7274d36719b44f6c3f1acd"
+    },
+    "remote": {
+      "black_pixels": 10005,
+      "sha256": "347d313b045f0c7db4cdda70b814c21f4e899be9c41a6412b644f6ba6a2bc79d"
+    },
+    "info": {
+      "black_pixels": 13491,
+      "sha256": "81291332936720f222c81796d57b056fae59a2405b45f9f429e62c11df090d5d"
+    },
+    "tools": {
+      "black_pixels": 16411,
+      "sha256": "a8e5009ddea4d260b4bea8863f745282dbbde9fdc38354232c01b0c47a953a18"
+    },
+    "system": {
+      "black_pixels": 10989,
+      "sha256": "e636533bab82e21da64e235b02285840e7001f6131de7b992054c5a159c0ba02"
+    },
+    "settings": {
+      "black_pixels": 15223,
+      "sha256": "525647e748d873ec819002ee66dac073e3995876c96d49b28130cf5b2828b48c"
+    },
+    "power": {
+      "black_pixels": 11192,
+      "sha256": "5961189120bc4379729b6a5a456f064cb3fd634f8fdbfe8a71fb0747d5b3395d"
+    },
+    "confirm-shutdown": {
+      "black_pixels": 11626,
+      "sha256": "ba8cdf00695d22b0e822be2cb33e9bed80261a07d5c4e7e871d362ddd3089fad"
+    },
+    "reader-menu-epub": {
+      "black_pixels": 16291,
+      "sha256": "6703f1327219b226bbb27d4680c4ab92b12a44030e85a67ab9f014e7049b5610"
+    },
+    "reader-toc": {
+      "black_pixels": 11710,
+      "sha256": "bca75211078a8be21ee4abd7b7c6a78916e06135b262c8d649a86b8292ddfc2e"
+    },
+    "bookmarks": {
+      "black_pixels": 5931,
+      "sha256": "a40b586ab03bbd0434f084a4d2d3018a60e7eaebfae5c00e1cb45e33d3d8e4d9"
+    },
+    "notes-detail": {
+      "black_pixels": 8463,
+      "sha256": "29098cbcc38f884a2e5e96a2034bcbdeba962371be6095f2a3fcfbadc228a08d"
+    },
+    "weread-detail": {
+      "black_pixels": 12065,
+      "sha256": "3f68e5dc2a1019a3b1f09312e76606d01c2c56d3d31816a9d1e14b1b2bdf390f"
+    },
+    "content-paircode": {
+      "black_pixels": 14564,
+      "sha256": "f29c0b52f363ba3babc7fab46e080e1912357c8e95ae18e8e19be4960140dec8"
+    },
+    "reader-menu": {
+      "black_pixels": 16231,
+      "sha256": "76b4accf32343e5fe7671dbd30b616831da9d43d689e67c5093284a79112f487"
+    },
+    "reader": {
+      "black_pixels": 16946,
+      "sha256": "044db7e9bf579566ca6dea3a4445ada5f1bbef7c9643cf131387fc94189acde6"
+    },
+    "library-empty": {
+      "black_pixels": 15093,
+      "sha256": "290c9347f444ae698d7d9abd4c6317e1bc4f43713eeda846105845c1afaa20fd"
+    },
+    "weread-empty": {
+      "black_pixels": 27080,
+      "sha256": "316db0b7d63c60802b2ae0b469062e855264affd6a63fdc17914b46703b6ae28"
+    },
+    "calendar-empty": {
+      "black_pixels": 10173,
+      "sha256": "50f47a41fbaccabdb752647143f60c2253df637e1eec7e33efdee2270c537438"
+    },
+    "tasks-empty": {
+      "black_pixels": 8115,
+      "sha256": "6e852994f82bee80f4a6ad9b56630efde1fc65699bc178a8d98d30169f466a69"
+    },
+    "notes-empty": {
+      "black_pixels": 10851,
+      "sha256": "8a052c096a149a31df303e335c122a824d487141327b64f204f7849bb008f28e"
+    },
+    "info-empty": {
+      "black_pixels": 13879,
+      "sha256": "6efbb390f517348abc7d2c655c80480d1ed83a9e65b56247ec9db3226755e2ed"
+    },
+    "remote-presentation": {
+      "black_pixels": 15026,
+      "sha256": "2160b4fdd7df05ecb6ee6cdf7b4dc0ef148a396bdbe3dd01a76546d01a371d57"
+    },
+    "remote-mouse": {
+      "black_pixels": 11495,
+      "sha256": "4c27dff0428dd9eb653afce03109872d338c421e126ca5e3371926874c871146"
+    },
+    "remote-paircode": {
+      "black_pixels": 12152,
+      "sha256": "7b20349bddd4780de9ba81461fe53a3d5b1599196a215932a0fbd61f5cc649e9"
+    },
+    "remote-waiting": {
+      "black_pixels": 10617,
+      "sha256": "f440b586af2b092899db189785c86849ea7f4d6a448b521d08719365e1e878c9"
+    },
+    "confirm-sleep": {
+      "black_pixels": 11820,
+      "sha256": "e5f791c9d88694307eadcab3f04e97ba53ba0827b6702254058dd9ac17416afb"
+    },
+    "confirm-wifi": {
+      "black_pixels": 14384,
+      "sha256": "2bc6e96fc951ab3ddd061f0a57c52e2e61b0447bcc27652370972cb246af2cb9"
+    },
+    "confirm-ble": {
+      "black_pixels": 14488,
+      "sha256": "8201d8d6a93923b779b6a78394007e5c772dd29cdd84bf845f74de42bf3f6bfd"
+    },
+    "confirm-reset": {
+      "black_pixels": 13907,
+      "sha256": "942a7d10bfc96e1bb1dae06bc1646e45a4a9069ed7b1a67869bcf00e275cc869"
+    },
+    "bookmarks-empty": {
+      "black_pixels": 9199,
+      "sha256": "0b675fe3456dfafd83563793b99d39ecdc7656e355e363cff17cf3b54adca022"
+    },
+    "library-error": {
+      "black_pixels": 9623,
+      "sha256": "137f8c72cf4bf0ffdf4793cb67c229021c485e63f0ab0a0a7e424fb533f0aa14"
+    },
+    "home": {
+      "black_pixels": 24766,
+      "sha256": "e50074282d1497809777e15875cc59be10ad13f693e66e0056d7b9535cc65aa6"
+    },
+    "home-uncalibrated": {
+      "black_pixels": 13281,
+      "sha256": "d6316e57e8731438f8fb357d2762eb6109c883a61a89485c154a120a8df69a1a"
+    },
+    "launcher-1": {
+      "black_pixels": 26042,
+      "sha256": "ce9a9bfba4ab130ea383b4af9ba95fada92ce919e5cd77aeaf827c2044b9a4b2"
+    },
+    "launcher-2": {
+      "black_pixels": 6433,
+      "sha256": "d7f29e745a0c5dd4b51767a0ef7021fe40ce529c7c4b6f5dac08f38c171908bc"
+    },
+    "weread-detail-no-progress": {
+      "black_pixels": 11699,
+      "sha256": "0a28cd353c34c32735c33756eb5b70d5a1b24d76c8ef3a5f0c0d381712d45ed2"
+    }
+  }
+}

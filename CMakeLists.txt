@@ -31,10 +31,43 @@ target_sources(app PRIVATE
   src/papermono_zip_reader.c
   src/generated/papermono_gbk_table.c
   src/generated/papermono_cjk_16.c
-  src/generated/papermono_digits_58.c
-  src/generated/papermono_digits_96.c
-  src/generated/papermono_titles_28.c
-  src/generated/papermono_cat_64.c
+  src/generated/papermono_clock_148.c
+  src/generated/papermono_reading_24.c
+  src/generated/papermono_heading_48.c
+  src/generated/papermono_state_40.c
+  src/generated/papermono_icon_library.c
+  src/generated/papermono_icon_weread.c
+  src/generated/papermono_icon_calendar.c
+  src/generated/papermono_icon_tasks.c
+  src/generated/papermono_icon_notes.c
+  src/generated/papermono_icon_remote.c
+  src/generated/papermono_icon_content.c
+  src/generated/papermono_icon_info.c
+  src/generated/papermono_icon_tools.c
+  src/generated/papermono_icon_settings.c
+  src/generated/papermono_icon_power.c
+  src/generated/papermono_icon_sleep.c
+  src/generated/papermono_icon_bookmark.c
+  src/generated/papermono_icon_document.c
+  src/generated/papermono_icon_wifi.c
+  src/generated/papermono_icon_bluetooth.c
+  src/generated/papermono_icon_restore.c
+  src/generated/papermono_icon_book_small.c
+  src/generated/papermono_icon_headphones_small.c
+  src/generated/papermono_icon_bookmark_small.c
+  src/generated/papermono_icon_settings_small.c
+  src/generated/papermono_icon_sun_small.c
+  src/generated/papermono_icon_toc_small.c
+  src/generated/papermono_icon_return_small.c
+  src/generated/papermono_icon_library_small.c
+  src/generated/papermono_icon_document_small.c
+  src/generated/papermono_icon_info_small.c
+  src/generated/papermono_icon_library_focal.c
+  src/generated/papermono_icon_weread_focal.c
+  src/generated/papermono_icon_calendar_focal.c
+  src/generated/papermono_icon_tasks_focal.c
+  src/generated/papermono_icon_document_focal.c
+  src/generated/papermono_icon_bookmark_focal.c
   src/papermono_settings.c
   src/papermono_power_state.c
   src/m5ioe1.c

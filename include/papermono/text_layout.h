@@ -6,6 +6,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define PAPERMONO_TEXT_PUNCTUATION_OVERFLOW 2U
+
 #ifdef __cplusplus
 extern "C" {
 #endif

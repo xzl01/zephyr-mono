@@ -135,5 +135,11 @@ cc -std=c17 -Wall -Wextra -Werror \
 	src/generated/papermono_gbk_table.c \
 	-o "$build_dir/test_archive_safety"
 "$build_dir/test_archive_safety"
+cc -std=c17 -Wall -Wextra -Werror \
+	-Itests/host/stubs -Iinclude \
+	tests/host/test_ui_layout.c src/papermono_interaction.c \
+	-o "$build_dir/test_ui_layout"
+"$build_dir/test_ui_layout"
 python3 tests/host/test_font_coverage.py
+python3 tests/host/test_field_notes_assets.py
 python3 tests/host/test_content_web.py

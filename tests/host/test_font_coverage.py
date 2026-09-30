@@ -7,9 +7,6 @@ import sys
 
 
 FONT_PATH = Path("src/generated/papermono_cjk_16.c")
-TITLE_FONT_PATH = Path("src/generated/papermono_titles_28.c")
-DIGITS_58_FONT_PATH = Path("src/generated/papermono_digits_58.c")
-DIGITS_96_FONT_PATH = Path("src/generated/papermono_digits_96.c")
 UI_PATH = Path("src/papermono_ui.c")
 
 
@@ -73,20 +70,36 @@ if missing_ui:
          ", ".join(f"U+{value:04X}" for value in missing_ui))
 
 require_subset(
-    TITLE_FONT_PATH,
-    "papermono_titles_28",
-    "今日继续阅读下一日程待办应用全部系统书库微信遥控器日历便签内容中心"
-    "信息卡片硬件工具设置电源状态休眠传输最近",
-)
-require_subset(
-    DIGITS_58_FONT_PATH,
-    "papermono_digits_58",
-    "%-0123456789:",
-)
-require_subset(
-    DIGITS_96_FONT_PATH,
-    "papermono_digits_96",
+    Path("src/generated/papermono_clock_148.c"),
+    "papermono_clock_148",
     "-0123456789:",
 )
+clock_source = Path("src/generated/papermono_clock_148.c").read_text(encoding="utf-8")
+clock_codepoints = re.findall(r"/\* U\+([0-9A-F]+) ", clock_source)
+clock_table = clock_source.split("static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[]", 1)[1].split("};", 1)[0]
+advances = re.findall(r"\.adv_w = (\d+)", clock_table)[1:]
+clock_widths = {chr(int(cp, 16)): int(width) / 16
+                for cp, width in zip(clock_codepoints, advances)}
+for hour in range(24):
+    for minute in range(60):
+        if sum(clock_widths[c] for c in f"{hour:02d}:{minute:02d}") > 440:
+            fail("clock can wrap at a valid time")
+
+reading_source = Path("src/generated/papermono_reading_24.c").read_text(encoding="utf-8")
+reading_glyphs = glyph_set(reading_source)
+if "const lv_font_t papermono_reading_24" not in reading_source or ".bpp = 1," not in reading_source:
+    fail("Field Notes reading font must be one-bit")
+if not re.search(r"\.line_height\s*=\s*30\s*,", reading_source):
+    fail("reading font line box differs from pagination")
+if ".fallback = &papermono_cjk_16," not in reading_source:
+    fail("reading font must retain complete CJK fallback")
+require_subset(Path("src/generated/papermono_heading_48.c"), "papermono_heading_48",
+               "0123456789%应用书库微信读日历待办便签内容中心遥控器信息卡片硬件工具设置电源系统状态阅读菜单目录连接设备确认休眠关机重新配网清除蓝牙对恢复默认？")
+require_subset(Path("src/generated/papermono_reading_24.c"), "papermono_reading_24", "°℃")
+require_subset(Path("src/generated/papermono_state_40.c"), "papermono_state_40",
+               "本地书架不可用没有可显示的书籍暂无日程待办便签尚未配置数据源书签")
+for codepoint in ui_codepoints:
+    if codepoint not in reading_glyphs and codepoint not in glyphs:
+        fail(f"reading/title font missing U+{codepoint:04X}")
 
 print(f"font coverage PASS ({len(glyphs)} glyphs, full basic CJK and UI subsets)")

@@ -1,192 +1,284 @@
 ---
-name: PaperMono Mono Editorial
-description: A reference-led one-bit editorial interface for a local-first information terminal.
+name: PaperMono Field Notes
+description: A quiet one-bit paper interface for daily information, local reading and device controls.
 colors:
   ink-black: "#000000"
   paper-white: "#ffffff"
-corners:
-  rectangle: "0px"
-  circle: "true circles only"
-spacing:
-  micro: "4px"
-  base: "8px"
-  compact: "12px"
-  section: "18px"
-  page: "18px"
 typography:
-  clock: "papermono_digits_96"
-  metric: "papermono_digits_58"
-  title: "papermono_titles_28"
-  body: "papermono_cjk_16"
+  clock:
+    fontFamily: "Libre Bodoni"
+    fontSize: "148px"
+    lineHeight: "117px"
+  headline:
+    fontFamily: "Source Han Serif SC Regular"
+    fontSize: "48px"
+    lineHeight: "55px"
+  state:
+    fontFamily: "Source Han Serif SC Regular"
+    fontSize: "40px"
+    lineHeight: "50px"
+  body:
+    fontFamily: "Source Han Serif SC Regular"
+    fontSize: "24px"
+    lineHeight: "30px"
+  label:
+    fontFamily: "Source Han Sans SC Normal"
+    fontSize: "16px"
+rounded:
+  surface: "0px"
+spacing:
+  side-margin: "22px"
+  list-gap: "8px"
+  menu-gap: "4px"
 components:
-  panel:
-    borderRadius: "0px"
-    borderWidth: "2px"
-  launcherGrid:
-    columns: 3
-    rows: 3
-    cell: "148px x 210px"
-    gap: "0px"
+  launcher-tile:
+    backgroundColor: "{colors.paper-white}"
+    textColor: "{colors.ink-black}"
+    rounded: "{rounded.surface}"
+    width: "136px"
+    height: "180px"
+  detail-header:
+    textColor: "{colors.ink-black}"
+    typography: "{typography.headline}"
+    width: "436px"
+    height: "54px"
+  list-row:
+    backgroundColor: "{colors.paper-white}"
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    rounded: "{rounded.surface}"
+    width: "436px"
+    height: "104px"
+  menu-row:
+    backgroundColor: "{colors.paper-white}"
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    rounded: "{rounded.surface}"
+    width: "436px"
+    height: "76px"
+  button-primary:
+    backgroundColor: "{colors.paper-white}"
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    rounded: "{rounded.surface}"
+    width: "436px"
+    height: "64px"
+  button-secondary:
+    backgroundColor: "{colors.paper-white}"
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    rounded: "{rounded.surface}"
+    width: "436px"
+    height: "64px"
+  import-button:
+    backgroundColor: "{colors.paper-white}"
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    rounded: "{rounded.surface}"
+    width: "352px"
+    height: "64px"
+  return-footer:
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    width: "436px"
+    height: "76px"
+  empty-state:
+    textColor: "{colors.ink-black}"
+    typography: "{typography.state}"
+    width: "436px"
+    height: "334px"
+  frontlight-setting:
+    textColor: "{colors.ink-black}"
+    typography: "{typography.body}"
+    width: "436px"
+    height: "100px"
 ---
 
-# Design System: PaperMono Mono Editorial
+# Design System: PaperMono Field Notes
 
-## Direction
+## Overview
 
-The user-provided monochrome editorial reference is the pinned visual direction.
-Its useful grammar is the contrast between oversized type, outlined labels,
-ruled lists, strike-through marks, small matrices, dense information and generous
-open paper. The UI must not collapse that grammar into one repeated card template.
+**Creative North Star: "Field Notes"**
 
-Order comes before decoration. All screen geometry follows a 4 px base scale;
-ordinary rules use only 1, 2 or 4 px weights. Shared columns, title rails and
-content baselines must align exactly. Rough outlines, ornamental dashed dividers
-and arbitrary 2–14 px offsets are not part of this visual world.
+纸白、衬线时钟、细横线和独立图标索引构成安静的日常手记；首页强调正在使用的
+内容，阅读页把空间留给正文。列表、设置、内容传输、遥控器和电源页沿用同一
+纸面语言，以清晰的状态、操作和返回路径组织信息。
 
-The 480 x 800 SSD1677 panel remains strictly one bit. There is no gray, gradient,
-shadow, translucent overlay, random jitter or press animation. Every rebuild is
-deterministic so the same state lands on the same pixels.
+这是固定 480 × 800 的 Zephyr/LVGL 界面。固件屏幕保持 I1；字体为 1 bpp，
+图标虽以 A8 存储但只有 0/255 透明度。无灰阶、渐变、阴影或抖动模拟。
+视觉参考规定方向，显示内容来自应用模型；参考中的示例数据不进入固件。
 
-## Non-negotiable rules
+**Key Characteristics:**
 
-- Every rectangular surface has a 0 px radius, including detail-page panels,
-  buttons, headers, footer marks, sleep screens and launcher cells.
-- A radius is allowed only when width equals height and the result is a true
-  semantic circle, such as a progress dot or slider knob.
-- The launcher is one shared-border 3 x 3 grid, never nine floating cards.
-- Grid cells share geometry with touch hit testing. No second coordinate table is
-  permitted.
-- Each launcher cell must use a different composition; changing only its title or
-  one-character mark is insufficient.
-- Every launcher cell shares a `12 px` title inset, a `34 px` title lane, a solid
-  divider at local `y=52`, and content baselines at `68 / 104 / 144 / 172 px`.
-- Frequently changing values stay black on white. Ordinary navigation surfaces
-  and action labels remain paper-white; solid black is limited to thin rules,
-  compact marks, progress and an exceptional critical control.
-- A motif may summarize a real value only when that value is available from the
-  application model. Decorative fixed numbers, percentages, volume levels and
-  market deltas are prohibited because they look like live device state.
+- 纸白为主、黑色细线分区，靠字号与留白形成层级。
+- 衬线标题、正文和状态标题配合紧凑的无衬线元数据。
+- 原创几何图标对应应用、内容类型、确认动作和缺少内容的状态。
+- 可见控件与命中区域共用布局，确认取消回到操作入口。
 
-## Color
+已确认参考包括 `docs/design-references/papermono-field-notes-v1.png`、
+`docs/design-references/field-notes-expanded/` 和 `docs/design-references/field-notes-remaining/`。
+最终原生渲染与出处记录位于 `docs/design-references/field-notes-applied/`：42 张
+480 × 800 I1 截图及 overview-1 至 overview-8 来自实际 UI/LVGL 主机渲染，
+硬件与内容数据是合成 fixture，不是设备照片。软件检查、构建及实机验收边界见
+该目录的 `validation.md`。
 
-Paper White `#ffffff` is the dominant surface. Ink Black `#000000` provides text,
-outlines, dividers, matrices and compact emphasis marks. Hierarchy comes from type
-scale, whitespace and rule weight before fill; the one-bit panel never simulates a
-light color with noisy dithering.
+## Colors
+
+Paper White 是工作底色；Ink Black 用于文字、细线、图标和紧凑进度标记。
+层级依靠字号、留白和线重，普通导航与变化信息保持黑字白底。
+
+**The Paper Field Rule.** 纸白保持主要工作面；整块黑色只用于紧凑标记与图标内部，
+不把普通导航或状态行改成大面积反色。
 
 ## Typography
 
-- `papermono_digits_96`: the calibrated home clock. An uncalibrated RTC uses the
-  literal `TIME` in Montserrat 48 together with an explicit Chinese explanation.
-- `papermono_digits_58`: dates, counts and progress metrics; includes `%`, `-`,
-  digits and colon.
-- `papermono_titles_28`: fixed home and launcher headings. It is a Source Han Sans
-  SC subset and must include every shipped title, including `便签`.
-- `papermono_cjk_16`: all body copy, status, metadata and dynamic Chinese text.
-- Montserrat 14/18/28/48 may be used for compact Latin editorial labels.
+- **Clock:** `papermono_clock_148`，Libre Bodoni 148 px；字形行框 117 px，
+  首页标签框 440 × 122。RTC 无效时使用 Montserrat 48 的 `TIME` 和明确校时提示。
+- **Headline:** `papermono_heading_48`，Source Han Serif SC 48 px、55 px 行框、
+  基线 14 px；覆盖当前全部页头和确认标题使用的中文字符及 ASCII。
+  这是固定标题子集，不是任意中文大字号字体。
+- **State title:** `papermono_state_40`，Source Han Serif SC 40 px、50 px 行框、
+  基线 10 px；覆盖当前书库、微信读书、日历、待办、便签、信息和书签空状态的标题。
+- **Body:** `papermono_reading_24`，Source Han Serif SC 24 px、30 px 行框，
+  基线 8 px；完整覆盖基础 CJK，另含 ASCII、常用标点、全角范围及 `°`、`℃`。
+  用于阅读正文、首页内容标题、应用名称、列表主文与按钮；缺字回退到 `papermono_cjk_16`。
+- **Label:** `papermono_cjk_16`，Source Han Sans SC 16 px，用于状态和紧凑说明；
+  Montserrat 18 用于 `PAPERMONO` 字标。旧 28/58/96 px 字库已从构建中移除，
+  它们既无引用又占用约 132 KiB Flash。
 
-`tests/host/test_font_coverage.py` verifies the full basic CJK font and all three
-specialized UI subsets. Unicode symbols are not a substitute for icons.
+字体范围、来源和生成方式见 `docs/font-licenses.md`。不要用 emoji 或 Unicode
+符号代替可追溯图标。
 
-## Home screen
+**The Subset Coverage Rule.** 新增页头、确认标题或空状态标题时，同时扩展对应
+生成子集并验证字形覆盖；不要用正文回退掩盖缺失的大字号标题。
 
-The home page is an asymmetric daily brief, not a dashboard grid:
+## Layout
 
-- licensed Phosphor cat mark, wordmark and right-aligned connection status at the
-  masthead;
-- 96 px calibrated time on open paper, or the truthful `TIME / 时钟尚未校准`
-  fallback when the RTC is invalid;
-- one straight-edged recent-reading field with an outlined `READ` tab, a truthful
-  `打开书库` action and a progress column separated at `x=328`; EPUB/TXT metadata
-  is omitted when no recent book exists, while persisted-but-not-loaded progress
-  is labelled `已有记录` rather than `未开始`;
-- ruled next-event and crossed task rows;
-- one aligned bottom row for all apps, system status and power. The app count is
-  derived from the launcher item table rather than duplicated as display copy.
+绘制和命中区域共享 `include/papermono/ui_layout.h`；正文分页和排版共享
+`include/papermono/reader_layout.h`。坐标来自实现，不要求旧版的统一 4 px 格。
 
-The event empty state distinguishes `时间未校准` from a calibrated calendar with
-`暂无日程`. The task heading is deliberately `待办`, because the current data query
-does not filter by due date; an empty row does not draw a misleading checkbox.
+- **首页：**字标 `(22,14)`，状态右对齐至 `x=458`，电压在 `y=38`；日期或
+  校时说明在 `y=66`，有效时钟在 `(18,94)`。三条内容区分别为
+  `(22,220,436,216)` 阅读、`(22,436,436,120)` 日程、
+  `(22,556,436,168)` 待办，区首使用 1 px 横线。
+- **应用索引：**标题 `(22,36)`，页码 `(346,48)`，横线 `y=94`。
+  3 × 3 独立描边格从 `(22,124)` 开始，每格 136 × 180，列间距 14、行间距 16；
+  覆盖 `x=22..457, y=124..695`。图标 96 × 96，格内顶部偏移 22，名称在
+  局部 `y=138`。11 个应用分两页，第二页仅设置与电源，空格不绘制且不可操作。
+- **底部导航：**首页、应用、设置各占 160 px；命中区域从 `y=724` 至屏幕底部。
+- **通用详情页：**左右边距 22，内容宽 436；字标和右对齐日期在 `y=18`，
+  标题 `(22,58,436,54)`，横线 `y=116`。常规列表从 `y=148` 开始；
+  页脚横线 `y=724`，返回文字在 `(42,742)`，右侧操作提示允许两行。
+  整个底部 `y=724..799` 都用于详情页返回。
+- **列表与菜单：**通用列表为五行，每行高 104、间距 8；阅读菜单为七行，
+  每行高 76、间距 4。微信读书在书架计数与同步时间下方从 `y=186` 开始，
+  五行各高 98、间距 6。图标行的图标在局部 `(14,12)`，主文从 `x=76` 开始。
+- **确认：**96 × 96 动作图标在 `y=216` 居中，标题在 `y=352`；确认与取消
+  分别为 `(22,556,436,64)`、`(22,634,436,64)`，两按钮之间保持 14 px 空隙。
+- **空状态：**通用焦点图标 176 × 176，在 `y=180` 居中；状态标题在
+  `(22,384,436,50)`，恢复说明在 `(32,450,416,64)`。微信读书分别提前至
+  `y=174/376/440`，其导入按钮为 `(64,490,352,64)`，说明与只读摘要区继续置于下方。
+- **设置：**日常偏好、连接和设备分组分别使用共享行矩形。行的 `y/height`
+  依次为休眠 `174/56`、时间 `230/56`、前光 `286/100`、Wi-Fi `424/60`、
+  蓝牙 `484/60`、恢复 `582/60`、电源 `642/60`；所有行均为 `x=22,width=436`。
+  工具页首项“系统与触摸”同样共享 `(22,148,436,104)` 的绘制与点击范围。
+- **阅读页：**标题 `(22,22)`、宽 336；右上目录/菜单 `(380,12,78,40)`；
+  头部横线 `y=66`。正文从 `y=88` 开始，高 636，底部在 `y=724`。
+  页脚分隔线 `y=742`，页码与书签在 `y=758`，进度底线在 `y=790`。
 
-The six visible interaction regions are file-level data shared by rendering and
-`home_event()`. The reader, including its progress column, is one 444 px target.
-The launcher, system and power targets share `y=644`, `height=88` and 8 px gaps.
-Rendering must continue to consume these same rectangles directly.
+阅读密度与分页同步：紧凑为边距 16、行间距 4、16 列 × 18 行；标准为
+24、10、16 × 16；宽松为 32、14、15 × 14。每行另保留两个收尾标点字格，避免禁则溢出导致 LVGL 二次换行。顶部 72 px 和底部 58 px 为
+独立操作区；中部左右各 160 px 翻页，中间 160 px 打开菜单。
 
-## Launcher geometry
+**The Shared Geometry Rule.** 页面使用自己的共享矩形或网格同时绘制和命中，
+间隙与未绘制项目不可操作；阅读页保留独立头尾与分页坐标，不套详情页布局。
 
-The launcher grid is fixed:
+大字号时钟在绘制时需要 A8 字形缓冲。LVGL 专用池为 64 KiB，位于 PSRAM；
+主机预览也限制为 64 KiB。主机为 64 位 ABI，设备为 32 位，预览分配统计不能
+替代实机堆余量验收。该平台没有响应式断点或滚动式页面密度切换。
 
-```text
-origin       x=18, y=112
-cell         148 x 210
-columns      3
-rows         3
-gap          0
-outer bounds x=18..461, y=112..741
-```
+## Elevation & Depth
 
-Eleven applications are preserved across two pages:
+界面完全平面化。细横线分段、轮廓分组和空白建立层级，不增加阴影、半透明层
+或瞬时按压动画。确定坐标和字形减少无意义的墨水屏变化。
 
-1. Page 1: Library, WeRead, Calendar, Tasks, Notes, Remote, Content Center,
-   Information Cards and Hardware Tools.
-2. Page 2: Settings and Power; the remaining seven cells are blank and inert.
+## Shapes
 
-The outer frame and two vertical/two horizontal rules are drawn as shared lines.
-The header right-aligns connectivity, total app count and page count to one rail.
-Every cell then uses the same title rail and content baselines while its interior
-composition remains deliberately different:
+矩形内容面与应用格为直角；应用格 1 px 描边，首页书脊为 2 px 描边。
+详情列表以底部 1 px 横线分段，不为每行增加完整卡片框；选中行用窄黑标记。
+实际按钮才使用完整描边，主操作 2 px、次操作 1 px，均保持黑字白底。
+图标内部允许符合物体语义的圆弧和圆角，例如遥控器、日历装订环和电源符号；
+前光离散档位也用圆点表示，不把它们扩展为面板圆角规则。
 
-- Library: open paper, three outlined book spines, one status rule and the real
-  recent title (or `尚无最近阅读`).
-- WeRead: outlined local shelf block and compact mark row.
-- Calendar: large day and two aligned matrix rows.
-- Tasks: neutral checkboxes and ruled items without a fabricated completed state.
-- Notes: vertical binding bar and five writing rules.
-- Remote: centered outlined `HID` label, three hard-edged outlined keys and a
-  centered `BLE HID` footer; the primary key is emphasized by rule weight only.
-- Content Center: centered `SYNC`, `LOCAL / WIFI` and an outlined `UPLOAD` action.
-- Information Cards: actual provider-card count (clamped to two display digits)
-  and three list rules; it never displays a fabricated price or percentage.
-- Hardware Tools: square diagnostic matrix.
-- Settings: three line controls with true circular knobs.
-- Power: oversized black `OFF` on paper with a short terminal rule.
+## Components
 
-Square mark rows are rendered as one dashed LVGL line rather than one object per
-mark. This preserves the reference rhythm without exhausting the 32 KiB LVGL heap.
-The fixed-line pool is reset before every page tree is rebuilt.
+### Daily brief
 
-## Detail pages
+阅读入口用描边文字书脊和真实书名，不伪造封面或作者。没有最近阅读时显示
+“打开书库”和导入说明；已存在记录但未加载对应页面时显示“已有记录”。
+只有加载了同一书籍的页面才显示其近似进度。电池显示实测电压或 `--`，不推算百分比。
 
-Existing information architecture remains intact, but all standard panels use
-square 2 px outlines. The short top brush rule is also square-ended. Headers use a
-slim vertical marker and two short rules instead of a wide inverted banner;
-selected tabs use a heavier outline and underline instead of reversing the whole
-surface. Confirmation and power-state surfaces follow the same white-first rule.
+下一日程来自有效 RTC 与应用查询，跨日事件附日期；未校时与暂无日程各自说明。
+待办显示最多两条未完成任务，空状态区分全部完成与没有任务。任务图标内的勾号
+是固定识别图形，不代表真实任务完成状态。
 
-## Asset policy
+### Application index
 
-Visible icons must come from a traceable source. The masthead uses Phosphor's
-MIT-licensed `cat-fill` converted to a 64 x 64 one-bit LVGL I1 resource. Do not
-trace the reference mascot or add improvised emoji/Unicode icon substitutes.
-Font and icon provenance is maintained in `docs/font-licenses.md`.
+每个应用使用原创几何图标，统一独立描边格和居中名称。日历图标内叠加真实日号，
+RTC 无效时为 `--`；页数由应用表计算。内容中心采用本地传输图形，不暗示云存储。
 
-## E-paper behavior
+### Reading surface
 
-- Do not add transient pressed states; one action produces one destination refresh.
-- Keep high-frequency changing pixels on white whenever practical.
-- Keep ordinary home and launcher captures below 15% black pixels; reserve any
-  exception for an explicit critical or power transition state.
-- Use deterministic coordinates and shapes to limit unnecessary dirty pixels.
-- Build success does not prove visual quality, ghosting, runtime LVGL heap or touch
-  alignment. Those require a flashed C153 and physical interaction checks.
+书名为截断单行标题，正文使用衬线字与共享密度配置。页脚显示实际当前页和
+近似百分比，不显示未知总页数；书签文字反映当前页状态。读取失败时呈现错误
+说明，不保留成功进度条。底部左侧打开菜单，右侧操作书签。
 
-## Verification checklist
+### Ruled detail pages
 
-- Default, partial-demo and driver-selftest profiles build.
-- Host interaction tests cover all nine cell centers and exact outer boundaries.
-- Specialized font tests cover `便签`, `-`, `%`, digits and colon.
-- Home-to-launcher navigation repeated ten times does not lose any fixed lines.
-- Both launcher pages are checked for crop, overlap and correct app mapping.
-- Physical C153 confirms square corners, readable one-bit type, return gestures,
-  page switching, partial-refresh ghosting and touch hit alignment.
+书库、日历、待办、便签、信息卡片、微信读书、阅读菜单/目录/书签、内容中心、
+遥控器、工具、系统、设置、电源与确认页均已应用扩展参考的纸面布局。标题、
+主文、元数据按固定层级呈现；内容中心和系统用横线分组，列表用有间距的规则行。
+任务复选框反映实际完成状态，目录缩进反映实际层级，信息行显示来源、状态和更新时间。
+
+微信读书书架按电子书、有声书、文章使用书本、耳机、文档图标；书签、折角便签文档、
+信息与阅读菜单使用各自的 48 px 图标通道。作者、进度和同步时间来自本地摘要，
+未知值明确说明，详情书脊不伪造书封。空状态以大图标、40 px 标题和简短恢复说明
+构成完整页面，支持格式、导入入口及离线缓存说明保留独立位置。
+微信读书详情的已提供百分比使用 48 px 数字；没有进度时，“未提供进度”使用
+完整覆盖中文的 24 px 主文字体，不能把该动态说明交给有限的标题子集。
+
+### Device actions and confirmation
+
+遥控器只有在 HID 已初始化、已连接、已安全配对、主机未挂起且无可见配对码时
+才显示并接受发送控件。等待连接、配对和恢复时展示指导文字，模式标签和返回仍可使用；
+失败信息来自实际发送或连接结果，不用成功式提示覆盖错误。
+
+休眠、关机、重新配网、清除蓝牙配对和恢复默认设置均使用对应的月牙、电源、
+Wi-Fi、蓝牙和恢复图标，以及分离的确认/取消按钮。恢复默认设置先长按，再确认。
+取消、返回手势和返回页脚清除确认，并回到入口：连接/恢复操作回设置，休眠/关机回电源。
+回首页或离开电源路由也会清除未完成确认。
+
+前光以五个离散档位表示 0/25/50/75/100%，当前档位是实心圆点。
+设置与阅读菜单都显示模型中的已应用偏好；调整失败显示失败，不显示未保存的成功状态。
+
+**The Actual State Rule.** 用户内容、计数、日期、连接状态、读数、错误和进度只能来自
+当前应用模型；只有实测电压，缺失读数用 `--`，不从参考图补写状态。
+
+### Asset and preview provenance
+
+33 个原创二值透明度 A8 图标分为 17 个 96 px 应用/电源/确认符号、10 个 48 px
+图标通道和 6 个 176 px 空状态焦点符号。生成脚本、C 构建输入和许可证记录见
+`docs/font-licenses.md`。`.impeccable/design.json` 的 HTML/CSS 是原生组件的网页
+展示片段；它不参与固件构建，也不替代实际 I1 截图或设备验收。
+
+## Do's and Don'ts
+
+- **Do** 从应用模型读取书名、日期、电压、任务、页码、书签和近似进度。
+- **Do** 同时调整绘制、命中区域与分页配置，避免两套坐标。
+- **Do** 保持纸白背景、细线和可读的 1 bpp 字体。
+- **Do** 在缺少内容、连接恢复和操作失败时给出实际状态及可用的返回或恢复入口。
+- **Do** 使用动作与内容类型对应的原创图标，并保留主文和元数据通道。
+- **Don't** 恢复旧版共享边框网格、Phosphor 猫首页标记或卡片式时钟。
+- **Don't** 补写作者、总页数、电量百分比或装饰性状态数值。
+- **Don't** 将主机预览、构建或测试结果当作 C153 实机显示、触摸、残影或堆内存验收。
+- **Don't** 在未完成安全连接、主机挂起或显示配对码时呈现可发送的遥控操作。

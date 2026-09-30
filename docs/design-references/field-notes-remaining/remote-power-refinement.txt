@@ -1,0 +1,6 @@
+Use case: precise-object-edit.
+Image 1 is the EDIT TARGET: the five-screen PaperMono Field Notes board “遥控与电源”.
+Image 2 is a STYLE REFERENCE showing the correct vertically stacked confirmation buttons.
+Change ONLY the two action buttons in the rightmost fifth screen (sleep confirmation). Preserve the first four screens completely, and preserve the fifth screen's header, moon icon, main question, instructions and footer. Preserve the board heading and every other element and text.
+The fifth screen currently has two side-by-side square buttons with large moon/X icons. Replace those with TWO FULL-WIDTH HORIZONTAL RECTANGULAR BUTTONS stacked VERTICALLY, matching the shutdown confirmation in Image2. Upper button text exactly “确认休眠”, lower button exactly “取消”. No icons inside either button. Width approx80% of the rightmost viewport. Each button is about64 native480x800 pixels tall, with14 native pixels gap. Upper button slightly heavier black outline, lower button thin black outline. Both pure white interior, centered black Song serif text. Place the stacked pair in the SAME lower area, above the footer; no overlap and no clipped text.
+Keep target canvas aspect ratio and exact FIVE portrait screens. Pure black ink on white, no gray fills, shadows, perspective, phone shells or texture. The sole intended difference is the button layout in the last panel.
