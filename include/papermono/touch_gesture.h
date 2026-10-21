@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 #ifndef PAPERMONO_TOUCH_GESTURE_H_
 #define PAPERMONO_TOUCH_GESTURE_H_

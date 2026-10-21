@@ -190,24 +190,32 @@ profile。NFC、LoRa 等只有完成真实标签/对端验证后才应标记为�
 - [FreeInk SDK](https://github.com/Free-Ink/freeink-sdk)
 - [Zephyr LVGL 集成](https://docs.zephyrproject.org/latest/services/gui/lvgl.html)
 
-板级时序参考上述 MIT 许可的 M5Stack 项目。项目原创代码采用 MIT License；
-第三方及上游派生文件继续保留 Apache-2.0、OFL-1.1 或各自的许可证和归属，详见
-`licenses/` 与 [字体许可证](docs/font-licenses.md)。
+板级时序参考上述 MIT 许可的 M5Stack 项目。项目原创代码采用 **GPL-3.0**；
+第三方及上游派生文件继续保留 MIT、Apache-2.0、OFL-1.1 或各自的许可证和归属，
+详见 `licenses/` 与 [字体许可证](docs/font-licenses.md)。
 
 ## 许可证
 
-本项目以 **MIT License** 发布，全文见 [LICENSE](LICENSE)。选择 MIT 的原因：
-它是本仓库文件头使用最广的许可（M5Stack 参考实现同样为 MIT），条款简单、允许
-商用和闭源衍生，且与仓库内其他许可可以共存。
+本项目原创代码以 **GNU General Public License v3.0 only** 发布，全文见
+[LICENSE](LICENSE)。选择 GPL-3.0 而不是 MIT/LGPL 的原因：这是一个**单一固件
+镜像**（应用与 Zephyr、ESP HAL 静态链接为一个 bin），LGPL 的“允许专有程序链接”
+例外在这里没有实际作用，反而引入不必要的复杂度；GPL-3.0 条款清晰、在嵌入式
+固件中被广泛采用，能保证修改后的固件继续开源。
 
 | 内容 | 许可 |
 | --- | --- |
-| `src/`、`include/`、`scripts/`、`tests/` 等原创代码 | MIT（[LICENSE](LICENSE)） |
-| `patches/zephyr/` 中针对 Zephyr 4.4.1 的补丁（上游为 Apache-2.0） | Apache-2.0（[licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)），补丁本身随上游条款 |
-| 字体（思源、Montserrat、Libre Bodoni 等） | SIL OFL-1.1（[字体许可证](docs/font-licenses.md)） |
-| Phosphor 图标 | MIT（[licenses/Phosphor-Icons-MIT.txt](licenses/Phosphor-Icons-MIT.txt)） |
+| `src/`、`include/`、`scripts/`、`tests/`、`boards/` 原创代码与文档 | GPL-3.0-only（[LICENSE](LICENSE)） |
+| `src/m5ioe1.c`、`src/m5pm1.c`、`src/papermono_ssd1677.c`（M5Stack 派生） | MIT（保留原版权声明） |
+| `src/generated/` 图标与字模数据（Phosphor 图标派生） | MIT |
+| `src/generated/` 字体位图（思源、Montserrat、Libre Bodoni 等派生） | SIL OFL-1.1 |
+| `patches/zephyr/` 针对 Zephyr 4.4.1 的补丁（上游 Apache-2.0） | Apache-2.0（[licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)） |
 
-仅在个人设备上刷写本固件不涉及再分发；若你将修改后的固件或源码对外发布，请保留
+**安装信息（GPLv3 §6）**：本固件可以在用户自己的设备上通过 USB 重新烧写，
+构建与刷写步骤见 [构建](#构建) 与 [写入与 USB 日志](#写入与-usb-日志)，
+无需解锁或额外授权，满足“安装修改后版本”的要求。若你分发预装本固件的设备，
+请同时提供对应源码与上述安装方式说明。
+
+仅在个人设备上刷写本固件不涉及再分发；对外发布修改后的固件或源码时，请保留
 `LICENSE`、`licenses/` 与相应文件头中的版权与许可声明。
 
 提交补丁前请阅读 [贡献指南](CONTRIBUTING.md)；安全问题请按

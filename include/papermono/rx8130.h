@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 #ifndef PAPERMONO_RX8130_H_
 #define PAPERMONO_RX8130_H_

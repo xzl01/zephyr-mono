@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 #ifndef PAPERMONO_DRIVER_SELFTEST_H_
 #define PAPERMONO_DRIVER_SELFTEST_H_

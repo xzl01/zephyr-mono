@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Hardware-free regression coverage for reset identity, commands and evidence."""
 from contextlib import redirect_stdout
 from io import StringIO

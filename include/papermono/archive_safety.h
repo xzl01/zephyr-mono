@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 #ifndef PAPERMONO_ARCHIVE_SAFETY_H_
 #define PAPERMONO_ARCHIVE_SAFETY_H_

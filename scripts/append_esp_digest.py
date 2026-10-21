@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Append the ESP image SHA-256 digest to a Zephyr simple-boot image.
 
 Zephyr builds simple-boot images with esptool ``--ram-only-header``; esptool

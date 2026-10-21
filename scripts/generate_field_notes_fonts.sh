@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Run from repository root; generated C files are already checked in.
 set -eu
 task_fonts_dir="$PWD/.cache/field-notes-fonts"

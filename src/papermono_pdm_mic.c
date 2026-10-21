@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 #define DT_DRV_COMPAT m5stack_papermono_pdm_mic
 

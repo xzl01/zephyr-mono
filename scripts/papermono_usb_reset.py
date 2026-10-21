@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Shared, non-destructive PaperMono USB reset and boot observation.
 
 Native USB RTS is NOT an EN-pin/whole-board power cycle. Default full recovery

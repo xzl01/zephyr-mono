@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Host tests for the ESP image SHA-256 digest post-processing."""
 import hashlib
 import importlib.util

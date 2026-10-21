@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Capture complete PaperMono logs; distinguish normal boot from power HIL.
 
 --reset defaults to RTC whole-chip reset followed by observed USB-JTAG reset run.

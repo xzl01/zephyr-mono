@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Reset and verify PaperMono without asking for manual power switching.
 
 Default: RTC watchdog whole-chip reset, then Espressif USB-JTAG reset run with

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 /* THESIS: Extend the approved Field Notes paper interface to every device page.
  * OWN-WORLD: White I1 paper, black serif 48px titles and 24px primary text,

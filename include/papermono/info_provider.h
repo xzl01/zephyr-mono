@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 
 #ifndef PAPERMONO_INFO_PROVIDER_H_
 #define PAPERMONO_INFO_PROVIDER_H_
