@@ -16,6 +16,15 @@ static const uint8_t *active_data;
 static size_t active_length;
 static struct papermono_reader_cache_entry cache_entries[128];
 static size_t cache_entry_count;
+static bool settings_enabled;
+static const char *settings_suffix;
+static unsigned int settings_reads;
+static const struct papermono_content_entry *scanned_book;
+static struct {
+	char key[32];
+	uint8_t value[8192];
+	size_t length;
+} stored_settings[2];
 static const struct papermono_preferences preferences = {
 	.reader_density = PAPERMONO_READER_DENSITY_STANDARD,
 };
@@ -57,12 +66,10 @@ int papermono_content_store_open(const struct papermono_content_entry *entry,
 int papermono_content_store_scan_books(papermono_content_scan_cb callback,
 	void *context, size_t *count)
 {
-	(void)callback;
-	(void)context;
 	if (count != NULL) {
-		*count = 0U;
+		*count = scanned_book != NULL ? 1U : 0U;
 	}
-	return 0;
+	return scanned_book != NULL ? callback(scanned_book, context) : 0;
 }
 
 /* Controllable EPUB stand-in. Progress weighting only depends on chapter
@@ -109,18 +116,38 @@ int papermono_epub_read_page(struct papermono_epub_book *epub,
 
 int settings_save_one(const char *key, const void *value, size_t length)
 {
-	(void)key;
-	(void)value;
-	(void)length;
+	if (settings_enabled) {
+		const size_t index = strcmp(key, "reader/recent") == 0 ? 0U : 1U;
+
+		assert(length <= sizeof(stored_settings[index].value));
+		(void)snprintf(stored_settings[index].key,
+			sizeof(stored_settings[index].key), "%s", key);
+		memcpy(stored_settings[index].value, value, length);
+		stored_settings[index].length = length;
+	}
 	return 0;
+}
+
+static int read_setting(void *arg, void *data, size_t length)
+{
+	++settings_reads;
+	memcpy(data, arg, length);
+	return (int)length;
 }
 
 int settings_load_subtree_direct(const char *subtree,
 	settings_load_direct_cb callback, void *param)
 {
-	(void)subtree;
-	(void)callback;
-	(void)param;
+	if (settings_enabled) {
+		for (size_t index = 0U; index < 2U; ++index) {
+			if (strcmp(subtree, stored_settings[index].key) == 0) {
+				/* NULL is a real pointer, as on Zephyr exact matches. */
+				return callback(settings_suffix,
+					stored_settings[index].length, read_setting,
+					stored_settings[index].value, param);
+			}
+		}
+	}
 	return 0;
 }
 
@@ -503,8 +530,46 @@ static void test_bookmark_preview(void)
 	assert(session.bookmark_count == 0U);
 }
 
+static void test_settings_exact_root_suffixes(void)
+{
+	static const uint8_t text[] = "saved reader state for reset";
+	static const char *const suffixes[] = { NULL, "", "child" };
+	struct papermono_reader_session saved = make_session(
+		PAPERMONO_TEXT_ENCODING_UTF8, sizeof(text) - 1U);
+	struct papermono_reader_session loaded;
+	struct papermono_content_entry recent;
+
+	active_data = text;
+	active_length = sizeof(text) - 1U;
+	settings_enabled = true;
+	scanned_book = &saved.book;
+	saved.page_start = 7U;
+	saved.bookmark_count = 1U;
+	saved.bookmarks[0].offset = 3U;
+	assert(papermono_reader_save(&saved) == 0);
+	for (size_t index = 0U; index < 3U; ++index) {
+		settings_suffix = suffixes[index];
+		settings_reads = 0U;
+		assert(papermono_reader_open(&loaded, &saved.book) == 0);
+		assert(loaded.page_start == (index < 2U ? 7U : 0U));
+		assert(loaded.bookmark_count == (index < 2U ? 1U : 0U));
+		if (index < 2U) {
+			assert(loaded.bookmarks[0].offset == 3U);
+			assert(papermono_reader_recent(&recent) == 0);
+			assert(strcmp(recent.id, saved.book.id) == 0);
+			assert(settings_reads == 2U);
+		} else {
+			assert(papermono_reader_recent(&recent) == -ENOENT);
+			assert(settings_reads == 0U);
+		}
+	}
+	settings_enabled = false;
+	scanned_book = NULL;
+}
+
 int main(void)
 {
+	test_settings_exact_root_suffixes();
 	test_utf8_paging_and_history();
 	test_gbk_boundary_and_empty_file();
 	test_cached_previous_beyond_ram_history();

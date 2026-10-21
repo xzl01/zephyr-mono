@@ -49,7 +49,8 @@ static int load_card(const char *key, size_t length, settings_read_cb read_cb,
 {
 	struct load_card_context *context = parameter;
 
-	if (key[0] == '\0' && length == sizeof(context->card) &&
+	if ((key == NULL || key[0] == '\0') &&
+	    length == sizeof(context->card) &&
 	    read_cb(cb_arg, &context->card, sizeof(context->card)) ==
 		    sizeof(context->card) &&
 	    context->card.version == INFO_CACHE_VERSION) {

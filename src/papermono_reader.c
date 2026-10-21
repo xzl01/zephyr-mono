@@ -54,7 +54,8 @@ static int load_state_callback(const char *key, size_t length,
 {
 	struct reader_state_load_context *context = param;
 
-	if (key[0] != '\0' || length != sizeof(context->record)) {
+	if ((key != NULL && key[0] != '\0') ||
+	    length != sizeof(context->record)) {
 		return 0;
 	}
 	if (read_cb(cb_arg, &context->record, sizeof(context->record)) ==
@@ -93,7 +94,8 @@ static int load_recent_callback(const char *key, size_t length,
 {
 	struct recent_load_context *context = param;
 
-	if (key[0] == '\0' && length == sizeof(context->record) &&
+	if ((key == NULL || key[0] == '\0') &&
+	    length == sizeof(context->record) &&
 	    read_cb(cb_arg, &context->record, sizeof(context->record)) ==
 		    sizeof(context->record) &&
 	    context->record.version == READER_RECENT_VERSION &&

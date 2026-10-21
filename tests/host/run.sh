@@ -158,6 +158,14 @@ cc -std=c17 -Wall -Wextra -Werror \
 	src/papermono_fs_read.c \
 	-o "$build_dir/test_fs_read"
 "$build_dir/test_fs_read"
+cc -std=c17 -Wall -Wextra -Werror \
+	-Itests/host/stubs -Iinclude tests/host/test_info_provider.c \
+	-o "$build_dir/test_info_provider"
+"$build_dir/test_info_provider"
+cc -std=c17 -Wall -Wextra -Werror \
+	-Itests/host/stubs -Iinclude tests/host/test_organizer.c \
+	src/papermono_personal_data.c -o "$build_dir/test_organizer"
+"$build_dir/test_organizer"
 python3 tests/host/test_font_coverage.py
 python3 tests/host/test_field_notes_assets.py
 python3 tests/host/test_content_web.py

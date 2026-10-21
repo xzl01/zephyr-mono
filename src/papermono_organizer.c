@@ -91,7 +91,7 @@ static int load_overlay(const char *key, size_t length,
 	settings_read_cb read_cb, void *cb_arg, void *parameter)
 {
 	ARG_UNUSED(parameter);
-	if (key[0] != '\0' || length != sizeof(overlay)) {
+	if ((key != NULL && key[0] != '\0') || length != sizeof(overlay)) {
 		return 0;
 	}
 	if (read_cb(cb_arg, &overlay, sizeof(overlay)) != sizeof(overlay) ||
