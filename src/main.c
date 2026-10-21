@@ -19,7 +19,8 @@
 	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH) || \
 	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON) || \
 	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_RTC) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU)
+	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU) || \
+	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON)
 #define PAPERMONO_POWER_HIL_ENABLED 1
 #else
 #define PAPERMONO_POWER_HIL_ENABLED 0
@@ -54,6 +55,8 @@ static bool power_hil_wake_matches(enum papermono_wakeup_cause cause)
 	return cause == PAPERMONO_WAKE_ESP_TIMER;
 #elif defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH)
 	return cause == PAPERMONO_WAKE_TOUCH;
+#elif defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON)
+	return cause == PAPERMONO_WAKE_PMIC_IRQ;
 #elif defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON)
 	return cause == PAPERMONO_WAKE_PMIC_BUTTON;
 #elif defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_RTC)
@@ -238,7 +241,8 @@ int main(void)
 	}
 #endif
 	if (ret == 0 && wake_cause != PAPERMONO_WAKE_COLD_BOOT) {
-		LOG_INF("PaperMono resumed from wake source %d", wake_cause);
+		LOG_INF("PaperMono resumed from wake source %d (%s)", wake_cause,
+			papermono_wakeup_cause_name(wake_cause));
 		ret = papermono_power_acknowledge_wakeup(wake_cause);
 		if (ret < 0) {
 			LOG_WRN("Failed to acknowledge wake source %d (%d)",
@@ -248,11 +252,7 @@ int main(void)
 #endif
 
 	if (!device_is_ready(display)) {
-#if defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TIMER) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_RTC) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU)
+#if PAPERMONO_POWER_HIL_ENABLED
 		LOG_WRN("PaperMono display device is not ready; continuing power HIL");
 		ret = -ENODEV;
 #else
@@ -276,7 +276,8 @@ int main(void)
 	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH) || \
 	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON) || \
 	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_RTC) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU)
+	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU) || \
+	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON)
 		LOG_WRN("Display refresh failed (%d); continuing power HIL", ret);
 #else
 		LOG_ERR("Display refresh failed (%d)", ret);
@@ -307,7 +308,8 @@ int main(void)
 	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH) || \
 	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON) || \
 	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_RTC) || \
-	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU)
+	defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_IMU) || \
+	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON)
 			LOG_WRN("Driver self-test failed (%d); continuing isolated power HIL",
 				ret);
 #else
@@ -415,7 +417,8 @@ int main(void)
 #if defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TIMER)
 		ret = papermono_power_enter_timed_deep_sleep(
 			CONFIG_PAPERMONO_POWER_HIL_WAKE_SECONDS);
-#elif defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH)
+#elif defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH) || \
+	defined(CONFIG_PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON)
 		ret = papermono_power_enter_touch_deep_sleep();
 #elif defined(CONFIG_PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON)
 		ret = papermono_power_shutdown_button();

@@ -26,6 +26,29 @@ int main(void)
 	int16_t event_y;
 
 	assert(classify(40, 300, 140, 305, 200) == PAPERMONO_APP_EVENT_BACK);
+	/* Left edge commits on 32 px of inward motion; middle/right swipes and
+	 * a mostly vertical edge drag must keep their application meaning.
+	 */
+	assert(classify(5, 300, 37, 310, 40) == PAPERMONO_APP_EVENT_BACK);
+	assert(classify(47, 300, 79, 300, 40) == PAPERMONO_APP_EVENT_BACK);
+	assert(classify(48, 300, 80, 300, 40) == PAPERMONO_APP_EVENT_TAP);
+	assert(classify(5, 300, 36, 300, 40) == PAPERMONO_APP_EVENT_TAP);
+	assert(classify(5, 300, 37, 380, 40) == PAPERMONO_APP_EVENT_DOWN);
+	assert(classify(5, 498, 52, 580, 107) == PAPERMONO_APP_EVENT_BACK);
+	assert(classify(48, 498, 108, 580, 107) == PAPERMONO_APP_EVENT_DOWN);
+	assert(classify(200, 300, 232, 300, 40) == PAPERMONO_APP_EVENT_TAP);
+	assert(papermono_touch_gesture_navigation(5, 300, 37, 310, 40,
+		WIDTH, HEIGHT, &type) == 0 && type == PAPERMONO_APP_EVENT_BACK);
+	assert(papermono_touch_gesture_navigation(200, 750, 205, 690, 40,
+		WIDTH, HEIGHT, &type) == 0 && type == PAPERMONO_APP_EVENT_HOME);
+	assert(papermono_touch_gesture_navigation(200, 300, 300, 300, 40,
+		WIDTH, HEIGHT, &type) == -ENOENT);
+	assert(papermono_touch_gesture_navigation(5, 300, 37, 310, 2,
+		WIDTH, HEIGHT, &type) == -EAGAIN);
+	assert(papermono_touch_gesture_navigation(-1, 300, 37, 310, 40,
+		WIDTH, HEIGHT, &type) == -EINVAL);
+	assert(papermono_touch_gesture_navigation(5, 300, 37, 310, 40,
+		WIDTH, HEIGHT, NULL) == -EINVAL);
 	assert(classify(200, 750, 205, 650, 200) == PAPERMONO_APP_EVENT_HOME);
 	assert(classify(300, 300, 200, 305, 200) == PAPERMONO_APP_EVENT_NEXT);
 	assert(classify(200, 300, 300, 305, 200) == PAPERMONO_APP_EVENT_PREVIOUS);

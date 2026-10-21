@@ -50,7 +50,9 @@ token。配对码在当前启动周期只能成功使用一次；重新配网会
 
 首次配网且尚无 STA 凭据时，ESP32-S3 最终运行于 AP-only。为规避控制器报告
 AP_START 但外部无 beacon 的状态，启动时允许一次受控 APSTA 到 AP-only 切换；
-DHCP 在每次成功 AP_START 后重建。提交凭据后连接路径自动切换到 APSTA。配网 AP 使用固定信道 6、
+DHCP 在每次成功 AP_START 后重建。这次切换在日志中会表现为一次
+`SoftAP disable complete` 加 `Recovery SoftAP retry scheduled`，随后重新
+`enable complete` 并通过接口自检，属于预期行为，不是异常重启。提交凭据后连接路径自动切换到 APSTA。配网 AP 使用固定信道 6、
 20 MHz、802.11b/g/n、关闭省电及 78 qdBm（19.5 dBm）功率上限，并在日志中
 回读这些参数。固件不强制国家码；功率值是控制器上限，实际发射仍受 regulatory
 domain、芯片校准、eFuse 和天线链路约束。HTTP server 与 Wi-Fi sockets service
@@ -73,6 +75,19 @@ X-PaperMono-Session: <session-token>
 | `POST /api/v1/content` | 是 | 原始请求体流式导入内容 |
 | `DELETE /api/v1/content/{id}` | 是 | 按稳定内容 ID 删除 |
 | `POST /api/v1/wifi` | 是 | 保存 STA 凭据并后台连接 |
+
+`POST /api/v1/content` 的响应码（客户端应按此处理，不要只看 2xx）：
+
+| 状态码 | 含义 |
+| --- | --- |
+| `201 Created` | 已提交；文件通过校验、原子替换并重新可枚举 |
+| `400 Bad Request` | 提交失败或写入被拒，body 带 `code` 字段给出负 errno |
+| `401 Unauthorized` | 会话缺失/失效，需要重新配对 |
+| `408 Request Timeout` | 流式请求在截止时间内没有完成 |
+| `409 Conflict` | 另一个导入正在进行，或与删除操作冲突 |
+| `411 Length Required` | 缺少 `Content-Length`；这是「上传了 0 字节」的常见根因 |
+| `413 Payload Too Large` | 超出单文件大小上限 |
+| `429 Too Many Requests` | 配对尝试过于频繁 |
 
 公开状态的 Wi-Fi 字段示例：
 

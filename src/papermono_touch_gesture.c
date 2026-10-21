@@ -5,13 +5,14 @@
 #include <papermono/touch_gesture.h>
 
 #define TOUCH_SWIPE_MIN 60
+#define TOUCH_EDGE_SWIPE_MIN 32
 #define TOUCH_LONG_PRESS_MOVE_MAX 30
 #define TOUCH_TAP_RELEASE_MOVE_MAX (TOUCH_SWIPE_MIN - 1)
 #define TOUCH_MIN_PRESS_MS 5U
 #define TOUCH_LONG_PRESS_MS 800U
 #define TOUCH_MAX_PRESS_MS 2500U
 
-int papermono_touch_gesture_classify(int16_t start_x, int16_t start_y,
+int papermono_touch_gesture_navigation(int16_t start_x, int16_t start_y,
 	int16_t end_x, int16_t end_y, uint32_t duration_ms,
 	int16_t width, int16_t height, enum papermono_app_event_type *type)
 {
@@ -29,7 +30,16 @@ int papermono_touch_gesture_classify(int16_t start_x, int16_t start_y,
 	    duration_ms > TOUCH_MAX_PRESS_MS) {
 		return -EAGAIN;
 	}
-	if (delta_x >= TOUCH_SWIPE_MIN && abs_x > abs_y &&
+	const int32_t back_distance = start_x < width / 10 ?
+		TOUCH_EDGE_SWIPE_MIN : TOUCH_SWIPE_MIN;
+	/* A thumb naturally travels diagonally when starting against the bezel.
+	 * Only the narrow edge accepts this slop; vertical scrolling further in
+	 * and ordinary right swipes retain their existing classification.
+	 */
+	const bool back_direction = start_x < width / 10 ?
+		delta_x > 0 && abs_y <= delta_x * 2 : abs_x > abs_y;
+
+	if (delta_x >= back_distance && back_direction &&
 	    start_x < width / 4) {
 		*type = PAPERMONO_APP_EVENT_BACK;
 		return 0;
@@ -38,6 +48,23 @@ int papermono_touch_gesture_classify(int16_t start_x, int16_t start_y,
 	    start_y >= height - (height * 14) / 100) {
 		*type = PAPERMONO_APP_EVENT_HOME;
 		return 0;
+	}
+	return -ENOENT;
+}
+
+int papermono_touch_gesture_classify(int16_t start_x, int16_t start_y,
+	int16_t end_x, int16_t end_y, uint32_t duration_ms,
+	int16_t width, int16_t height, enum papermono_app_event_type *type)
+{
+	const int ret = papermono_touch_gesture_navigation(start_x, start_y,
+		end_x, end_y, duration_ms, width, height, type);
+	const int32_t delta_x = (int32_t)end_x - start_x;
+	const int32_t delta_y = (int32_t)end_y - start_y;
+	const int32_t abs_x = delta_x < 0 ? -delta_x : delta_x;
+	const int32_t abs_y = delta_y < 0 ? -delta_y : delta_y;
+
+	if (ret != -ENOENT) {
+		return ret;
 	}
 	if (delta_x <= -TOUCH_SWIPE_MIN && abs_x > abs_y) {
 		*type = PAPERMONO_APP_EVENT_NEXT;

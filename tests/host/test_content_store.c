@@ -22,6 +22,14 @@ static unsigned int open_files;
 static unsigned int upload_unlinks;
 static unsigned int unlink_calls;
 
+/* Minimal existence model for the commit happy path. Empty until a rename
+ * produces the final content path, so every older assertion that relies on
+ * "nothing exists" keeps its original behaviour.
+ */
+static char committed_path[256];
+static size_t committed_size;
+static size_t stub_last_write;
+
 bool gpio_is_ready_dt(const struct gpio_dt_spec *spec)
 {
 	(void)spec;
@@ -66,6 +74,23 @@ int fs_unmount(struct fs_mount_t *mount)
 {
 	(void)mount;
 	mounted = false;
+	return 0;
+}
+
+/* Only reached through the explicitly-confirmed TF format path; the store tests
+ * never format, so record the call and succeed.
+ */
+static unsigned int fs_mkfs_calls;
+
+int fs_mkfs(int fs_type, uintptr_t dev_id, void *cfg, int flags)
+{
+	(void)dev_id;
+	(void)cfg;
+	(void)flags;
+	if (fs_type != FS_FATFS) {
+		return -EINVAL;
+	}
+	++fs_mkfs_calls;
 	return 0;
 }
 
@@ -116,6 +141,7 @@ ssize_t fs_write(struct fs_file_t *file, const void *buffer, size_t length)
 {
 	(void)file;
 	(void)buffer;
+	stub_last_write = length;
 	return (ssize_t)length;
 }
 
@@ -158,6 +184,14 @@ int fs_close(struct fs_file_t *file)
 
 int fs_stat(const char *path, struct fs_dirent *entry)
 {
+	if (committed_path[0] != '\0' && strcmp(path, committed_path) == 0) {
+		if (entry != NULL) {
+			memset(entry, 0, sizeof(*entry));
+			entry->size = committed_size;
+			entry->type = FS_DIR_ENTRY_FILE;
+		}
+		return 0;
+	}
 	(void)path;
 	(void)entry;
 	return -ENOENT;
@@ -175,7 +209,11 @@ int fs_unlink(const char *path)
 int fs_rename(const char *from, const char *to)
 {
 	(void)from;
-	(void)to;
+	/* Only the commit's upload -> final rename publishes a visible file. */
+	if (strstr(to, ".upload") == NULL && strstr(to, ".backup") == NULL) {
+		(void)snprintf(committed_path, sizeof(committed_path), "%s", to);
+		committed_size = stub_last_write;
+	}
 	return 0;
 }
 
@@ -366,6 +404,26 @@ int main(void)
 	assert(papermono_content_store_import_commit(&first) == -EIO);
 	assert(!first.active && !first.file_open && open_files == 0U);
 
+	/* Successful commit of a brand-new file: the path the product uses for
+	 * every first upload. Before the unlink guard fix this logged
+	 * "failed to unlink path (-2)" because the stale-backup cleanup ran
+	 * unconditionally.
+	 */
+	assert(papermono_content_store_mount() == 0);
+	sync_fails = false;
+	committed_path[0] = '\0';
+	unlink_calls_before = unlink_calls;
+	assert(papermono_content_store_import_begin(&first, PAPERMONO_CONTENT_TXT,
+		"commit-ok.txt", sizeof(data), false, 0U) == 0);
+	assert(papermono_content_store_import_write(&first, data,
+		sizeof(data)) == 0);
+	assert(papermono_content_store_import_commit(&first) == 0);
+	assert(!first.active && !first.file_open && open_files == 0U);
+	assert(strstr(committed_path, "commit-ok.txt") != NULL);
+	assert(committed_size == sizeof(data));
+	/* No stale backup existed, so no unlink should have been attempted. */
+	assert(unlink_calls == unlink_calls_before);
+
 	memset(long_name, 'a', MAX_FILE_NAME - 4U);
 	memcpy(long_name + MAX_FILE_NAME - 4U, ".txt", 5U);
 	assert(strlen(long_name) == MAX_FILE_NAME);
@@ -420,6 +478,44 @@ int main(void)
 	assert(papermono_content_store_open(&entry, &read_file) == -EINVAL);
 	assert(papermono_content_store_delete(&entry) == -EPERM);
 	assert(unlink_calls == unlink_calls_before);
+
+	/* Import validation reopens the EPUB from the staging directory, so the
+	 * "<dir>/.upload/<name>" shape has to be openable. The leaf name is still
+	 * checked exactly as a published file is, so the staging prefix cannot be
+	 * used to reach anything else.
+	 */
+	entry.kind = PAPERMONO_CONTENT_EPUB;
+	(void)snprintf(entry.path, sizeof(entry.path), "%s/.upload/book.epub",
+		PAPERMONO_BOOKS_DIRECTORY);
+	assert(papermono_content_store_open(&entry, &read_file) == 0);
+	assert(fs_close(&read_file) == 0);
+	/* Traversal through the staging directory is still refused. */
+	(void)snprintf(entry.path, sizeof(entry.path),
+		"%s/.upload/../book.epub", PAPERMONO_BOOKS_DIRECTORY);
+	assert(papermono_content_store_open(&entry, &read_file) == -EINVAL);
+	(void)snprintf(entry.path, sizeof(entry.path),
+		"%s/.upload/../../secret.epub", PAPERMONO_BOOKS_DIRECTORY);
+	assert(papermono_content_store_open(&entry, &read_file) == -EINVAL);
+	/* A staging path must not smuggle a second directory in. */
+	(void)snprintf(entry.path, sizeof(entry.path),
+		"%s/.upload/nested/book.epub", PAPERMONO_BOOKS_DIRECTORY);
+	assert(papermono_content_store_open(&entry, &read_file) == -EINVAL);
+	/* The kind still has to match the name. */
+	(void)snprintf(entry.path, sizeof(entry.path), "%s/.upload/book.txt",
+		PAPERMONO_BOOKS_DIRECTORY);
+	assert(papermono_content_store_open(&entry, &read_file) == -EINVAL);
+	/* Staging is only accepted under the kind's own directory. */
+	(void)snprintf(entry.path, sizeof(entry.path), "%s/.upload/book.epub",
+		PAPERMONO_NOTES_DIRECTORY);
+	assert(papermono_content_store_open(&entry, &read_file) == -EINVAL);
+
+	/* A card with no mountable FAT is provisioned by the explicit format path;
+	 * that path is the only caller of fs_mkfs().
+	 */
+	assert(papermono_content_store_unmount() == 0);
+	assert(papermono_content_store_format() == 0);
+	assert(fs_mkfs_calls == 1U);
+	assert(mounted);
 	puts("content store hot-remove transactions: PASS");
 	return 0;
 }

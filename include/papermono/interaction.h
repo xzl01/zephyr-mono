@@ -45,6 +45,9 @@ bool papermono_app_event_is_button(const struct papermono_app_event *event);
 bool papermono_app_event_is_touch(const struct papermono_app_event *event);
 bool papermono_app_event_is_back_navigation(
 	const struct papermono_app_event *event);
+/** Keep one deferred action; Sleep/Home/Back may supersede ordinary input. */
+bool papermono_interaction_defer_event(struct papermono_app_event *pending,
+	bool *valid, const struct papermono_app_event *incoming);
 bool papermono_interaction_contains(const struct papermono_app_event *event,
 	uint8_t triggers, const struct papermono_rect *rect);
 int papermono_interaction_route(const struct papermono_app_event *event,

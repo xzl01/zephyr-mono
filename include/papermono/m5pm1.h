@@ -99,6 +99,10 @@ int m5pm1_feed_watchdog(const struct device *dev);
 int m5pm1_fetch_irq_status(const struct device *dev,
 			   struct m5pm1_irq_status *status);
 int m5pm1_clear_irq_status(const struct device *dev);
+/* Unmask click/wake IRQs and disable single-click reset; retain long/double
+ * press and download recovery policy. Used for awake input and deep-sleep wake.
+ */
+int m5pm1_prepare_button_wake(const struct device *dev);
 int m5pm1_pwm_set(const struct device *dev, uint8_t channel,
 		  uint16_t frequency_hz, uint16_t duty_12bit,
 		  bool inverted, bool enable);

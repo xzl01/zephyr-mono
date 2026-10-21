@@ -42,6 +42,28 @@ bool papermono_app_event_is_back_navigation(
 		 event->type == PAPERMONO_APP_EVENT_PREVIOUS);
 }
 
+static unsigned int navigation_priority(enum papermono_app_event_type type)
+{
+	return type == PAPERMONO_APP_EVENT_SLEEP ? 3U :
+		type == PAPERMONO_APP_EVENT_HOME ? 2U :
+		type == PAPERMONO_APP_EVENT_BACK ? 1U : 0U;
+}
+
+bool papermono_interaction_defer_event(struct papermono_app_event *pending,
+	bool *valid, const struct papermono_app_event *incoming)
+{
+	if (pending == NULL || valid == NULL || incoming == NULL) {
+		return false;
+	}
+	if (*valid && navigation_priority(incoming->type) <=
+	    navigation_priority(pending->type)) {
+		return false;
+	}
+	*pending = *incoming;
+	*valid = true;
+	return true;
+}
+
 bool papermono_interaction_contains(const struct papermono_app_event *event,
 	uint8_t triggers, const struct papermono_rect *rect)
 {

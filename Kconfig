@@ -100,6 +100,31 @@ config PAPERMONO_FT6336_THREAD_PRIORITY
 	help
 	  Preemptible Zephyr priority used by the touch polling thread.
 
+config PAPERMONO_HIL_FAKE_UNFORMATTED
+	bool "HIL: present the TF format UI without touching the card"
+	default n
+	depends on FILE_SYSTEM
+	help
+	  Verification-only option for the on-device acceptance walkthrough.
+	  The store reports an unformatted card so the system page exposes the
+	  format entry, and the confirmation is simulated instead of running
+	  fs_mkfs, so the mounted card and its files are left intact. Never
+	  enable this in a shipped image.
+
+config PAPERMONO_TF_FORMAT_WHEN_UNFORMATTED
+	bool "Format an unformatted TF card at boot (DESTRUCTIVE)"
+	default n
+	depends on FILE_SYSTEM_MKFS && FS_FATFS_MKFS
+	help
+	  Create a fresh super-floppy FAT filesystem on the TF card when it
+	  carries no filesystem this firmware can mount (for example a card that
+	  shipped exFAT or GPT-partitioned). Every partition and file on the card
+	  is erased.
+
+	  Do not enable this in a normal build: it is meant for first-time
+	  provisioning of a known-blank card, mirroring the explicit-opt-in HIL
+	  profiles used for the other risky board actions.
+
 config PAPERMONO_DRIVER_SELFTEST
 	bool "Run the interactive PaperMono driver HIL self-test"
 	default n
@@ -131,13 +156,24 @@ config PAPERMONO_UI_AUTO_REFRESH_MINUTES
 	  zero to update only after a button or touch action. A longer interval
 	  reduces e-paper activity and power use.
 
+config PAPERMONO_UI_THREAD_PRIORITY
+	int "Interactive UI thread priority"
+	default 10
+	range 1 14
+	depends on PAPERMONO_INTERACTIVE_UI
+	help
+	  Priority applied when the main thread starts the UI. Keep the numeric
+	  value greater than FT6336_THREAD_PRIORITY so LVGL layout cannot starve
+	  touch polling while the display is being prepared.
+
 config PAPERMONO_DISPLAY_INPUT_SETTLE_MS
 	int "Input settle time after an e-paper refresh"
-	default 500
+	default 32
 	range 0 2000
 	help
-	  Keep the touch and side-key stream blocked for this duration after the
-	  SSD1677 high-voltage switching interval completes.
+	  Defer input dispatch for this duration after SSD1677 BUSY clears. The
+	  driver already waits for the physical refresh; 32 ms adds four touch
+	  polling intervals without the former half-second navigation delay.
 
 config PAPERMONO_UI_IDLE_SLEEP_DEFAULT_MINUTES
 	int "Default inactivity timeout before touch-wake deep sleep"
@@ -305,6 +341,10 @@ config PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH
 	bool "ESP32-S3 deep sleep with touch wake"
 	depends on POWEROFF
 
+config PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON
+	bool "ESP32-S3 deep sleep with M5PM1 power-button IRQ wake"
+	depends on POWEROFF
+
 config PAPERMONO_POWER_HIL_SHUTDOWN_BUTTON
 	bool "M5PM1 shutdown; wake with the power button"
 
@@ -338,7 +378,8 @@ config PAPERMONO_POWER_HIL_REPEAT_COUNT
 	range 1 50
 	depends on PAPERMONO_DRIVER_SELFTEST && PAPERMONO_POWER_CONTROL
 	depends on PAPERMONO_POWER_HIL_DEEP_SLEEP_TIMER || \
-		PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH
+		PAPERMONO_POWER_HIL_DEEP_SLEEP_TOUCH || \
+		PAPERMONO_POWER_HIL_DEEP_SLEEP_POWER_BUTTON
 	help
 	  Repeat an ESP32-S3 deep-sleep HIL cycle only after the selected wake
 	  source and a successful display refresh are both observed. Progress is

@@ -46,6 +46,7 @@ enum papermono_app_event_type {
 	PAPERMONO_APP_EVENT_LONG_PRESS,
 	PAPERMONO_APP_EVENT_REFRESH,
 	PAPERMONO_APP_EVENT_CONTENT_CHANGED,
+	PAPERMONO_APP_EVENT_SLEEP,
 };
 
 enum papermono_app_event_source {
@@ -61,6 +62,8 @@ struct papermono_app_event {
 	int16_t x;
 	int16_t y;
 	uint32_t duration_ms;
+	/* Uptime at capture, retained across a display refresh for latency logs. */
+	uint32_t queued_at_ms;
 };
 
 enum papermono_app_command_type {

@@ -3,9 +3,16 @@
 This matrix separates implementation, build validation, controller-level HIL,
 and tests that require an external accessory or a deliberate power/RF action.
 Rows retain the strongest dated evidence from earlier candidate images; they do
-not imply that the current HEAD passed the same physical checks. The current V2
-image was written and verified but has not yet produced a new display frame due
-to an Xtensa startup exception under investigation.
+not imply that the current working tree passed the same physical checks. On
+2026-09-30 the startup exception was traced to system-workqueue stack overflow
+and fixed. The flashed default image now completes full/partial refresh and
+processes physical taps and edge-back gestures; debugger-free USB reset also
+passes startup. TF initialization previously failed with -134; on 2026-10-20 the
+cause was found to be SD CLK/CMD swapped in the board pinctrl, and the card now
+initializes, mounts FAT, and passes a write/read-back check on hardware. The
+content-center HTTP upload path remains unverified on device. See
+[TF card evidence](tf-card-20261020.md) and
+[boot recovery evidence](boot-recovery-20260930.md).
 
 | Function | Zephyr interface / extension | Current validation |
 | --- | --- | --- |
@@ -13,7 +20,7 @@ to an Xtensa startup exception under investigation.
 | SSD1677 partial | `display` plus automatic baseline/maintenance | Board HIL passed: ten updates at 737-738 ms, maintenance full refresh at 4321 ms, then the next partial at 737 ms |
 | SSD1677 four gray | `papermono_ssd1677_refresh_gray4()` | Controller HIL passed with white/light/dark/black quadrants |
 | Frontlight | `display_set_brightness()` via M5PM1 PWM | Board HIL passed |
-| Touch | C153 FT6336 dedicated 8 ms polling input + GPIO4 wake | Physical coordinates and EXT0 touch wake passed on 2026-08-28. The 2026-08-31 reliability candidate also passed FT6336 press/release, UI queue/process, refresh-time gesture retention and repeated 737-738 ms partial refresh on hardware. The current V2 image still requires a fresh physical interaction pass |
+| Touch | C153 FT6336 dedicated 8 ms polling input + GPIO4 wake | Physical coordinates and EXT0 touch wake passed on 2026-08-28. On 2026-09-30 the recovery image passed real press/release, UI queue/process, application entry, left-edge BACK to launcher and repeated 737-738 ms partial refresh. Current-image sleep/wake endurance remains unverified |
 | Side buttons | Zephyr `gpio-keys` input | Both physical buttons passed |
 | RGB LED | Zephyr LED API; centralized storage/Wi-Fi/BLE/activity status policy; M5PM1 red plus M5IOE1 PWM green/blue | Raw channel Board HIL passed on an earlier candidate. Priority/color policy host tests and default build pass; physical confirmation of current V2 boot, transfer/error states and deep-sleep-off behavior still requires replay |
 | Buzzer | Zephyr PWM, ESP32-S3 LEDC GPIO42 | 2 kHz tone HIL passed |

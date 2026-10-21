@@ -250,6 +250,57 @@ static void test_remote_spaced_grids(void)
 	assert(index == 2U);
 }
 
+static void test_deferred_navigation_priority(void)
+{
+	struct papermono_app_event pending = { 0 };
+	bool valid = false;
+	struct papermono_app_event incoming = {
+		.type = PAPERMONO_APP_EVENT_TAP,
+		.source = PAPERMONO_APP_EVENT_SOURCE_TOUCH,
+		.x = 220, .y = 200, .queued_at_ms = 100,
+	};
+
+	assert(papermono_interaction_defer_event(&pending, &valid, &incoming));
+	assert(valid && pending.type == PAPERMONO_APP_EVENT_TAP);
+	/* A second tap must not cascade through multiple unseen pages. */
+	incoming.queued_at_ms = 120;
+	assert(!papermono_interaction_defer_event(&pending, &valid, &incoming));
+	assert(pending.queued_at_ms == 100);
+	/* Back replaces that tap rather than disappearing during refresh. */
+	incoming.type = PAPERMONO_APP_EVENT_BACK;
+	incoming.queued_at_ms = 130;
+	assert(papermono_interaction_defer_event(&pending, &valid, &incoming));
+	assert(pending.type == PAPERMONO_APP_EVENT_BACK &&
+		pending.queued_at_ms == 130);
+	assert(!papermono_interaction_defer_event(&pending, &valid, &incoming));
+	incoming.type = PAPERMONO_APP_EVENT_TAP;
+	assert(!papermono_interaction_defer_event(&pending, &valid, &incoming));
+	incoming.type = PAPERMONO_APP_EVENT_HOME;
+	assert(papermono_interaction_defer_event(&pending, &valid, &incoming));
+	incoming.type = PAPERMONO_APP_EVENT_BACK;
+	assert(!papermono_interaction_defer_event(&pending, &valid, &incoming));
+	assert(pending.type == PAPERMONO_APP_EVENT_HOME);
+	/* A physical power click survives a full-screen refresh and takes
+	 * priority over deferred navigation; repeats coalesce to one sleep.
+	 */
+	incoming.type = PAPERMONO_APP_EVENT_SLEEP;
+	incoming.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON;
+	assert(papermono_interaction_defer_event(&pending, &valid, &incoming));
+	assert(pending.type == PAPERMONO_APP_EVENT_SLEEP);
+	assert(!papermono_interaction_defer_event(&pending, &valid, &incoming));
+	incoming.type = PAPERMONO_APP_EVENT_HOME;
+	assert(!papermono_interaction_defer_event(&pending, &valid, &incoming));
+	/* Clearing after dispatch allows the next physical button action. */
+	valid = false;
+	incoming.type = PAPERMONO_APP_EVENT_NEXT;
+	incoming.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON;
+	assert(papermono_interaction_defer_event(&pending, &valid, &incoming));
+	assert(pending.source == PAPERMONO_APP_EVENT_SOURCE_BUTTON);
+	assert(!papermono_interaction_defer_event(NULL, &valid, &incoming));
+	assert(!papermono_interaction_defer_event(&pending, NULL, &incoming));
+	assert(!papermono_interaction_defer_event(&pending, &valid, NULL));
+}
+
 int main(void)
 {
 	test_explicit_input_source();
@@ -257,6 +308,7 @@ int main(void)
 	test_grid_mapping();
 	test_spaced_grid_mapping();
 	test_remote_spaced_grids();
+	test_deferred_navigation_priority();
 	puts("interaction routing tests: PASS");
 	return 0;
 }

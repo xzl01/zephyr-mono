@@ -109,6 +109,12 @@ const char *papermono_status_led_state_name(
 
 LOG_MODULE_REGISTER(papermono_status_led, LOG_LEVEL_INF);
 
+/* LED updates execute on sysworkq and enter the blocking PMIC/I2C path.
+ * Catch profile overrides that reintroduce the measured 1 KiB overflow.
+ */
+BUILD_ASSERT(CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE >= 4096,
+	"PaperMono PMIC/LED work requires at least a 4 KiB system workqueue stack");
+
 static const struct device *const status_led = DEVICE_DT_GET(DT_ALIAS(led0));
 K_MUTEX_DEFINE(status_led_lock);
 static atomic_t initialized;

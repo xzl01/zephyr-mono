@@ -80,7 +80,7 @@ static const struct fake_entry deep_ncx_entries[] = {
 	  "<content src='c3.xhtml'/>"
 	  "<navPoint><navLabel><text>L3</text></navLabel>"
 	  "<content src='c4.xhtml'/>"
-	  "</navPoint></navPoint></navPoint>"
+	  "</navPoint></navPoint></navPoint></navPoint>"
 	  "<navPoint><navLabel><text>sibling</text></navLabel>"
 	  "<content src='c1.xhtml'/>"
 	  "</navPoint>"
@@ -89,6 +89,46 @@ static const struct fake_entry deep_ncx_entries[] = {
 	{ "OPS/c2.xhtml", "<html><body><p>two</p></body></html>" },
 	{ "OPS/c3.xhtml", "<html><body><p>three</p></body></html>" },
 	{ "OPS/c4.xhtml", "<html><body><p>four</p></body></html>" },
+};
+
+/* Flat NCX: three sibling leaf navPoints, the shape most exporters emit. */
+static const struct fake_entry flat_ncx_entries[] = {
+	{ "META-INF/container.xml",
+	  "<container><rootfile full-path='OPS/package.opf'/></container>" },
+	{ "OPS/package.opf",
+	  "<package><manifest>"
+	  "<item id='c1' href='c1.xhtml' media-type='application/xhtml+xml'/>"
+	  "<item id='c2' href='c2.xhtml' media-type='application/xhtml+xml'/>"
+	  "<item id='c3' href='c3.xhtml' media-type='application/xhtml+xml'/>"
+	  "<item id='toc' href='toc.ncx' media-type='application/x-dtbncx+xml'/>"
+	  "</manifest><spine toc='toc'><itemref idref='c1'/>"
+	  "<itemref idref='c2'/><itemref idref='c3'/>"
+	  "</spine></package>" },
+	{ "OPS/toc.ncx",
+	  "<ncx><navMap>"
+	  "<navPoint id='a'><navLabel><text>ONE</text></navLabel>"
+	  "<content src='c1.xhtml'/></navPoint>"
+	  "<navPoint id='b'><navLabel><text>TWO</text></navLabel>"
+	  "<content src='c2.xhtml'/></navPoint>"
+	  "<navPoint id='c'><navLabel><text>THREE</text></navLabel>"
+	  "<content src='c3.xhtml'/></navPoint>"
+	  "</navMap></ncx>" },
+	{ "OPS/c1.xhtml", "<html><body><p>one</p></body></html>" },
+	{ "OPS/c2.xhtml", "<html><body><p>two</p></body></html>" },
+	{ "OPS/c3.xhtml", "<html><body><p>three</p></body></html>" },
+};
+
+/* Numeric character references that are not Unicode scalars, mixed with
+ * ordinary text on both sides. */
+static const struct fake_entry entity_entries[] = {
+	{ "META-INF/container.xml",
+	  "<container><rootfile full-path='OPS/package.opf'/></container>" },
+	{ "OPS/package.opf",
+	  "<package><manifest>"
+	  "<item id='one' href='chapter1.xhtml' media-type='application/xhtml+xml'/>"
+	  "</manifest><spine><itemref idref='one'/></spine></package>" },
+	{ "OPS/chapter1.xhtml",
+	  "<html><body><p>PRE &#x110000; POST</p></body></html>" },
 };
 
 static const struct fake_entry traversal_entries[] = {
@@ -283,11 +323,104 @@ static void test_deep_ncx_nesting(void)
 	active_count = sizeof(deep_ncx_entries) / sizeof(deep_ncx_entries[0]);
 	assert(papermono_epub_open(&book, &source) == 0);
 	assert(book.chapter_count == 4U);
-	assert(book.toc_count == 4U);
+	/* Every navPoint yields exactly one entry, including the trailing sibling
+	 * that navigates back to c1.xhtml: it is a real TOC destination even
+	 * though chapter 0 keeps the title of its first entry.
+	 */
+	assert(book.toc_count == 5U);
 	assert(book.toc[0].level == 0U);
 	assert(book.toc[1].level == 1U);
 	assert(book.toc[2].level == 2U);
 	assert(book.toc[3].level == 3U);
+	assert(book.toc[4].level == 0U);
+	assert(book.toc[4].chapter == 0U);
+	assert(strcmp(book.toc[4].title, "sibling") == 0);
+	assert(strcmp(book.chapters[0].title, "L0") == 0);
+}
+
+/* A flat NCX (every navPoint a sibling leaf) is a normal export shape. Each
+ * entry must appear exactly once and at level 0; resuming from a matched
+ * closing tag used to make every sibling after the first appear twice, once
+ * with a spurious nesting level.
+ */
+static void test_flat_ncx_navigation(void)
+{
+	struct papermono_content_entry source = {
+		.kind = PAPERMONO_CONTENT_EPUB,
+		.size = 4096U,
+	};
+	struct papermono_epub_book book;
+
+	active_entries = flat_ncx_entries;
+	active_count = sizeof(flat_ncx_entries) / sizeof(flat_ncx_entries[0]);
+	assert(papermono_epub_open(&book, &source) == 0);
+	assert(book.chapter_count == 3U);
+	assert(book.toc_count == 3U);
+	assert(strcmp(book.toc[0].title, "ONE") == 0);
+	assert(strcmp(book.toc[1].title, "TWO") == 0);
+	assert(strcmp(book.toc[2].title, "THREE") == 0);
+	assert(book.toc[0].chapter == 0U && book.toc[0].level == 0U);
+	assert(book.toc[1].chapter == 1U && book.toc[1].level == 0U);
+	assert(book.toc[2].chapter == 2U && book.toc[2].level == 0U);
+}
+
+/* A character reference outside the Unicode scalar range is not an encoding
+ * failure. It must render as U+FFFD and leave the rest of the page readable.
+ * It used to abort the stream, which made the reader believe the chapter had
+ * ended and skip everything after the reference.
+ *
+ * "PRE <ref> POST" is 12 columns against a 16-column page, so the whole
+ * sentence has to survive on one page for the assertion to mean anything.
+ */
+static void test_out_of_range_character_reference(void)
+{
+	static const struct {
+		const char *reference;
+	} cases[] = {
+		{ "&#x110000;" },   /* above U+10FFFF */
+		{ "&#999999999;" }, /* above U+10FFFF, decimal */
+		{ "&#xD800;" },     /* surrogate */
+		{ "&#x10FFFF;" },   /* valid upper bound, must stay intact */
+	};
+	struct papermono_content_entry source = {
+		.kind = PAPERMONO_CONTENT_EPUB,
+		.size = 4096U,
+	};
+	char chapter[256];
+	struct papermono_epub_book book;
+	struct papermono_epub_page page;
+	char output[4096];
+	/* data is a const pointer, so the live chapter text is injected by
+	 * swapping the array element rather than assigning into it.
+	 */
+	struct fake_entry entries[3];
+
+	memcpy(entries, entity_entries, sizeof(entries));
+	entries[2].data = chapter;
+
+	for (size_t index = 0U; index < (sizeof(cases) / sizeof(cases[0])); ++index) {
+		(void)snprintf(chapter, sizeof(chapter),
+			"<html><body><p>PRE %s POST</p></body></html>",
+			cases[index].reference);
+
+		active_entries = entries;
+		active_count = sizeof(entries) / sizeof(entries[0]);
+		assert(papermono_epub_open(&book, &source) == 0);
+		assert(book.chapter_count == 1U);
+		assert(papermono_epub_read_page(&book, 0U, 0U, output,
+			sizeof(output), PAPERMONO_READER_COLUMNS,
+			PAPERMONO_READER_LINES, &page) == 0);
+		/* Both the text before the reference and the text after it are
+		 * present, so the reference did not end the page.
+		 */
+		assert(strstr(output, "PRE") != NULL);
+		assert(strstr(output, "POST") != NULL);
+		assert(page.text_end > 0U);
+		if (index + 1U < (sizeof(cases) / sizeof(cases[0]))) {
+			/* Everything invalid became U+FFFD, encoded as EF BF BD. */
+			assert(strstr(output, "\xEF\xBF\xBD") != NULL);
+		}
+	}
 }
 
 static void test_traversal_rejected(void)
@@ -310,6 +443,8 @@ int main(void)
 	test_nested_ncx_navigation();
 	test_chapter_cache_matches_stream();
 	test_deep_ncx_nesting();
+	test_flat_ncx_navigation();
+	test_out_of_range_character_reference();
 	test_traversal_rejected();
 	puts("EPUB parser tests: PASS");
 	return 0;

@@ -17,12 +17,18 @@ enum papermono_wakeup_cause {
 	PAPERMONO_WAKE_PMIC_BUTTON,
 	PAPERMONO_WAKE_PMIC_EXTERNAL,
 	PAPERMONO_WAKE_OTHER,
+	PAPERMONO_WAKE_ESP_BUTTON,
+	PAPERMONO_WAKE_PMIC_IRQ,
 };
 
 int papermono_power_get_wakeup_cause(enum papermono_wakeup_cause *cause);
 const char *papermono_wakeup_cause_name(enum papermono_wakeup_cause cause);
+enum papermono_wakeup_cause papermono_power_classify_ext1(
+	uint64_t asserted, uint64_t button_mask, uint64_t pmic_mask);
 int papermono_power_acknowledge_wakeup(enum papermono_wakeup_cause cause);
 int papermono_power_touch_wake_ready(uint32_t timeout_ms);
+/* Read-only check; never reconfigure live touch/button interrupts. */
+int papermono_power_input_wake_ready(uint32_t timeout_ms);
 int papermono_power_enter_timed_deep_sleep(uint32_t seconds);
 int papermono_power_enter_touch_deep_sleep(void);
 int papermono_power_shutdown_button(void);

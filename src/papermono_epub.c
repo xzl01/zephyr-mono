@@ -222,23 +222,36 @@ static int copy_attribute(const char *tag_start, const char *tag_end,
 	return -ENOENT;
 }
 
+/* Return the '<' of the next opening <name> tag, or NULL.
+ *
+ * Closing tags are skipped rather than matched. A caller that resumed from a
+ * matched closing tag would re-scan the parent's remaining siblings as if they
+ * were still inside it: parse_ncx_navigation() relied on this distinction and
+ * emitted every leaf navPoint a second time, with the wrong nesting level,
+ * because "</navPoint>" matched here and its "<text>" was then read from the
+ * following sibling.
+ */
 static const char *find_tag(const char *xml, const char *name)
 {
 	const size_t name_length = strlen(name);
 	const char *cursor = xml;
 
 	while ((cursor = strchr(cursor, '<')) != NULL) {
+		const char *tag = cursor;
+
 		++cursor;
 		if (*cursor == '/') {
-			++cursor;
+			/* Closing tag: not a match, but step past this '<' so the
+			 * next search cannot land on it again.
+			 */
+			continue;
 		}
 		if (name_equal(cursor, name_length, name) &&
 		    (cursor[name_length] == ' ' || cursor[name_length] == '\t' ||
 		     cursor[name_length] == '\r' || cursor[name_length] == '\n' ||
 		     cursor[name_length] == '>' || cursor[name_length] == '/')) {
-			return cursor - 1;
+			return tag;
 		}
-		++cursor;
 	}
 	return NULL;
 }
@@ -460,6 +473,34 @@ static bool xml_tag_matches(const char *tag, const char *name, bool *closing)
 		*cursor == '\t' || *cursor == '\r' || *cursor == '\n';
 }
 
+/* Find the '>' that closes the tag starting at `tag`, stopping at `limit`.
+ *
+ * A plain memchr() is wrong here: a '>' inside a quoted attribute value (for
+ * example href='a>b.xhtml') does not end the tag, and taking it as the end
+ * truncates the tag so that xml_tag_matches() never recognises it.
+ */
+static const char *find_tag_end(const char *tag, const char *limit)
+{
+	char quote = '\0';
+
+	for (const char *cursor = tag + 1U; cursor < limit; ++cursor) {
+		if (quote != '\0') {
+			if (*cursor == quote) {
+				quote = '\0';
+			}
+			continue;
+		}
+		if (*cursor == '"' || *cursor == '\'') {
+			quote = *cursor;
+			continue;
+		}
+		if (*cursor == '>') {
+			return cursor;
+		}
+	}
+	return NULL;
+}
+
 /* Advance the nesting depth of <name> from *scan_pos up to position, and leave
  * *scan_pos at the last byte actually scanned.
  *
@@ -468,6 +509,10 @@ static bool xml_tag_matches(const char *tag, const char *name, bool *closing)
  * from the start of the buffer each time made TOC parsing quadratic: a 500
  * chapter book re-scanned roughly 6 MB of PSRAM per open. Carrying the depth
  * across iterations makes the whole parse linear.
+ *
+ * Every recognised tag is stepped over exactly once, so callers drive this
+ * with boundaries that sit on tag edges: scanning up to a tag's '<' reports
+ * the depth outside it, and scanning over the tag itself counts it.
  */
 static void xml_depth_advance(const char **scan_pos, uint8_t *depth,
 	const char *position, const char *name)
@@ -485,7 +530,7 @@ static void xml_depth_advance(const char **scan_pos, uint8_t *depth,
 		if (tag == NULL) {
 			break;
 		}
-		end = memchr(tag, '>', (size_t)(position - tag));
+		end = find_tag_end(tag, position);
 		if (end == NULL) {
 			break;
 		}
@@ -571,12 +616,64 @@ static void parse_epub3_navigation(struct papermono_epub_book *epub,
 	}
 }
 
+/* Record the nesting level of every navPoint opening tag, in document order.
+ *
+ * A single left-to-right pass over the navigation document is the only way to
+ * get these levels right. Deriving them from the entry walk instead is fragile:
+ * find_tag() returns the next *opening* tag, so the region between two sibling
+ * entries contains closing tags that the walk never visits, and a sibling that
+ * outdents keeps the depth of the subtree it just left. Counting every tag here
+ * costs one linear scan and removes that whole class of error.
+ *
+ * Returns the number of levels recorded, capped at `capacity`.
+ */
+static size_t collect_navpoint_levels(uint8_t *depths, size_t capacity)
+{
+	const char *limit = metadata_buffer + strlen(metadata_buffer);
+	const char *cursor = metadata_buffer;
+	size_t count = 0U;
+	uint8_t depth = 0U;
+
+	for (;;) {
+		const char *tag = strchr(cursor, '<');
+		const char *end;
+		bool closing;
+
+		if (tag == NULL) {
+			break;
+		}
+		end = find_tag_end(tag, limit);
+		if (end == NULL) {
+			break;
+		}
+		if (xml_tag_matches(tag, "navPoint", &closing)) {
+			if (closing) {
+				if (depth > 0U) {
+					--depth;
+				}
+			} else if (end == tag || end[-1] != '/') {
+				if (count == capacity) {
+					return count;
+				}
+				depths[count++] = depth;
+				if (depth < UINT8_MAX) {
+					++depth;
+				}
+			}
+		}
+		cursor = end + 1U;
+	}
+	return count;
+}
+
 static void parse_ncx_navigation(struct papermono_epub_book *epub,
 	const char *base)
 {
+	static uint8_t levels[PAPERMONO_EPUB_TOC_LIMIT];
+	const size_t level_count =
+		collect_navpoint_levels(levels, ARRAY_SIZE(levels));
 	const char *cursor = metadata_buffer;
-	const char *scan_pos = metadata_buffer;
-	uint8_t depth = 0U;
+	size_t level_index = 0U;
 
 	while ((cursor = find_tag(cursor, "navPoint")) != NULL) {
 		const char *tag_end = strchr(cursor, '>');
@@ -588,11 +685,16 @@ static void parse_ncx_navigation(struct papermono_epub_book *epub,
 		const char *content = find_tag(cursor, "content");
 		const char *content_end = content == NULL ? NULL : strchr(content, '>');
 		char href[PAPERMONO_ZIP_NAME_MAX + 1U];
+		uint8_t level = 0U;
 
-		xml_depth_advance(&scan_pos, &depth, cursor, "navPoint");
-		const uint8_t level = depth;
+		if (tag_end == NULL) {
+			break;
+		}
+		if (level_index < level_count) {
+			level = levels[level_index++];
+		}
 
-		if (tag_end == NULL || point_end == NULL || text_start == NULL ||
+		if (point_end == NULL || text_start == NULL ||
 		    text_end == NULL ||
 		    content == NULL || content_end == NULL || text_end > point_end ||
 		    content > point_end) {
@@ -917,6 +1019,18 @@ static int finish_entity(struct xhtml_page_context *page)
 
 		codepoint = parse_unsigned(page->entity + (hex ? 2U : 1U),
 			hex ? 16U : 10U, &value) == 0 ? value : 0xFFFDU;
+		/* A numeric reference can name a value that is not a Unicode scalar
+		 * (above U+10FFFF, or a surrogate). The UTF-8 encoder rejects those
+		 * by returning 0, which emit_codepoint() cannot tell apart from a
+		 * full output buffer, so one out-of-range reference used to abort the
+		 * rest of the chapter. Map it to the replacement character instead,
+		 * which is what XML specifies for a character reference outside the
+		 * Char production.
+		 */
+		if (codepoint > 0x10FFFFU ||
+		    (codepoint >= 0xD800U && codepoint <= 0xDFFFU)) {
+			codepoint = 0xFFFDU;
+		}
 	} else {
 		codepoint = named_entity(page->entity);
 	}
@@ -1021,6 +1135,12 @@ static int xhtml_write_tee(const uint8_t *data, size_t length, void *context)
 	if (tee->page->stopped) {
 		return 0;
 	}
+	/* Return the real status. papermono_zip_extract() folds any non-zero
+	 * callback result into PAPERMONO_ZIP_EXTRACT_STOPPED, so masking a
+	 * failure here would make the caller believe the stream was fully
+	 * consumed while the chapter was in fact truncated, and the shortened
+	 * prefix would be cached as a complete chapter.
+	 */
 	return xhtml_write(data, length, tee->page);
 }
 
@@ -1058,13 +1178,17 @@ static int inflate_and_cache_chapter(struct papermono_epub_book *epub,
 	chapter_cache.length = 0U;
 	ret = papermono_zip_extract(&epub->archive, entry, xhtml_write_tee,
 		&tee);
+	/* A negative status means the page state machine rejected the stream:
+	 * either the output buffer is too small or malformed content stopped the
+	 * collection. Either way the buffer holds a prefix, not the chapter.
+	 */
 	if (ret < 0) {
 		chapter_cache_invalidate();
 		return ret;
 	}
-	/* Collection keeps going past the page break, so reaching here means
-	 * the stream was consumed to the end and the buffer holds the chapter.
-	 * A buffer overflow disables tee and leaves the cache invalid.
+	/* Collection keeps going past the page break, so a clean return means the
+	 * stream was consumed to the end and the buffer holds the whole chapter.
+	 * A chapter too large for the buffer turns tee off and leaves it invalid.
 	 */
 	if (tee.enabled) {
 		chapter_cache.chapter = chapter;
@@ -1098,12 +1222,12 @@ int papermono_epub_read_page(struct papermono_epub_book *epub,
 	}
 	ret = papermono_zip_find(&epub->archive, epub->chapters[chapter].path,
 		&entry);
-	/* Record the chapter length for progress reporting. Inflated bytes are
-	 * the units text_start/text_end are measured in, so the two agree.
+	/* chapters[].size is NOT filled here. It holds the chapter length in
+	 * emitted codepoints, the same unit as text_start/text_end, and that total
+	 * is only known once the chapter has been read to its end, so the reader
+	 * records it there. entry.uncompressed_size is inflated BYTES and used to
+	 * be stored here, which made the progress figure add codepoints to bytes.
 	 */
-	if (ret == 0) {
-		epub->chapters[chapter].size = entry.uncompressed_size;
-	}
 	if (ret == 0 && chapter_cache_matches(epub, chapter)) {
 		ret = replay_cached_chapter(&page);
 	} else if (ret == 0) {

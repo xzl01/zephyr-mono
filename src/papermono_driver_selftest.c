@@ -2,6 +2,8 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -14,6 +16,7 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/rtc.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/fs/fs.h>
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -22,6 +25,10 @@
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/storage/disk_access.h>
 
+/* Scratch file for the FAT read/write check; removed again afterwards. */
+#define PAPERMONO_SD_SELFTEST_PATH "/SD:/papermono/.selftest.tmp"
+
+#include <papermono/content_store.h>
 #include <papermono/driver_selftest.h>
 #include <papermono/m5ioe1.h>
 #include <papermono/m5pm1.h>
@@ -333,6 +340,174 @@ static int selftest_sd(void)
 	if (ret == 0) {
 		LOG_INF("HIL microSD ready: %u sectors x %u bytes",
 			sector_count, sector_size);
+	}
+	return ret;
+}
+
+/* Prove the mounted FAT volume is writable and readable, not just that the card
+ * answers raw commands. Uses a temporary file it removes again, so running the
+ * self-test leaves no content behind.
+ */
+static int selftest_sd_filesystem(void)
+{
+	static const char pattern[] = "PaperMono self-test";
+	char readback[sizeof(pattern)];
+	struct fs_file_t file;
+	struct fs_dirent entry;
+	ssize_t length;
+	int ret;
+
+	fs_file_t_init(&file);
+	ret = fs_open(&file, PAPERMONO_SD_SELFTEST_PATH,
+		FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	if (ret < 0) {
+		return ret;
+	}
+	length = fs_write(&file, pattern, sizeof(pattern));
+	(void)fs_sync(&file);
+	{
+		const int close_ret = fs_close(&file);
+
+		if (length != (ssize_t)sizeof(pattern)) {
+			(void)fs_unlink(PAPERMONO_SD_SELFTEST_PATH);
+			return length < 0 ? (int)length : -EIO;
+		}
+		if (close_ret < 0) {
+			(void)fs_unlink(PAPERMONO_SD_SELFTEST_PATH);
+			return close_ret;
+		}
+	}
+	ret = fs_stat(PAPERMONO_SD_SELFTEST_PATH, &entry);
+	if (ret == 0 && entry.size == sizeof(pattern)) {
+		LOG_INF("HIL microSD FAT write ok: %u bytes",
+			(unsigned int)entry.size);
+	} else {
+		ret = ret < 0 ? ret : -EIO;
+	}
+	if (ret == 0) {
+		fs_file_t_init(&file);
+		ret = fs_open(&file, PAPERMONO_SD_SELFTEST_PATH, FS_O_READ);
+		if (ret == 0) {
+			memset(readback, 0, sizeof(readback));
+			length = fs_read(&file, readback, sizeof(readback));
+			(void)fs_close(&file);
+			if (length != (ssize_t)sizeof(pattern) ||
+			    memcmp(readback, pattern, sizeof(pattern)) != 0) {
+				ret = -EIO;
+			} else {
+				LOG_INF("HIL microSD FAT read back and verified");
+			}
+		}
+	}
+	if (fs_unlink(PAPERMONO_SD_SELFTEST_PATH) < 0 && ret == 0) {
+		ret = -EIO;
+	}
+	return ret;
+}
+
+/* Exercise the content-store import transaction end to end: begin with a known
+ * size, stream the body, commit (which validates the file and swaps it in),
+ * read it back through the public open path, then delete it. This is the same
+ * code path an HTTP upload uses once the request body length is known, so it
+ * covers the storage side of the content-center upload on real hardware.
+ */
+static int selftest_content_import(void)
+{
+	static const char text[] = "PaperMono import self-test\n";
+	static const char name[] = "selftest-import.txt";
+	char readback[sizeof(text)];
+	struct papermono_content_transaction transaction;
+	struct papermono_content_entry entry = {
+		.kind = PAPERMONO_CONTENT_TXT,
+	};
+	struct fs_file_t file;
+	ssize_t length;
+	int ret;
+
+	ret = papermono_content_store_import_begin(&transaction,
+		PAPERMONO_CONTENT_TXT, name, sizeof(text) - 1U, false, 0U);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = papermono_content_store_import_write(&transaction,
+		(const uint8_t *)text, sizeof(text) - 1U);
+	if (ret < 0) {
+		(void)papermono_content_store_import_abort(&transaction);
+		return ret;
+	}
+	ret = papermono_content_store_import_commit(&transaction);
+	if (ret < 0) {
+		return ret;
+	}
+	(void)snprintf(entry.path, sizeof(entry.path), "%s/%s",
+		PAPERMONO_BOOKS_DIRECTORY, name);
+	fs_file_t_init(&file);
+	ret = papermono_content_store_open(&entry, &file);
+	if (ret == 0) {
+		memset(readback, 0, sizeof(readback));
+		length = fs_read(&file, readback, sizeof(readback));
+		(void)fs_close(&file);
+		if (length != (ssize_t)(sizeof(text) - 1U) ||
+		    memcmp(readback, text, sizeof(text) - 1U) != 0) {
+			ret = -EIO;
+		} else {
+			LOG_INF("HIL content import committed and read back");
+		}
+	}
+	if (papermono_content_store_delete(&entry) < 0 && ret == 0) {
+		ret = -EIO;
+	}
+	if (ret == 0) {
+		LOG_INF("HIL content import transaction cleaned up");
+	}
+	return ret;
+}
+
+/*
+ * Import the embedded minimal EPUB through the same store transaction the HTTP
+ * upload uses. This exercises EPUB validation, the ZIP reader and the chunked
+ * filesystem reads without needing a network peer.
+ */
+extern const uint8_t papermono_selftest_epub[];
+extern const size_t papermono_selftest_epub_size;
+
+static int selftest_content_import_epub(void)
+{
+	static const char name[] = "selftest-import.epub";
+	struct papermono_content_transaction transaction;
+	struct papermono_content_entry entry = {
+		.kind = PAPERMONO_CONTENT_EPUB,
+	};
+	int ret;
+	size_t written = 0U;
+
+	ret = papermono_content_store_import_begin(&transaction,
+		PAPERMONO_CONTENT_EPUB, name, papermono_selftest_epub_size, false, 0U);
+	if (ret < 0) {
+		return ret;
+	}
+	while (written < papermono_selftest_epub_size) {
+		size_t chunk = MIN(papermono_selftest_epub_size - written, 512U);
+
+		ret = papermono_content_store_import_write(&transaction,
+			&papermono_selftest_epub[written], chunk);
+		if (ret < 0) {
+			(void)papermono_content_store_import_abort(&transaction);
+			return ret;
+		}
+		written += chunk;
+	}
+	ret = papermono_content_store_import_commit(&transaction);
+	if (ret < 0) {
+		return ret;
+	}
+	(void)snprintf(entry.path, sizeof(entry.path), "%s/%s",
+		PAPERMONO_BOOKS_DIRECTORY, name);
+	if (papermono_content_store_delete(&entry) < 0 && ret == 0) {
+		ret = -EIO;
+	}
+	if (ret == 0) {
+		LOG_INF("HIL EPUB import committed, validated and removed");
 	}
 	return ret;
 }
@@ -734,6 +909,12 @@ int papermono_driver_selftest_run(const struct device *display)
 	selftest_record_result("RTC", check, &ret);
 	check = selftest_sd();
 	selftest_record_result("microSD", check, &ret);
+	check = selftest_sd_filesystem();
+	selftest_record_result("microSD FAT", check, &ret);
+	check = selftest_content_import();
+	selftest_record_result("content import", check, &ret);
+	check = selftest_content_import_epub();
+	selftest_record_result("content import epub", check, &ret);
 	check = selftest_charger();
 	selftest_record_result("charger", check, &ret);
 	check = selftest_buzzer();

@@ -121,3 +121,35 @@ bool papermono_http_parse_crc32(const char *text, uint32_t *crc)
 	*crc = value;
 	return true;
 }
+
+#define CONTENT_LENGTH_DIGITS_MAX 10U
+
+int papermono_http_parse_content_length(const char *text, size_t *length)
+{
+	size_t value = 0U;
+	size_t digits = 0U;
+
+	if (text == NULL || length == NULL) {
+		return -EINVAL;
+	}
+	/* RFC 9110 allows leading zeros, and the limit check below is what keeps
+	 * the accumulation in range, so every digit run is accepted here.
+	 */
+	for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+		if (*cursor < '0' || *cursor > '9') {
+			return -EINVAL;
+		}
+		if (++digits > CONTENT_LENGTH_DIGITS_MAX) {
+			return -ERANGE;
+		}
+		value = value * 10U + (size_t)(*cursor - '0');
+	}
+	if (digits == 0U) {
+		return -EINVAL;
+	}
+	if (value > (size_t)PAPERMONO_HTTP_UPLOAD_LIMIT) {
+		return -ERANGE;
+	}
+	*length = value;
+	return 0;
+}

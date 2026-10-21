@@ -45,6 +45,38 @@ int main(void)
 	assert(!papermono_http_parse_crc32("123456789", &crc));
 	assert(!papermono_http_parse_crc32("12xz", &crc));
 
+	/* Content-Length. Zephyr never fills in http_client_ctx.content_len on the
+	 * HTTP/1 path this firmware uses, so the declared body length has to be
+	 * parsed from the header itself. An absent or unparsable value must be an
+	 * error: treating it as zero is what let a zero-length body overwrite an
+	 * existing file with nothing.
+	 */
+	size_t length = SIZE_MAX;
+
+	assert(papermono_http_parse_content_length("0", &length) == 0 &&
+		length == 0U);
+	assert(papermono_http_parse_content_length("1234", &length) == 0 &&
+		length == 1234U);
+	/* RFC 9110 permits leading zeros. */
+	assert(papermono_http_parse_content_length("007", &length) == 0 &&
+		length == 7U);
+	/* Exactly at the limit is accepted, one above is not. */
+	assert(papermono_http_parse_content_length("67108864", &length) == 0 &&
+		length == 67108864U);
+	assert(papermono_http_parse_content_length("67108865", &length) ==
+		-ERANGE);
+	assert(papermono_http_parse_content_length("99999999999", &length) ==
+		-ERANGE);
+	assert(papermono_http_parse_content_length("", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length("-1", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length("+1", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length(" 1", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length("1 ", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length("1,1", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length("abc", &length) == -EINVAL);
+	assert(papermono_http_parse_content_length(NULL, &length) == -EINVAL);
+	assert(papermono_http_parse_content_length("1", NULL) == -EINVAL);
+
 	puts("HTTP metadata codec tests: PASS");
 	return 0;
 }

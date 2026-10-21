@@ -54,9 +54,9 @@ keyboard.
 
 - Product name: PaperMono.
 - Default language: Simplified Chinese.
-- The new interface is explicitly inspired by hand-drawn monochrome editorial UI
-  and uses the ink drop as its design prototype without limiting components to
-  circular geometry.
+- The confirmed Field Notes visual world uses a serif clock, fine ruled content,
+  independent geometric app icons, and a quiet serif reading surface on the
+  fixed 480 x 800 display.
 - Paper white is the dominant working surface. Solid black is a compact accent,
   not the default background for navigation or changing information.
 
@@ -67,8 +67,9 @@ keyboard.
   successful physical boot/display validation.
 - The current revision has a host-side one-bit LVGL layout-preview path, but that
   preview is not evidence of the final SSD1677 framebuffer or physical display.
-- The design direction is pinned to the user's attached monochrome editorial UI
-  reference rather than a temporary local attachment path.
+- The user-approved Field Notes reference is preserved at
+  `docs/design-references/papermono-field-notes-v1.png`; the source implements
+  its visual direction in the home, application index, and reading surfaces.
 - Real-device display and touch validation remains necessary after each material
   UI or refresh change.
 

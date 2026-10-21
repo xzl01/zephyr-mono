@@ -42,6 +42,30 @@ static const struct device *const display =
 static const struct device *const imu = DEVICE_DT_GET(DT_NODELABEL(imu));
 static const struct gpio_dt_spec touch_irq =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(papermono_touch), int_gpios);
+static const struct gpio_dt_spec button_left = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static const struct gpio_dt_spec button_right = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
+static const struct gpio_dt_spec pmic_irq =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(m5pm1), interrupt_gpios);
+
+#define BUTTON_WAKE_MASK (BIT64(DT_GPIO_PIN(DT_ALIAS(sw0), gpios)) | \
+	BIT64(DT_GPIO_PIN(DT_ALIAS(sw1), gpios)))
+#define PMIC_WAKE_MASK BIT64(DT_GPIO_PIN(DT_NODELABEL(m5pm1), interrupt_gpios))
+
+/* ESP EXT1 masks use physical RTC GPIO numbers, not expander pin numbers.
+ * GPIO_INT_WAKEUP also asks Zephyr to configure the independent RTC pull-up.
+ */
+#define ASSERT_RTC_WAKE_INPUT(node, prop) \
+	BUILD_ASSERT(DT_SAME_NODE(DT_GPIO_CTLR(node, prop), DT_NODELABEL(gpio0)) && \
+		DT_GPIO_PIN(node, prop) <= 21 && \
+		(DT_GPIO_FLAGS(node, prop) & \
+		 (GPIO_ACTIVE_LOW | GPIO_PULL_UP | GPIO_INT_WAKEUP)) == \
+		(GPIO_ACTIVE_LOW | GPIO_PULL_UP | GPIO_INT_WAKEUP), \
+		"Deep-sleep wake input requires an active-low RTC GPIO with RTC pull-up")
+
+ASSERT_RTC_WAKE_INPUT(DT_ALIAS(sw0), gpios);
+ASSERT_RTC_WAKE_INPUT(DT_ALIAS(sw1), gpios);
+ASSERT_RTC_WAKE_INPUT(DT_NODELABEL(m5pm1), interrupt_gpios);
+ASSERT_RTC_WAKE_INPUT(DT_NODELABEL(papermono_touch), int_gpios);
 static const struct pwm_dt_spec buzzer =
 	PWM_DT_SPEC_GET(DT_NODELABEL(buzzer));
 static enum papermono_wakeup_cause cached_wakeup_cause;
@@ -213,6 +237,15 @@ int papermono_power_get_wakeup_cause(enum papermono_wakeup_cause *cause)
 	case ESP_SLEEP_WAKEUP_TIMER:
 		*cause = PAPERMONO_WAKE_ESP_TIMER;
 		break;
+	case ESP_SLEEP_WAKEUP_EXT1: {
+		const uint64_t pins = esp_sleep_get_ext1_wakeup_status();
+
+		*cause = papermono_power_classify_ext1(
+			pins, BUTTON_WAKE_MASK, PMIC_WAKE_MASK);
+		LOG_INF("EXT1 wake GPIO mask 0x%llx (%s)",
+			(unsigned long long)pins, papermono_wakeup_cause_name(*cause));
+		break;
+	}
 	default:
 		*cause = PAPERMONO_WAKE_OTHER;
 		break;
@@ -269,27 +302,31 @@ int papermono_power_enter_timed_deep_sleep(uint32_t seconds)
 	CODE_UNREACHABLE;
 }
 
-int papermono_power_touch_wake_ready(uint32_t timeout_ms)
+static int papermono_power_wait_inputs_idle(
+	const struct gpio_dt_spec *const inputs[], size_t count, uint32_t timeout_ms)
 {
 	const uint32_t started = k_uptime_get_32();
 
-	if (!gpio_is_ready_dt(&touch_irq)) {
-		return -ENODEV;
+	for (size_t i = 0U; i < count; ++i) {
+		if (!gpio_is_ready_dt(inputs[i])) {
+			return -ENODEV;
+		}
 	}
-	/* The FT5336 driver owns this live IRQ. Reconfiguring it here can drop its
-	 * interrupt setup when a sleep attempt is cancelled, leaving the UI without
-	 * touch. A readiness check must therefore be read-only.
+	/* Drivers own these live inputs. A cancelled sleep must not change their
+	 * interrupt configuration. Logical active-low readings must all be idle.
 	 */
 	for (;;) {
-		const int asserted = gpio_pin_get_dt(&touch_irq);
+		bool idle = true;
 
-		if (asserted < 0) {
-			return asserted;
+		for (size_t i = 0U; i < count; ++i) {
+			const int asserted = gpio_pin_get_dt(inputs[i]);
+
+			if (asserted < 0) {
+				return asserted;
+			}
+			idle = idle && asserted == 0;
 		}
-		/* gpio_pin_get_dt() returns the logical value. The active-low
-		 * FT5336 interrupt is safe to arm only after it is inactive.
-		 */
-		if (asserted == 0) {
+		if (idle) {
 			return 0;
 		}
 		if (k_uptime_get_32() - started >= timeout_ms) {
@@ -299,12 +336,33 @@ int papermono_power_touch_wake_ready(uint32_t timeout_ms)
 	}
 }
 
+int papermono_power_touch_wake_ready(uint32_t timeout_ms)
+{
+	const struct gpio_dt_spec *const inputs[] = { &touch_irq };
+
+	return papermono_power_wait_inputs_idle(inputs, ARRAY_SIZE(inputs), timeout_ms);
+}
+
+int papermono_power_input_wake_ready(uint32_t timeout_ms)
+{
+	const struct gpio_dt_spec *const inputs[] = {
+		&touch_irq, &button_left, &button_right, &pmic_irq,
+	};
+
+	return papermono_power_wait_inputs_idle(inputs, ARRAY_SIZE(inputs), timeout_ms);
+}
+
 int papermono_power_enter_touch_deep_sleep(void)
 {
 	esp_err_t err;
 	int ret;
 
-	ret = papermono_power_touch_wake_ready(3000U);
+	if (!device_is_ready(pmic)) {
+		return -ENODEV;
+	}
+	ret = m5pm1_prepare_button_wake(pmic);
+	ret = ret ?: m5pm1_clear_irq_status(pmic);
+	ret = ret ?: papermono_power_input_wake_ready(3000U);
 	if (ret < 0) {
 		return ret;
 	}
@@ -317,6 +375,10 @@ int papermono_power_enter_touch_deep_sleep(void)
 		err = esp_sleep_enable_ext0_wakeup(
 			(gpio_num_t)touch_irq.pin, 0);
 	}
+	if (err == ESP_OK) {
+		err = esp_sleep_enable_ext1_wakeup_io(
+			BUTTON_WAKE_MASK | PMIC_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+	}
 	if (err != ESP_OK) {
 		return -EIO;
 	}
@@ -324,8 +386,9 @@ int papermono_power_enter_touch_deep_sleep(void)
 	if (ret < 0) {
 		return ret;
 	}
-	LOG_INF("Entering ESP32-S3 deep sleep; touch IRQ GPIO%u is the wake source",
-		touch_irq.pin);
+	LOG_INF("Entering ESP32-S3 deep sleep; touch GPIO%u, side keys GPIO%u/%u, "
+		"power-button IRQ GPIO%u armed", touch_irq.pin,
+		button_left.pin, button_right.pin, pmic_irq.pin);
 	k_msleep(20);
 	sys_poweroff();
 	CODE_UNREACHABLE;

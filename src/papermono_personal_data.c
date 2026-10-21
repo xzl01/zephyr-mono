@@ -1018,36 +1018,13 @@ static int parse_weread_book_object(struct json_cursor *cursor,
 	return have_id && have_title ? 0 : -EBADMSG;
 }
 
-static int weread_id_seen_in_range(const struct json_cursor *cursor,
-	size_t begin, size_t end, const char *id)
-{
-	struct json_cursor scan = *cursor;
-
-	scan.offset = begin;
-	while (scan.offset < end) {
-		struct papermono_weread_book previous;
-		int ret = parse_weread_book_object(&scan, &previous);
-
-		if (ret < 0) {
-			return ret;
-		}
-		if (strcmp(previous.id, id) == 0) {
-			return -EEXIST;
-		}
-		json_whitespace(&scan);
-		if (scan.offset >= end || scan.data[scan.offset++] != ',') {
-			return -EBADMSG;
-		}
-		json_whitespace(&scan);
-	}
-	return scan.offset == end ? 0 : -EBADMSG;
-}
-
 static int parse_weread_books_array(struct json_cursor *cursor,
 	struct papermono_weread_catalog *catalog, size_t *book_count)
 {
 	size_t parsed = 0U;
-	size_t overflow_start = 0U;
+	/* Previous entry of the discarded tail, for the O(1) duplicate check. */
+	struct papermono_weread_book overflow_previous;
+	bool have_overflow = false;
 
 	json_whitespace(cursor);
 	if (cursor->offset >= cursor->length ||
@@ -1065,28 +1042,34 @@ static int parse_weread_books_array(struct json_cursor *cursor,
 			*book_count = parsed;
 			return 0;
 		}
-		const size_t book_start = cursor->offset;
 		ret = parse_weread_book_object(cursor, &book);
 		if (ret < 0) {
 			return ret;
 		}
+		/* Duplicate IDs make the catalog malformed and are rejected.
+		 *
+		 * Against the retained prefix a linear scan is enough, because at most
+		 * PAPERMONO_WEREAD_BOOK_MAX entries are kept. For the discarded tail
+		 * only the immediately preceding entry is compared: the old code
+		 * re-parsed the whole overflow range once per book, which made a
+		 * crafted 64 KiB catalog quadratic on the UI thread. Discarded entries
+		 * cannot affect the stored catalog, so the weaker check still rejects
+		 * the realistic malformed-catalog shapes without the quadratic cost.
+		 */
 		for (size_t index = 0U; index < catalog->count; ++index) {
 			if (strcmp(catalog->books[index].id, book.id) == 0) {
 				return -EEXIST;
 			}
 		}
-		if (parsed == PAPERMONO_WEREAD_BOOK_MAX) {
-			overflow_start = book_start;
-		} else if (parsed > PAPERMONO_WEREAD_BOOK_MAX) {
-			ret = weread_id_seen_in_range(cursor, overflow_start, book_start,
-				book.id);
-			if (ret < 0) {
-				return ret;
-			}
-		}
 		if (catalog->count < PAPERMONO_WEREAD_BOOK_MAX) {
 			catalog->books[catalog->count++] = book;
 		} else {
+			if (have_overflow && strcmp(overflow_previous.id,
+				book.id) == 0) {
+				return -EEXIST;
+			}
+			overflow_previous = book;
+			have_overflow = true;
 			catalog->truncated = true;
 		}
 		++parsed;

@@ -1,11 +1,48 @@
 # 个人信息终端验收记录
 
-更新日期：2026-09-04
+更新日期：2026-09-30
 
 本文严格区分软件实现、主机测试、固件构建、控制器日志和需要人机/附件参与的
 真实硬件验收。未通过的实机门槛不能用构建成功替代。
 
-## 当前 HEAD 状态
+## 当前已刷入候选状态
+
+- 2026-09-30 定位并修复系统工作队列 1 KiB 栈溢出，默认镜像已刷入且写入 hash
+  校验通过。工作队列现为 4 KiB，并启用栈哨兵、水位填充和最小栈编译断言。
+- 响应优化候选的源码快照通过二十三组主机测试及默认、partial、selftest、
+  selftest + touch power 四种配置构建；默认内部 DRAM 为
+  324,608 / 399,108 bytes（81.33%）。
+- 后续电源键修复快照通过二十四组主机测试及默认、partial、selftest、
+  selftest + power-button HIL 构建。保留触摸 EXT0，并补上电源芯片 IRQ 与
+  翻页键 EXT1 唤醒、RTC 上拉和 PMIC 按键中断配置。
+- 专用测试固件已实机捕获单次触摸唤醒及单次电源键唤醒：后者报告
+  `EXT1 wake GPIO mask 0x2 (pmic_irq)`、`wake source 8`、4314 ms 全刷和
+  `Power HIL wake verified`；用户确认画面刷新。测试后已刷回日常固件。
+- 最新日常镜像通过 USB-JTAG 软件复位运行到首页，显示基线就绪，全刷 2 次、
+  局刷 13 次，最近耗时 4315/737 ms；随后退出调试器。恢复过程中 USB/WDT
+  复位曾发生内核初始化前的双异常，独立冷启动与重复 USB 复位仍未闭环，
+  不能把下面较早候选的独立启动结果直接外推到最新镜像。
+- 此前恢复镜像通过 USB-JTAG 捕获到真实触摸、应用切换、左边缘 BACK 和返回
+  启动器。响应优化的中间镜像捕获到真实触摸、零排队等待和约 1 秒的页面切换；
+  最终候选独立 USB 复位完成启动、4313 ms 全刷和 737 ms 局刷，最终边缘手势
+  与实际手感尚待物理交互确认。
+- ~~本轮 TF 初始化出现 `Card never left busy state`（-134），内容读写仍未恢复~~
+  **2026-10-20 已解决**：根因是板级 pinctrl 把 SD 的 CLK/CMD 接反，卡收不到
+  时钟。修正后实机完成卡识别、FAT 挂载、写入与回读校验（见
+  [TF 卡打通记录](tf-card-20261020.md)）。内容中心 HTTP 上传的端到端验证仍待
+  完成；未完成断电冷启动、50 次休眠唤醒、真实 BLE 配对和长时间阅读验收。
+- 已刷入镜像 SHA-256：
+  `ab02104eb70da6b3e1946ac0bbbccf2724fab11d800b5df251435b4fde5021eb`。
+  该短按休眠实验镜像已捕获真实单击入队及休眠请求；追加启动防误触的
+  `4e62692acbd74d00eb5a12d11223c5fb33779e78e6531f47ee7343f87b87ca75`
+  已通过 25 组主机测试和四配置构建，尚未刷入，三段电源键循环未验收。
+  当前镜像的电源键修复和单次唤醒证据见
+  [电源键唤醒记录](button-wake-20260930.md)。
+  触摸优先级、32 ms 稳定窗口与边缘返回改动见
+  [响应优化记录](interaction-response-20260930.md)；栈溢出根因、栈水位与调试注意
+  事项见 [启动恢复记录](boot-recovery-20260930.md)。
+
+## 历史发布基线（2026-09-04，非当前运行状态）
 
 - 二十二组主机测试、默认/partial/selftest 构建和写入 hash 校验通过。2026-09-04
   发布前重新构建默认配置：`zephyr.bin` 为 2,330,852 bytes，内部 DRAM 为
@@ -55,9 +92,82 @@ SoftAP、BLE HID 和 BLE 小数据同步也已启动，状态调度依次记录 
 `DRIVER_SELFTEST=y`、`POWER_HIL_DEEP_SLEEP_TOUCH=y`、`POWEROFF=y`，避免把仅有
 构建退出码、实际未选中 HIL action 的镜像误记为触摸唤醒 profile。
 
+## 2026-10-20 启动与 TF 证据补充
+
+- TF 卡打通：板级 pinctrl 的 SD CLK/CMD 接反已修正，实机完成卡识别、FAT 挂载、
+  写入、回读与内容导入事务验证。详见 [TF 卡打通记录](tf-card-20261020.md)。
+- **2026-10-21 更正**：撤回“132 份完整启动日志、异常 0 次”的统计；此前混入空采集等，
+  串口中未出现异常文本也不能排除早期故障。本轮 JTAG 实际读到 `_DoubleExceptionVector`。
+  RTC watchdog + JTAG 组合恢复在正常镜像上连续 3/3，最终写入后自动恢复也通过；
+  具体日志、镜像 SHA、复位范围与未修复问题见 [USB 恢复实测](<docs/usb-reset-20261021.md>)。
+- 启动日志中的一次 `SoftAP disable` 加 500 ms 重试属于 APSTA→AP-only 的受控
+  切换（见 [内容与同步接口](content-api.md)），不是异常重启。
+- BLE 缓冲对齐：`CONFIG_BT_BUF_ACL_TX_COUNT` 由默认 10 调到 12，与 ESP32-S3
+  控制器的 ACL 包数一致，消除了 `Num of Controller's ACL packets != ACL
+  bt_conn_tx contexts (12 != 10)` 警告，避免 HID 高负载时 TX 上下文不足。
+- 历史默认镜像 Zephyr `wrn`/`err` 计数曾为 0，内部 DRAM 82.96%；
+  ROM 的 `SHA-256 comparison failed` 仍存在，不能据此称启动全程零警告。
+- 主机测试仍为 25 组全通过；默认固件与 `driver_selftest.conf` 构建均无警告。
+- 约束：本机 macOS 的 Wi-Fi 主动扫描受限，无法自动连上设备 SoftAP，内容中心
+  HTTP 上传的端到端验证仍待用手机或另一台电脑完成。
+
+## 2026-10-21 验收补充
+
+- **50 次深睡唤醒耐久 PASS**：`driver_selftest.conf;power_timer_hil.conf` +
+  `CONFIG_PAPERMONO_POWER_HIL_REPEAT_COUNT=50`，实机约 35 分钟，
+  末行 `Power HIL endurance PASS: 50/50 wake/display cycles verified`。
+  过程出现少量 `m5ioe1: I2C read 0x00 failed (-14); recovering bus` 告警，
+  总线恢复后继续，未导致失败。
+- **ROM SHA-256 警告已消除**：构建自动追加镜像摘要（见
+  [镜像摘要](<docs/firmware-image-digest.md>)），启动日志不再出现失败行。
+- **冷复位早期双异常已修复**：见 [冷复位异常定位](<docs/boot-crash-20261021.md>)。
+- **设备内格式化 UI 走查通过**（2026-10-21，无备用卡，使用非破坏性镜像）：
+  系统状态页底部出现「格式化 TF 卡」→ 点开确认页 → 取消返回 → 再次进入并确认，
+  日志 `HIL: simulated TF format (card contents preserved)` +
+  `TF card formatted from the device UI`，随后状态回到已就绪。
+  确认动作在验证镜像中被替换为模拟（`CONFIG_PAPERMONO_HIL_FAKE_UNFORMATTED`），
+  真实 `fs_mkfs` 路径此前已由 `HIL microSD FAT check passed` 与实卡格式化验证。
+- 内容中心 HTTP 端到端已通过（手机热点 2.4 GHz）：配对、会话、txt（25 B/10 KB）、
+  EPUB（1020 B）上传均 201；空 body 411；未授权 401；`DELETE` 返回 200 且列表条目消失。
+  同时修复两个缺陷：PSRAM 读缓冲导致 ≥1 KB 上传失败；DELETE 因精确资源遮蔽返回 405。
+
+## 2026-10-20 深睡/唤醒耐久与烧录工具记录
+
+- **深睡/唤醒耐久**：用 `driver_selftest.conf;power_timer_hil.conf` 加
+  `CONFIG_PAPERMONO_POWER_HIL_REPEAT_COUNT=12` 实机跑了 12 个自动周期，
+  每个周期都验证了唤醒来源（`esp_timer`）、显示恢复和全刷完成：
+
+  ```text
+  Power HIL wake/display cycle 1/12 verified; rearming
+  ...
+  Power HIL wake/display cycle 11/12 verified; rearming
+  Power HIL endurance PASS: 12/12 wake/display cycles verified
+  ```
+
+  12 次唤醒的 SSD1677 全刷耗时集中在 4312–4316 ms，无异常、无重启丢失。
+  50 次触摸唤醒耐久仍需人工触摸，未执行。
+- **烧录工具**：本轮出现 esptool 5.3.1 的 flasher stub 写入校验失败
+  （`MD5 of file does not match data in flash`，两次结果一致）。改用 ROM loader
+  后写入并校验通过：
+
+  ```text
+  esptool --port /dev/cu.usbmodem21201 --baud 460800 --before usb_reset \
+    --after hard-reset --no-stub write-flash --flash-mode dio --flash-freq 80m \
+    --flash-size 16MB 0x0 zephyr.bin
+  ```
+
+  结论：stub 路径校验失败时不要重试同一路径，改用 `--no-stub`。
+- **内容导入清理噪声**：新增导入事务有两处无条件删除（`import_begin` 清理上次
+  残留的 upload 文件、`commit` 清理旧备份），对「首次上传新文件」这两者都不存在，
+  Zephyr 会以 error 级别打印 `fs: failed to unlink path (-2)`。已改为先 `fs_stat`
+  再删除（`unlink_if_present`），残留清理行为不变。
+- **首次上传成功路径补测**：主机测试此前只覆盖提交的各种失败分支。新增
+  `commit-ok.txt` 用例，断言新文件首次提交返回 0、重命名后的文件尺寸正确，
+  且全程没有尝试删除不存在的文件。主机测试 25/25 通过。
+
 ## 自动测试
 
-`tests/host/run.sh` 当前二十二组全部通过：
+`tests/host/run.sh` 当前二十五组全部通过：
 
 - 文本编码：BOM、严格 UTF-8、GBK 识别/转换。
 - 文本排版：简体中文行首/行尾禁则和结束标点边距字格。

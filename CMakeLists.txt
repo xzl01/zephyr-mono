@@ -15,6 +15,7 @@ target_sources(app PRIVATE
   src/papermono_frontlight.c
   src/papermono_status_led.c
   src/papermono_content_store.c
+  src/papermono_fs_read.c
   src/papermono_archive_safety.c
   src/papermono_content_validation.c
   src/papermono_display_scheduler.c
@@ -38,6 +39,7 @@ target_sources(app PRIVATE
   src/generated/papermono_icon_library.c
   src/generated/papermono_icon_weread.c
   src/generated/papermono_icon_calendar.c
+  src/generated/papermono_selftest_epub.c
   src/generated/papermono_icon_tasks.c
   src/generated/papermono_icon_notes.c
   src/generated/papermono_icon_remote.c

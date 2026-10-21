@@ -15,11 +15,15 @@
 #include <zephyr/drivers/gpio/gpio_utils.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
+#if defined(CONFIG_INPUT)
+#include <zephyr/input/input.h>
+#endif
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 #include <papermono/m5pm1.h>
+#include <papermono/m5pm1_button.h>
 
 LOG_MODULE_REGISTER(m5pm1, CONFIG_GPIO_LOG_LEVEL);
 
@@ -55,6 +59,10 @@ LOG_MODULE_REGISTER(m5pm1, CONFIG_GPIO_LOG_LEVEL);
 #define M5PM1_REG_IRQ_STATUS2    0x41U
 #define M5PM1_REG_IRQ_STATUS3    0x42U
 #define M5PM1_REG_IRQ_MASK1      0x43U
+#define M5PM1_REG_IRQ_MASK3      0x45U
+#define M5PM1_REG_BTN_CFG1       0x49U
+#define M5PM1_BUTTON_CLICK_WAKE  (M5PM1_BUTTON_IRQ_SINGLE_CLICK | M5PM1_BUTTON_IRQ_WAKE)
+#define M5PM1_BUTTON_SINGLE_RESET_DISABLE BIT(0)
 #define M5PM1_REG_RTC_RAM        0xA0U
 
 #define M5PM1_FUNC_GPIO          0U
@@ -553,6 +561,7 @@ static void m5pm1_interrupt_work_handler(struct k_work *work)
 	uint8_t input = 0U;
 	uint8_t triggered = 0U;
 	int ret;
+	int ack_ret;
 
 	k_mutex_lock(&data->lock, K_FOREVER);
 	ret = m5pm1_read8_unlocked(data->self, M5PM1_REG_WAKE_SOURCE, &wake);
@@ -573,17 +582,49 @@ static void m5pm1_interrupt_work_handler(struct k_work *work)
 			((input & data->edge_rising) |
 			 (~input & data->edge_falling));
 		data->last_input = input;
-		ret = m5pm1_write8_unlocked(
-			data->self, M5PM1_REG_WAKE_SOURCE, 0U);
-		ret = ret ?: m5pm1_write8_unlocked(
-			data->self, M5PM1_REG_IRQ_STATUS1, 0U);
-		ret = ret ?: m5pm1_write8_unlocked(
-			data->self, M5PM1_REG_IRQ_STATUS2, 0U);
-		ret = ret ?: m5pm1_write8_unlocked(
-			data->self, M5PM1_REG_IRQ_STATUS3, 0U);
+	}
+	/* Acknowledge the latched status even when a read above failed.
+	 *
+	 * The host IRQ line is edge-triggered (see the GPIO_INT_EDGE_TO_ACTIVE
+	 * configuration in m5pm1_init), so while the PMIC keeps a status bit
+	 * latched its IRQ output stays asserted and no further edge arrives.
+	 * Previously a single transient I2C read error skipped the whole clear
+	 * block, which left the button dead until the next reboot. Losing one
+	 * click report is recoverable; a permanently asserted line is not.
+	 */
+	ack_ret = m5pm1_write8_unlocked(
+		data->self, M5PM1_REG_WAKE_SOURCE, 0U);
+	ack_ret = ack_ret ?: m5pm1_write8_unlocked(
+		data->self, M5PM1_REG_IRQ_STATUS1, 0U);
+	ack_ret = ack_ret ?: m5pm1_write8_unlocked(
+		data->self, M5PM1_REG_IRQ_STATUS2, 0U);
+	ack_ret = ack_ret ?: m5pm1_write8_unlocked(
+		data->self, M5PM1_REG_IRQ_STATUS3, 0U);
+	if (ret == 0) {
+		/* A read failure stays the reported error; the clear above was
+		 * still attempted so the IRQ line is re-armed for the next edge.
+		 */
+		ret = ack_ret;
 	}
 	k_mutex_unlock(&data->lock);
 
+#if defined(CONFIG_INPUT)
+	/* Ack the latched interrupt and release the I2C lock before reporting.
+	 * Input callbacks only enqueue UI work; no LVGL or power transition runs
+	 * in this system-workqueue context.
+	 */
+	if (ret == 0 && m5pm1_button_is_short_click(status3)) {
+		LOG_INF("Short power click IRQ3=0x%02x", status3);
+		int input_ret = input_report_key(data->self, INPUT_KEY_POWER, 1,
+			true, K_NO_WAIT);
+
+		input_ret = input_ret ?: input_report_key(data->self,
+			INPUT_KEY_POWER, 0, true, K_NO_WAIT);
+		if (input_ret < 0) {
+			LOG_WRN("Unable to report power click (%d)", input_ret);
+		}
+	}
+#endif
 	if (ret == 0 && triggered != 0U) {
 		gpio_fire_callbacks(&data->callbacks, data->self, triggered);
 	} else if (ret < 0) {
@@ -642,6 +683,34 @@ int m5pm1_clear_irq_status(const struct device *dev)
 	if (ret == 0) {
 		memset(&data->pending_irq, 0, sizeof(data->pending_irq));
 	}
+	k_mutex_unlock(&data->lock);
+	return ret;
+}
+
+int m5pm1_prepare_button_wake(const struct device *dev)
+{
+	struct m5pm1_data *data;
+	uint8_t mask;
+	uint8_t config;
+	int ret;
+
+	if (dev == NULL) {
+		return -EINVAL;
+	}
+	if (k_is_in_isr()) {
+		return -EWOULDBLOCK;
+	}
+	data = dev->data;
+	k_mutex_lock(&data->lock, K_FOREVER);
+	ret = m5pm1_read8_unlocked(dev, M5PM1_REG_IRQ_MASK3, &mask);
+	ret = ret ?: m5pm1_read8_unlocked(dev, M5PM1_REG_BTN_CFG1, &config);
+	/* A short click must signal the sleeping ESP, not reset it while the
+	 * wake stub is restoring flash. Preserve all timing/recovery bits.
+	 */
+	ret = ret ?: m5pm1_write8_unlocked(dev, M5PM1_REG_BTN_CFG1,
+		config | M5PM1_BUTTON_SINGLE_RESET_DISABLE);
+	ret = ret ?: m5pm1_write8_unlocked(dev, M5PM1_REG_IRQ_MASK3,
+		mask & ~M5PM1_BUTTON_CLICK_WAKE);
 	k_mutex_unlock(&data->lock);
 	return ret;
 }
@@ -1350,6 +1419,12 @@ static int m5pm1_init(const struct device *dev)
 		config->interrupt.port, &data->host_callback);
 	ret = ret ?: gpio_pin_interrupt_configure_dt(
 		&config->interrupt, GPIO_INT_EDGE_TO_ACTIVE);
+#if defined(CONFIG_INPUT)
+	/* Configure normal awake clicks too, including a cold boot. Deep-sleep
+	 * setup alone leaves the button masked until the first sleep cycle.
+	 */
+	ret = ret ?: m5pm1_prepare_button_wake(dev);
+#endif
 	if (ret < 0) {
 		return ret;
 	}

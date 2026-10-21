@@ -102,7 +102,7 @@ LV_IMAGE_DECLARE(papermono_icon_bookmark_focal);
 #define UI_HEIGHT PAPERMONO_UI_HEIGHT
 #define UI_HEADER_HEIGHT PAPERMONO_UI_HEADER_HEIGHT
 #define UI_FOOTER_TOP PAPERMONO_UI_FOOTER_TOP
-#define UI_TOUCH_ACTION_COOLDOWN_MS 120U
+#define UI_TOUCH_ACTION_COOLDOWN_MS 40U
 #define UI_CARD_RADIUS 0
 /* LV_LABEL_LONG_DOT reserves three dot cells before it shortens a string, so a
  * lane sized to the bare advance still loses characters on a 1-bit panel.
@@ -200,6 +200,7 @@ enum confirmation_kind {
 	CONFIRM_RESET_WIFI,
 	CONFIRM_RESET_BLE,
 	CONFIRM_RESET_SETTINGS,
+	CONFIRM_FORMAT_TF,
 };
 
 static struct papermono_app_router app_router;
@@ -209,6 +210,21 @@ static enum confirmation_kind confirmation;
 static enum papermono_app_id confirmation_origin = PAPERMONO_APP_POWER;
 static int power_last_error;
 static int frontlight_last_error;
+/* Kept apart from frontlight_last_error: a failed factory reset is not a
+ * backlight fault, and reporting it as one tells the user the wrong thing and
+ * leaves the frontlight status stuck at "failed" for the rest of the session.
+ */
+static int settings_last_error;
+/* Result of the last on-device TF format attempt, shown on the system page. */
+static int storage_last_error;
+#if defined(CONFIG_PAPERMONO_INTERACTIVE_UI)
+/* Consecutive failed UI actions, used to stop a persistent fault from
+ * triggering a full e-paper refresh on every event. Only the interactive event
+ * loop reads it, so non-interactive profiles (HIL/demo) must not define it.
+ */
+static uint8_t ui_failure_streak;
+#define UI_FAILURE_RECOVERY_ATTEMPTS 1U
+#endif
 static int64_t last_activity_ms;
 static int64_t last_refresh_ms;
 
@@ -226,7 +242,12 @@ static int32_t touch_start_y;
 static uint32_t touch_start_ms;
 static uint32_t last_touch_action_ms;
 static bool touch_pressed;
+static bool touch_navigation_sent;
 static atomic_t input_blocked;
+/* IRQ_STATUS3 can latch the wake click after the PMIC init has cleared it.
+ * Accept only clicks captured after the fully started UI owns the event loop.
+ */
+static atomic_t power_input_ready;
 #define UI_SYSTEM_EVENT_PENDING 1
 #define UI_SYSTEM_EVENT_QUEUED 2
 static atomic_t pending_background_refresh;
@@ -845,6 +866,11 @@ static void render_launcher_item(lv_obj_t *screen,
 		&papermono_icon_content, &papermono_icon_info, &papermono_icon_tools,
 		&papermono_icon_settings, &papermono_icon_power,
 	};
+	/* icons[] is indexed by enum launcher_motif; an entry added without its
+	 * icon would be an out-of-bounds read at draw time.
+	 */
+	_Static_assert(sizeof(icons) / sizeof(icons[0]) == LAUNCHER_MOTIF_POWER + 1U,
+		"icons must have one entry per launcher motif");
 	const struct papermono_app_descriptor *app = find_app_descriptor(item->id);
 	if (app == NULL) {
 		return;
@@ -2329,18 +2355,23 @@ static int render_power(void *context, lv_obj_t *screen)
 	ARG_UNUSED(context);
 	char text[128];
 	make_header(screen, confirmation == CONFIRM_RESET_WIFI || confirmation == CONFIRM_RESET_BLE ?
-		"连接设置" : confirmation == CONFIRM_RESET_SETTINGS ? "设备设置" : "电源");
+		"连接设置" : confirmation == CONFIRM_RESET_SETTINGS ? "设备设置" :
+		confirmation == CONFIRM_FORMAT_TF ? "存储" : "电源");
 	if (confirmation != CONFIRM_NONE) {
 		const char *title = confirmation == CONFIRM_SLEEP ? "确认休眠？" :
 			confirmation == CONFIRM_SHUTDOWN ? "确认关机？" :
 			confirmation == CONFIRM_RESET_WIFI ? "确认重新配网？" :
-			confirmation == CONFIRM_RESET_BLE ? "确认清除配对？" : "恢复默认设置？";
+			confirmation == CONFIRM_RESET_BLE ? "确认清除配对？" :
+			confirmation == CONFIRM_FORMAT_TF ? "格式化 TF 卡？" :
+			"恢复默认设置？";
 		const char *body = confirmation == CONFIRM_SLEEP ? "屏幕将保留当前画面。\n触摸或电源键唤醒。" :
 			confirmation == CONFIRM_SHUTDOWN ? "设备将完全关机。\n仅可通过电源键重新启动。" :
 			confirmation == CONFIRM_RESET_WIFI ? "将清除已保存的网络配置。\n内容文件不会删除。" :
 			confirmation == CONFIRM_RESET_BLE ? "将删除已保存的蓝牙主机。\n内容文件不会删除。" :
+			confirmation == CONFIRM_FORMAT_TF ? "卡上全部分区和文件都会被删除。\n此操作不可撤销。" :
 			"偏好设置将恢复为默认值。\n内容文件不会删除。";
-		detail_icon(screen, confirmation == CONFIRM_RESET_SETTINGS ? &papermono_icon_restore :
+		detail_icon(screen, confirmation == CONFIRM_RESET_SETTINGS ||
+			confirmation == CONFIRM_FORMAT_TF ? &papermono_icon_restore :
 			confirmation == CONFIRM_RESET_WIFI ? &papermono_icon_wifi :
 			confirmation == CONFIRM_RESET_BLE ? &papermono_icon_bluetooth :
 			confirmation == CONFIRM_SLEEP ? &papermono_icon_sleep : &papermono_icon_power, 216);
@@ -2351,7 +2382,8 @@ static int render_power(void *context, lv_obj_t *screen)
 		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 		detail_button(screen, &detail_confirm_rect, confirmation == CONFIRM_SLEEP ? "确认休眠" :
 			confirmation == CONFIRM_SHUTDOWN ? "确认关机" : confirmation == CONFIRM_RESET_WIFI ?
-			"确认重新配网" : confirmation == CONFIRM_RESET_BLE ? "确认清除配对" : "确认恢复", true);
+			"确认重新配网" : confirmation == CONFIRM_RESET_BLE ? "确认清除配对" :
+			confirmation == CONFIRM_FORMAT_TF ? "确认格式化" : "确认恢复", true);
 		detail_button(screen, &detail_cancel_rect, "取消", false);
 		make_footer(screen, "取消可返回上一页");
 		return 0;
@@ -2380,6 +2412,12 @@ static int render_settings(void *context, lv_obj_t *screen)
 	detail_section(screen, 390, "连接");
 	detail_section(screen, 548, "设备");
 	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "重新配置 Wi-Fi", "清除蓝牙配对", "恢复默认设置", "电源选项"};
+	/* The loop below walks detail_setting_rects and indexes titles with the
+	 * same counter, so the two tables have to stay the same length.
+	 */
+	_Static_assert(sizeof(titles) / sizeof(titles[0]) ==
+		sizeof(detail_setting_rects) / sizeof(detail_setting_rects[0]),
+		"settings titles must match detail_setting_rects");
 	for (size_t i = 0; i < ARRAY_SIZE(detail_setting_rects); ++i) {
 		const struct papermono_rect *rect = &detail_setting_rects[i];
 		(void)detail_text(screen, titles[i], rect->x, rect->y + 10, i <= 2 ? 254 : 398, 34, true);
@@ -2402,7 +2440,8 @@ static int render_settings(void *context, lv_obj_t *screen)
 		if ((int)prefs->frontlight_percent / 25 == i) (void)make_ink_shape(screen, 34 + i * 96, 350, 12, 12, ink, 6);
 	}
 	(void)detail_text(screen, "长按后确认", 306, 614, 130, 24, false);
-	make_footer(screen, frontlight_last_error < 0 ? "前光调整失败 · 未保存" : "轻触修改 · 前光长按关闭");
+	make_footer(screen, settings_last_error < 0 ? "恢复默认设置失败 · 未更改" :
+		frontlight_last_error < 0 ? "前光调整失败 · 未保存" : "轻触修改 · 前光长按关闭");
 	return 0;
 }
 
@@ -2429,9 +2468,18 @@ static int render_system(void *context, lv_obj_t *screen)
 	detail_value(screen, 554, "电源来源", snapshot.power_source_valid ? "已读取" : "--");
 	(void)make_ink_shape(screen, 22, 596, 436, 1, ink, 0);
 	detail_section(screen, 614, "存储");
-	(void)detail_text(screen, papermono_content_store_state_text(papermono_content_store_media_state()), 22, 656, 436, 28, false);
-	detail_value(screen, 688, "NVS", "192 KiB");
-	make_footer(screen, "右滑返回");
+	const enum papermono_media_state media = papermono_content_store_media_state();
+	(void)detail_text(screen,
+		storage_last_error < 0 ? "格式化失败" :
+		papermono_content_store_state_text(media), 22, 650, 436, 28, false);
+	if (media == PAPERMONO_MEDIA_UNFORMATTED) {
+		/* The only way to make an exFAT/GPT card usable without a PC. */
+		detail_button(screen, &system_storage_rect, "格式化 TF 卡", true);
+	} else {
+		detail_value(screen, 688, "NVS", "192 KiB");
+	}
+	make_footer(screen, media == PAPERMONO_MEDIA_UNFORMATTED ?
+		"轻触格式化 · 会删除卡内全部文件" : "右滑返回");
 	return 0;
 }
 
@@ -2938,11 +2986,18 @@ static int power_event(void *context, const struct papermono_app_event *event,
 			} else if (confirmation == CONFIRM_RESET_SETTINGS) {
 				const int reset_ret = papermono_settings_reset();
 
+				/* Record the reset failure on its own path. The
+				 * frontlight is re-applied afterwards because the
+				 * reset restores the default brightness, but its
+				 * status says nothing about whether the reset
+				 * itself worked.
+				 */
+				settings_last_error = reset_ret < 0 ? reset_ret : 0;
 				if (reset_ret < 0) {
-					frontlight_last_error = reset_ret;
-				} else {
-					frontlight_last_error = apply_frontlight();
+					LOG_ERR("Unable to restore default settings (%d)",
+						reset_ret);
 				}
+				frontlight_last_error = apply_frontlight();
 				confirmation = CONFIRM_NONE;
 				request_redraw(command);
 			} else if (confirmation == CONFIRM_RESET_WIFI) {
@@ -2969,6 +3024,20 @@ static int power_event(void *context, const struct papermono_app_event *event,
 				confirmation = CONFIRM_NONE;
 				command->type = PAPERMONO_APP_COMMAND_OPEN;
 				command->target = PAPERMONO_APP_REMOTE;
+			} else if (confirmation == CONFIRM_FORMAT_TF) {
+				const int format_ret =
+					papermono_content_store_format();
+
+				storage_last_error = format_ret;
+				if (format_ret < 0) {
+					LOG_ERR("Unable to format TF card (%d)",
+						format_ret);
+				} else {
+					LOG_WRN("TF card formatted from the device UI");
+					papermono_ui_request_content_refresh();
+				}
+				confirmation = CONFIRM_NONE;
+				command->type = PAPERMONO_APP_COMMAND_BACK;
 			} else {
 				LOG_INF("Confirmed state cleanup request %d", confirmation);
 				confirmation = CONFIRM_NONE;
@@ -2979,7 +3048,8 @@ static int power_event(void *context, const struct papermono_app_event *event,
 				   PAPERMONO_INTERACTION_TAP, &cancel_rect) ||
 			   (event->type == PAPERMONO_APP_EVENT_TAP && event->y >= UI_DETAIL_FOOTER_TOP)) {
 			confirmation = CONFIRM_NONE;
-			if (confirmation_origin == PAPERMONO_APP_SETTINGS) command->type = PAPERMONO_APP_COMMAND_BACK;
+			if (confirmation_origin == PAPERMONO_APP_SETTINGS ||
+			    confirmation_origin == PAPERMONO_APP_SYSTEM) command->type = PAPERMONO_APP_COMMAND_BACK;
 			else request_redraw(command);
 		}
 		return 0;
@@ -3091,6 +3161,25 @@ static int settings_event(void *context,
 	return 0;
 }
 
+static int system_event(void *context,
+	const struct papermono_app_event *event,
+	struct papermono_app_command *command)
+{
+	ARG_UNUSED(context);
+	/* Offer formatting only when the card answered at the SD layer but carries
+	 * no mountable filesystem; there is nothing to format when it is absent. */
+	if (papermono_content_store_media_state() == PAPERMONO_MEDIA_UNFORMATTED &&
+	    papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP,
+		&system_storage_rect)) {
+		confirmation_origin = PAPERMONO_APP_SYSTEM;
+		confirmation = CONFIRM_FORMAT_TF;
+		command->type = PAPERMONO_APP_COMMAND_OPEN;
+		command->target = PAPERMONO_APP_POWER;
+		return 0;
+	}
+	return common_event(context, event, command);
+}
+
 static const struct papermono_app_descriptor apps[] = {
 	{ PAPERMONO_APP_HOME, "首页", true, NULL, render_home, home_event, NULL, NULL },
 	{ PAPERMONO_APP_LAUNCHER, "全部应用", true, NULL, render_launcher, launcher_event, NULL, NULL },
@@ -3105,7 +3194,7 @@ static const struct papermono_app_descriptor apps[] = {
 	{ PAPERMONO_APP_TOOLS, "硬件工具", true, NULL, render_tools, tools_event, NULL, NULL },
 	{ PAPERMONO_APP_POWER, "电源", true, NULL, render_power, power_event, power_close, NULL },
 	{ PAPERMONO_APP_SETTINGS, "设置", true, NULL, render_settings, settings_event, NULL, NULL },
-	{ PAPERMONO_APP_SYSTEM, "系统状态", true, NULL, render_system, common_event, NULL, NULL },
+	{ PAPERMONO_APP_SYSTEM, "系统状态", true, NULL, render_system, system_event, NULL, NULL },
 };
 
 #if defined(CONFIG_PAPERMONO_INTERACTIVE_UI)
@@ -3119,6 +3208,7 @@ static int queue_event(enum papermono_app_event_type type,
 		.x = x,
 		.y = y,
 		.duration_ms = duration_ms,
+		.queued_at_ms = k_uptime_get_32(),
 	};
 
 	return k_msgq_put(&ui_events, &event, K_NO_WAIT);
@@ -3145,21 +3235,81 @@ static void queue_pending_system_events(void)
 	}
 }
 
+static int submit_input_event(const struct papermono_app_event *completed)
+{
+	if (atomic_get(&input_blocked) != 0) {
+		k_spinlock_key_t key = k_spin_lock(&deferred_touch_lock);
+		const bool still_blocked = atomic_get(&input_blocked) != 0;
+		bool retained = false;
+
+		if (still_blocked) {
+			retained = papermono_interaction_defer_event(
+				&deferred_touch_event, &deferred_touch_valid, completed);
+		}
+		k_spin_unlock(&deferred_touch_lock, key);
+		if (still_blocked) {
+			LOG_INF("UI input type=%d %s during refresh",
+				completed->type, retained ? "retained" : "coalesced");
+			return 0;
+		}
+	}
+	return k_msgq_put(&ui_events, completed, K_NO_WAIT);
+}
+
+static int submit_touch_gesture(enum papermono_app_event_type type,
+	uint32_t duration_ms, uint32_t now)
+{
+	struct papermono_app_event completed = {
+		.type = type,
+		.source = PAPERMONO_APP_EVENT_SOURCE_TOUCH,
+		.x = touch_start_x,
+		.y = touch_start_y,
+		.duration_ms = duration_ms,
+		.queued_at_ms = now,
+	};
+	const int ret = submit_input_event(&completed);
+
+	LOG_INF("UI touch gesture type=%d x=%d y=%d duration=%u queue=%d",
+		type, completed.x, completed.y, duration_ms, ret);
+	if (ret == 0) {
+		last_touch_action_ms = now;
+	}
+	return ret;
+}
+
 static void papermono_ui_input_event(struct input_event *event,
 	void *user_data)
 {
 	ARG_UNUSED(user_data);
-	if (event->dev == buttons && event->type == INPUT_EV_KEY &&
-	    event->value != 0) {
-		if (atomic_get(&input_blocked) != 0) {
+	if (event->dev == pmic && event->type == INPUT_EV_KEY &&
+	    event->code == INPUT_KEY_POWER && event->value != 0) {
+		if (atomic_get(&power_input_ready) == 0) {
+			LOG_INF("UI power click ignored during startup");
 			return;
 		}
-		if (event->code == INPUT_KEY_0) {
-			queue_event(PAPERMONO_APP_EVENT_PREVIOUS,
-				PAPERMONO_APP_EVENT_SOURCE_BUTTON, -1, -1, 0U);
-		} else if (event->code == INPUT_KEY_1) {
-			queue_event(PAPERMONO_APP_EVENT_NEXT,
-				PAPERMONO_APP_EVENT_SOURCE_BUTTON, -1, -1, 0U);
+		const struct papermono_app_event completed = {
+			.type = PAPERMONO_APP_EVENT_SLEEP,
+			.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON,
+			.x = -1, .y = -1,
+			.queued_at_ms = k_uptime_get_32(),
+		};
+		const int ret = submit_input_event(&completed);
+
+		LOG_INF("UI power click queued (%d)", ret);
+		return;
+	}
+	if (event->dev == buttons && event->type == INPUT_EV_KEY &&
+	    event->value != 0) {
+		if (event->code == INPUT_KEY_0 || event->code == INPUT_KEY_1) {
+			const struct papermono_app_event completed = {
+				.type = event->code == INPUT_KEY_0 ?
+					PAPERMONO_APP_EVENT_PREVIOUS : PAPERMONO_APP_EVENT_NEXT,
+				.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON,
+				.x = -1, .y = -1,
+				.queued_at_ms = k_uptime_get_32(),
+			};
+
+			(void)submit_input_event(&completed);
 		}
 		return;
 	}
@@ -3170,10 +3320,27 @@ static void papermono_ui_input_event(struct input_event *event,
 		touch_x = CLAMP(event->value, 0, UI_WIDTH - 1);
 	} else if (event->type == INPUT_EV_ABS && event->code == INPUT_ABS_Y) {
 		touch_y = CLAMP(event->value, 0, UI_HEIGHT - 1);
+		/* FT6336 reports X then Y for each complete controller sample. Only
+		 * inspect the pair here, never an X value with the previous frame's Y.
+		 */
+		if (touch_pressed && !touch_navigation_sent) {
+			const uint32_t now = k_uptime_get_32();
+			const uint32_t duration = now - touch_start_ms;
+			enum papermono_app_event_type type;
+
+			if (papermono_touch_gesture_navigation(touch_start_x,
+				touch_start_y, touch_x, touch_y, duration,
+				UI_WIDTH, UI_HEIGHT, &type) == 0 &&
+			    submit_touch_gesture(type, duration, now) == 0) {
+				touch_navigation_sent = true;
+				LOG_INF("UI edge navigation committed before release");
+			}
+		}
 	} else if (event->type == INPUT_EV_KEY &&
 		   event->code == INPUT_BTN_TOUCH) {
 		if (event->value != 0) {
 			touch_pressed = true;
+			touch_navigation_sent = false;
 			touch_start_x = touch_x;
 			touch_start_y = touch_y;
 			touch_start_ms = k_uptime_get_32();
@@ -3183,15 +3350,11 @@ static void papermono_ui_input_event(struct input_event *event,
 			const uint32_t now = k_uptime_get_32();
 			const uint32_t duration = now - touch_start_ms;
 			enum papermono_app_event_type type;
-			int16_t event_x;
-			int16_t event_y;
-			struct papermono_app_event completed;
 			int ret;
 
 			touch_pressed = false;
-			if (now - last_touch_action_ms < UI_TOUCH_ACTION_COOLDOWN_MS) {
-				LOG_INF("UI touch ignored by %u ms action cooldown",
-					UI_TOUCH_ACTION_COOLDOWN_MS);
+			if (touch_navigation_sent) {
+				touch_navigation_sent = false;
 				return;
 			}
 			ret = papermono_touch_gesture_classify(touch_start_x,
@@ -3203,59 +3366,14 @@ static void papermono_ui_input_event(struct input_event *event,
 					duration, ret);
 				return;
 			}
-			ret = papermono_touch_gesture_event_point(type, touch_start_x,
-				touch_start_y, touch_x, touch_y, &event_x, &event_y);
-			if (ret < 0) {
-				LOG_WRN("UI touch event point rejected (%d)", ret);
+			/* Controller bounce is filtered for taps only. A deliberate edge
+			 * return must never be rejected because it follows a recent tap.
+			 */
+			if (type == PAPERMONO_APP_EVENT_TAP &&
+			    now - last_touch_action_ms < UI_TOUCH_ACTION_COOLDOWN_MS) {
 				return;
 			}
-			completed = (struct papermono_app_event) {
-				.type = type,
-				.source = PAPERMONO_APP_EVENT_SOURCE_TOUCH,
-				.x = event_x,
-				.y = event_y,
-				.duration_ms = duration,
-			};
-			if (atomic_get(&input_blocked) != 0) {
-				k_spinlock_key_t key =
-					k_spin_lock(&deferred_touch_lock);
-				bool retained = false;
-				bool still_blocked;
-
-				/* Match CrossMux's input-snapshot behavior: retain the
-				 * first complete gesture while the e-paper task is busy.
-				 */
-				still_blocked = atomic_get(&input_blocked) != 0;
-				if (still_blocked && !deferred_touch_valid) {
-					deferred_touch_event = completed;
-					deferred_touch_valid = true;
-					retained = true;
-				}
-				k_spin_unlock(&deferred_touch_lock, key);
-				if (retained) {
-					LOG_INF("UI touch gesture type=%d x=%d y=%d duration=%u retained during refresh",
-						type, event_x, event_y, duration);
-					last_touch_action_ms = now;
-					return;
-				}
-				if (still_blocked) {
-					/* One complete gesture is already retained for this
-					 * refresh. Coalesce later gestures instead of allowing
-					 * them to bypass the display input guard.
-					 */
-					LOG_INF("UI touch gesture coalesced during refresh");
-					last_touch_action_ms = now;
-					return;
-				}
-				/* The refresh may have completed while this callback waited for
-				 * deferred_touch_lock. In that case the gesture is current and
-				 * must fall through to the normal queue instead of being lost.
-				 */
-			}
-			ret = k_msgq_put(&ui_events, &completed, K_NO_WAIT);
-			LOG_INF("UI touch gesture type=%d x=%d y=%d duration=%u queue=%d",
-				type, event_x, event_y, duration, ret);
-			last_touch_action_ms = now;
+			(void)submit_touch_gesture(type, duration, now);
 		}
 	}
 }
@@ -3271,22 +3389,37 @@ static void display_input_guard(bool blocked, void *context)
 	/* Preserve every already completed input event. The old queue purge raced
 	 * an input callback that had just observed the refresh guard and could
 	 * discard the exact gesture which should open the next page.
+	 *
+	 * The deferred event must be queued before input_blocked is cleared, and
+	 * both must happen under one lock hold. The FT6336 thread runs at a higher
+	 * priority than this one, so releasing the lock between the clear and the
+	 * k_msgq_put() let it observe input_blocked == 0, fall through to its own
+	 * k_msgq_put(), and land a *newer* event ahead of the stale one. The stale
+	 * event was then routed against the screen the newer event had opened,
+	 * which is how a retained tap on one page could activate a control on the
+	 * next one and run a destructive action without its confirmation.
 	 */
-	struct papermono_app_event deferred;
-	bool have_deferred;
 	k_spinlock_key_t key = k_spin_lock(&deferred_touch_lock);
+	int restore_ret = 0;
 
-	atomic_clear(&input_blocked);
-	have_deferred = deferred_touch_valid;
-	deferred = deferred_touch_event;
-	deferred_touch_valid = false;
-	k_spin_unlock(&deferred_touch_lock, key);
-	if (have_deferred) {
-		const int ret = k_msgq_put(&ui_events, &deferred, K_NO_WAIT);
-
-		if (ret < 0) {
-			LOG_ERR("Unable to restore deferred touch gesture (%d)", ret);
+	if (deferred_touch_valid) {
+		restore_ret = k_msgq_put(&ui_events, &deferred_touch_event,
+			K_NO_WAIT);
+		if (restore_ret == 0) {
+			deferred_touch_valid = false;
 		}
+		/* On a full queue the event stays in the slot and is retried on
+		 * the next release, instead of being dropped.
+		 */
+	}
+	/* k_msgq_put() with K_NO_WAIT never blocks; on a full queue it returns
+	 * -ENOMSG after taking only the queue's own spinlock.
+	 */
+	atomic_clear(&input_blocked);
+	k_spin_unlock(&deferred_touch_lock, key);
+	if (restore_ret < 0) {
+		LOG_WRN("Deferred input kept for retry; queue full (%d)",
+			restore_ret);
 	}
 	queue_pending_system_events();
 }
@@ -3345,15 +3478,22 @@ static int enter_power_state(bool shutdown)
 
 	confirmation = CONFIRM_NONE;
 	if (!shutdown) {
-		ret = papermono_power_touch_wake_ready(1000U);
+		ret = papermono_power_input_wake_ready(1000U);
 		if (ret < 0) {
 			power_last_error = ret;
-			LOG_WRN("Touch wake source is not ready; sleep cancelled (%d)",
+			LOG_WRN("Wake inputs are not idle; sleep cancelled (%d)",
 				ret);
 			return render_current(PAPERMONO_REFRESH_AUTO);
 		}
 	}
 	power_last_error = 0;
+	/* Drop the page-global label handles before their objects are deleted.
+	 * papermono_ui_demo_update() dereferences clock_label/footer_label without
+	 * checking that the screen still owns them, so leaving them dangling here
+	 * would write through freed lv_obj_t pointers on the next demo update.
+	 */
+	clock_label = NULL;
+	footer_label = NULL;
 	lv_obj_clean(screen);
 	ui_fixed_line_count = 0U;
 	set_box_style(screen, paper, 0, 0);
@@ -3403,6 +3543,18 @@ static int __maybe_unused process_event(
 	}
 	int ret;
 
+	if (event->type == PAPERMONO_APP_EVENT_SLEEP &&
+	    event->source == PAPERMONO_APP_EVENT_SOURCE_BUTTON) {
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+		if (papermono_content_server_busy()) {
+			LOG_WRN("Power click sleep cancelled during content transfer");
+			return 0;
+		}
+#endif
+		LOG_INF("UI power click entering deep sleep from app=%d",
+			app_router.current);
+		return enter_power_state(false);
+	}
 	if (event->type == PAPERMONO_APP_EVENT_HOME) {
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_HOME);
 		if (ret == 0) {
@@ -3468,6 +3620,14 @@ int papermono_ui_init(const struct device *display)
 	if (display == NULL || !device_is_ready(display)) {
 		return -ENODEV;
 	}
+#if defined(CONFIG_PAPERMONO_INTERACTIVE_UI)
+#if defined(CONFIG_PAPERMONO_FT6336)
+	BUILD_ASSERT(CONFIG_PAPERMONO_UI_THREAD_PRIORITY >
+		CONFIG_PAPERMONO_FT6336_THREAD_PRIORITY,
+		"Touch polling must preempt LVGL layout");
+#endif
+	k_thread_priority_set(k_current_get(), CONFIG_PAPERMONO_UI_THREAD_PRIORITY);
+#endif
 	ret = papermono_settings_init();
 	if (ret < 0) {
 		LOG_WRN("Using volatile default settings (%d)", ret);
@@ -3521,6 +3681,8 @@ int papermono_ui_demo_update(uint32_t update, uint32_t total)
 int papermono_ui_run(void)
 {
 #if defined(CONFIG_PAPERMONO_INTERACTIVE_UI)
+	atomic_set(&power_input_ready, 1);
+	LOG_INF("UI power input ready: short click sleeps");
 	for (;;) {
 		struct papermono_app_event event;
 		const struct papermono_preferences *prefs = papermono_settings_get();
@@ -3556,11 +3718,20 @@ int papermono_ui_run(void)
 				last_activity_ms = k_uptime_get();
 			}
 			if (papermono_app_event_is_touch(&event)) {
-				LOG_INF("UI processing touch type=%d x=%d y=%d duration=%u app=%d",
+				LOG_INF("UI processing touch type=%d x=%d y=%d duration=%u app=%d wait=%u ms",
 					event.type, event.x, event.y, event.duration_ms,
-					app_router.current);
+					app_router.current,
+					(uint32_t)(k_uptime_get_32() - event.queued_at_ms));
 			}
+			const uint32_t action_started = k_uptime_get_32();
+
 			ret = process_event(&event);
+			if (papermono_app_event_is_touch(&event) ||
+			    papermono_app_event_is_button(&event)) {
+				LOG_INF("UI action complete app=%d elapsed=%u ms result=%d",
+					app_router.current,
+					(uint32_t)(k_uptime_get_32() - action_started), ret);
+			}
 		} else if (ret == -EAGAIN) {
 			const int64_t current = k_uptime_get();
 
@@ -3581,14 +3752,33 @@ int papermono_ui_run(void)
 		if (ret < 0) {
 			papermono_status_led_report_runtime_fault(true);
 			LOG_ERR("UI action failed (%d); keeping the event loop alive", ret);
-			k_msleep(100);
-			ret = render_current(PAPERMONO_REFRESH_FULL);
-			if (ret < 0) {
-				LOG_ERR("UI recovery refresh failed (%d); waiting for the next event",
-					ret);
-			} else {
-				papermono_status_led_report_runtime_fault(false);
+			if (ui_failure_streak < UINT8_MAX) {
+				++ui_failure_streak;
 			}
+			/* One full-panel recovery redraw is worth attempting, but a
+			 * persistently failing action must not keep driving the
+			 * panel: a full refresh blocks for seconds, costs power and
+			 * adds ghosting, so repeating it on every event is worse
+			 * than leaving the last good frame on screen. After the
+			 * first attempt, back off and wait for the next event.
+			 */
+			if (ui_failure_streak <= UI_FAILURE_RECOVERY_ATTEMPTS) {
+				k_msleep(100);
+				ret = render_current(PAPERMONO_REFRESH_FULL);
+				if (ret < 0) {
+					LOG_ERR("UI recovery refresh failed (%d); waiting for the next event",
+						ret);
+				} else {
+					papermono_status_led_report_runtime_fault(false);
+				}
+			} else {
+				LOG_WRN("UI action failed %u times in a row; "
+					"skipping further recovery redraws",
+					ui_failure_streak);
+				k_msleep(1000);
+			}
+		} else {
+			ui_failure_streak = 0U;
 		}
 	}
 #else

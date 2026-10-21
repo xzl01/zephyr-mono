@@ -92,6 +92,19 @@ int main(void)
 			PAPERMONO_UI_WIDTH - layout.margin * 2);
 		assert(PAPERMONO_READER_BODY_TOP + text_height < PAPERMONO_UI_FOOTER_TOP);
 	}
+	/* The TF format affordance on the system page must be fully on screen, sit
+	 * below the storage section heading and above the bottom navigation, and it
+	 * must not collide with the neighbouring status line.
+	 */
+	assert(system_storage_rect.x >= 22 &&
+		system_storage_rect.x + system_storage_rect.width <=
+			PAPERMONO_UI_WIDTH - 22);
+	assert(system_storage_rect.y >= 646);
+	assert(system_storage_rect.y + system_storage_rect.height <= UI_DETAIL_FOOTER_TOP);
+	e = tap(system_storage_rect.x + system_storage_rect.width / 2,
+		system_storage_rect.y + system_storage_rect.height / 2);
+	assert(papermono_interaction_contains(&e, PAPERMONO_INTERACTION_TAP,
+		&system_storage_rect));
 	puts("Field Notes UI hit targets and reader page fit: PASS");
 	return 0;
 }

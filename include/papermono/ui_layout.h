@@ -28,6 +28,9 @@ static const struct papermono_rect detail_shutdown_rect = {22, 360, 436, 194};
 static const struct papermono_rect detail_system_rect = {22, 148, 436, 104};
 static const struct papermono_rect weread_import_rect = {64, 490, 352, 64};
 static const struct papermono_rect library_rescan_rect = {22, 148, 436, 370};
+/* System page: tap target that opens the TF format confirmation when the card
+ * carries no filesystem this firmware can mount (exFAT/GPT out of the box). */
+static const struct papermono_rect system_storage_rect = {22, 680, 436, 44};
 enum detail_setting_index {
 	DETAIL_SETTING_SLEEP, DETAIL_SETTING_TIME, DETAIL_SETTING_FRONTLIGHT,
 	DETAIL_SETTING_WIFI, DETAIL_SETTING_BLE, DETAIL_SETTING_RESET,
@@ -37,6 +40,13 @@ static const struct papermono_rect detail_setting_rects[] = {
 	{22,174,436,56}, {22,230,436,56}, {22,286,436,100},
 	{22,424,436,60}, {22,484,436,60}, {22,582,436,60}, {22,642,436,60},
 };
+/* The settings page and its event dispatch index this table by
+ * enum detail_setting_index, so a missing or extra row silently shifts every
+ * hit region below it.
+ */
+_Static_assert(sizeof(detail_setting_rects) / sizeof(detail_setting_rects[0]) ==
+		DETAIL_SETTING_POWER + 1U,
+	"detail_setting_rects must have one row per detail_setting_index");
 
 static const struct papermono_interaction_region navigation_regions[] = {
 	{ { 0, UI_NAV_TOP, 160, PAPERMONO_UI_HEIGHT - UI_NAV_TOP },

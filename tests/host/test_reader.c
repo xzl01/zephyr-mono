@@ -95,7 +95,9 @@ int papermono_epub_read_page(struct papermono_epub_book *epub,
 	if (chapter >= epub->chapter_count) {
 		return -EINVAL;
 	}
-	epub->chapters[chapter].size = fake_chapter_sizes[chapter];
+	/* The real implementation no longer writes chapters[].size here: that field
+	 * now holds a codepoint total learned at end of chapter by the reader.
+	 */
 	output[0] = '\0';
 	*page = (struct papermono_epub_page) {
 		.text_start = text_start,
@@ -413,6 +415,48 @@ static void test_epub_progress_weighted_by_size(void)
 	assert(page.approximate_percent <= 2U);
 }
 
+/* Chapter lengths are CODEPOINT totals learned when a chapter ends, matching
+ * the unit of text_end. Storing inflated bytes there instead made the progress
+ * figure add codepoints to bytes and under-report for CJK text. Before any
+ * length is known the figure must fall back to chapter ordinal rather than
+ * claiming completion.
+ */
+static void test_epub_progress_learns_codepoints(void)
+{
+	static const uint32_t unknown[] = { 0U, 0U, 0U, 0U };
+	struct papermono_content_entry book = {
+		.kind = PAPERMONO_CONTENT_EPUB,
+		.size = 4096U,
+	};
+	struct papermono_reader_session session;
+	struct papermono_reader_page page;
+	char output[64];
+
+	(void)snprintf(book.id, sizeof(book.id), "0123456789abcdef");
+	fake_chapter_sizes = unknown;
+	fake_chapter_count = 4U;
+	memset(&session, 0, sizeof(session));
+	assert(papermono_reader_open(&session, &book) == 0);
+
+	/* No length learned yet: chapter 0 of 4 must not read as 100%. */
+	fake_text_end = 250U;
+	fake_chapter_eof = false;
+	assert(papermono_reader_read_page(&session, output, sizeof(output),
+		&page) == 0);
+	assert(page.approximate_percent == 0U);
+
+	/* Reaching the end of chapter 0 records the codepoint total it was read
+	 * with - the same unit as text_end. */
+	fake_text_end = 700U;
+	fake_chapter_eof = true;
+	assert(papermono_reader_read_page(&session, output, sizeof(output),
+		&page) == 0);
+	assert(session.epub.chapters[0].size == 700U);
+	/* One of four chapters of roughly equal estimated length. */
+	assert(page.approximate_percent >= 20U);
+	assert(page.approximate_percent <= 30U);
+}
+
 /* Bookmarks must be tellable apart, so each stores the opening of its page.
  * The snippet is cut at a byte limit, which must never leave a partial UTF-8
  * sequence behind.
@@ -466,6 +510,7 @@ int main(void)
 	test_cached_previous_beyond_ram_history();
 	test_chinese_punctuation_wrapping();
 	test_epub_progress_weighted_by_size();
+	test_epub_progress_learns_codepoints();
 	test_bookmark_preview();
 	puts("reader pagination tests: PASS");
 	return 0;

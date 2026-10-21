@@ -15,6 +15,7 @@
 #define FS_SEEK_CUR 1
 #define FS_SEEK_END 2
 #define FS_DIR_ENTRY_FILE 1
+#define FS_DIR_ENTRY_DIR 2
 #define FS_MOUNT_FLAG_NO_FORMAT 0x01
 #define FS_MOUNT_FLAG_USE_DISK_ACCESS 0x02
 #define FS_FATFS 1
@@ -74,6 +75,10 @@ int fs_mount(struct fs_mount_t *mount);
 int fs_unmount(struct fs_mount_t *mount);
 int fs_mkdir(const char *path);
 int fs_statvfs(const char *path, struct fs_statvfs *stat);
+/* Linked in by the firmware when CONFIG_FS_FATFS_MKFS is enabled; the store
+ * only calls it from the explicitly-confirmed TF format path.
+ */
+int fs_mkfs(int fs_type, uintptr_t dev_id, void *cfg, int flags);
 int fs_opendir(struct fs_dir_t *directory, const char *path);
 int fs_readdir(struct fs_dir_t *directory, struct fs_dirent *entry);
 int fs_closedir(struct fs_dir_t *directory);

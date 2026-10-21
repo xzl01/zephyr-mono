@@ -40,8 +40,19 @@
 
 	sdhc0_default: sdhc0_default {
 		group1 {
-			pinmux = <SDHC0_CLKOUT_GPIO12>,
-				 <SDHC0_CMD_GPIO13>,
+			/* CLK is GPIO13 and CMD is GPIO12 on this board. These two
+			 * were swapped here, which is why the TF card never
+			 * responded: the card received no clock and every command
+			 * timed out at the host controller, so card initialisation
+			 * failed with -ENOTSUP ("unknown card type") and all
+			 * content features stayed disabled.
+			 *
+			 * Matches M5Stack's M5PaperMono-UserDemo
+			 * (main/hal/hal_tf_card.cpp): TF_CLK_PIN = GPIO13,
+			 * TF_CMD_PIN = GPIO12, D0..D3 = GPIO11..8.
+			 */
+			pinmux = <SDHC0_CLKOUT_GPIO13>,
+				 <SDHC0_CMD_GPIO12>,
 				 <SDHC0_DATA0_GPIO11>,
 				 <SDHC0_DATA1_GPIO10>,
 				 <SDHC0_DATA2_GPIO9>,

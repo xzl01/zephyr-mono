@@ -21,9 +21,12 @@ extern "C" {
 struct papermono_epub_chapter {
 	char path[PAPERMONO_ZIP_NAME_MAX + 1U];
 	char title[PAPERMONO_EPUB_TITLE_MAX + 1U];
-	/* Inflated XHTML size, in the same bytes as text_start/text_end. Filled
-	 * in by papermono_epub_read_page from the zip lookup it already does, so
-	 * learning it costs no extra I/O. Zero means not yet known.
+	/* Chapter length in emitted CODEPOINTS, the same unit as
+	 * text_start/text_end. It is learned when the chapter is read to its end
+	 * (the reader stores the final text_end here), so zero means "not yet
+	 * known" and callers must estimate. This used to hold the inflated XHTML
+	 * byte count, which does not match text_end and made the progress
+	 * percentage add codepoints to bytes.
 	 */
 	uint32_t size;
 };
