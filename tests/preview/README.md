@@ -47,9 +47,13 @@ at the end of a build prints a reminder to rebuild.
 
 The default run also covers the existing Field Notes shell and storage flow:
 `home`, `launcher-1`, `launcher-2`, `library`, `weread`, `calendar`, `tasks`,
-`notes`, `info`, `content-center`, `remote`, `tools`, `system`,
+`notes`, `info`, `content-center`, `remote`, `remote-pairing`, `remote-passkey`,
+`remote-media`, `remote-presentation`, `remote-mouse`, `tools`, `system`,
 `system-unformatted`, `power`, `confirm-sleep`, `confirm-shutdown`,
-`confirm-ble`, `confirm-reset` and `confirm-format` (32 fixtures total).
+`confirm-ble`, `confirm-reset` and `confirm-format` (37 fixtures total).
+Remote fixtures cover an idle link, pairing in progress, a synthetic six-digit
+passkey, and all three modes on a secured link. These render the production
+page within the same 64 KiB LVGL heap; they do not exercise a Bluetooth stack.
 Content pages use the host filesystem, initially empty. The unformatted-card
 fixture injects a mount error into the host filesystem shim and reaches the
 real portable storage model; it never formats or accesses a host disk.

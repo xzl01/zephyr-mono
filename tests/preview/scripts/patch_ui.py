@@ -24,6 +24,7 @@ bool preview_wifi_connect_matched(void);
 void preview_wifi_set_state(const struct papermono_wifi_state *state);
 void preview_display_result(int result);
 void preview_fs_mount_result(int result);
+void preview_hid_set_state(const struct papermono_hid_state *state);
 
 #define PREVIEW_CHECK(condition) do { \
 	if (!(condition)) { \
@@ -330,6 +331,24 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 	lv_obj_clean(screen);
 	ui_fixed_line_count = 0U;
 	set_box_style(screen, paper, 0, 0);
+	if (strncmp(name, "remote-", 7) == 0) {
+		struct papermono_hid_state state = {
+			.initialized = true, .connected = true, .secured = true,
+			.bonded = true,
+		};
+		state.passkey_visible = strcmp(name, "remote-passkey") == 0;
+		state.passkey = 123456U; /* Synthetic pairing code. */
+		if (state.passkey_visible || strcmp(name, "remote-pairing") == 0) {
+			state.secured = false;
+			state.bonded = false;
+		}
+		preview_hid_set_state(&state);
+		remote_state.mode = strcmp(name, "remote-presentation") == 0 ?
+			REMOTE_MODE_PRESENTATION : strcmp(name, "remote-mouse") == 0 ?
+			REMOTE_MODE_MOUSE : REMOTE_MODE_MEDIA;
+		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_REMOTE);
+		return ret < 0 ? ret : papermono_app_router_render(&app_router, screen);
+	}
 	const struct {
 		const char *name;
 		enum papermono_app_id app;

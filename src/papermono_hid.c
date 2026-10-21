@@ -19,6 +19,12 @@
 
 LOG_MODULE_REGISTER(papermono_hid, LOG_LEVEL_INF);
 
+#if defined(CONFIG_BT_ESP32) && (defined(CONFIG_SOC_SERIES_ESP32S3) || \
+	defined(CONFIG_SOC_SERIES_ESP32C3))
+BUILD_ASSERT(IS_ENABLED(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE),
+	"BLE HID pairing requires ESP controller security support");
+#endif
+
 enum {
 	HIDS_REMOTE_WAKE = BIT(0),
 	HIDS_NORMALLY_CONNECTABLE = BIT(1),
@@ -221,6 +227,7 @@ static int start_advertising(void)
 static void connected(struct bt_conn *connection, uint8_t error)
 {
 	if (error != 0U) {
+		LOG_WRN("BLE HID connection failed (0x%02x)", error);
 		k_mutex_lock(&hid_lock, K_FOREVER);
 		hid_state.last_error = -EIO;
 		k_mutex_unlock(&hid_lock);
@@ -242,6 +249,7 @@ static void connected(struct bt_conn *connection, uint8_t error)
 	 * the e-paper display. Bonds are restored by Settings on later boots.
 	 */
 	const int security_ret = bt_conn_set_security(connection, BT_SECURITY_L3);
+	LOG_INF("BLE HID connected; security request result=%d", security_ret);
 	if (security_ret < 0) {
 		k_mutex_lock(&hid_lock, K_FOREVER);
 		hid_state.last_error = security_ret;
@@ -253,7 +261,7 @@ static void connected(struct bt_conn *connection, uint8_t error)
 static void disconnected(struct bt_conn *connection, uint8_t reason)
 {
 	ARG_UNUSED(connection);
-	ARG_UNUSED(reason);
+	LOG_INF("BLE HID disconnected (0x%02x)", reason);
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	if (active_connection != NULL) {
 		bt_conn_unref(active_connection);
@@ -283,6 +291,8 @@ static void security_changed(struct bt_conn *connection, bt_security_t level,
 	}
 	k_mutex_unlock(&hid_lock);
 	if (active) {
+		LOG_INF("BLE HID security changed: level=%u error=%u",
+			(unsigned)level, (unsigned)error);
 		papermono_ui_request_background_refresh();
 	}
 }
@@ -296,6 +306,7 @@ BT_CONN_CB_DEFINE(connection_callbacks) = {
 static void passkey_display(struct bt_conn *connection, unsigned int passkey)
 {
 	ARG_UNUSED(connection);
+	LOG_INF("BLE HID pairing code displayed");
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	hid_state.passkey = passkey;
 	hid_state.passkey_visible = true;
@@ -320,6 +331,7 @@ static struct bt_conn_auth_cb authentication_callbacks = {
 static void pairing_complete(struct bt_conn *connection, bool bonded)
 {
 	ARG_UNUSED(connection);
+	LOG_INF("BLE HID pairing complete; bonded=%d", bonded);
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	hid_state.bonded = bonded;
 	hid_state.passkey_visible = false;
@@ -331,6 +343,7 @@ static void pairing_failed(struct bt_conn *connection,
 	enum bt_security_err reason)
 {
 	ARG_UNUSED(connection);
+	LOG_WRN("BLE HID pairing failed (%u)", (unsigned)reason);
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	hid_state.last_error = -(int)reason;
 	hid_state.passkey_visible = false;

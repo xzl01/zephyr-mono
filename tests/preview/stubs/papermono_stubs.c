@@ -300,21 +300,24 @@ int papermono_hid_set_battery_level(uint8_t percent)
 	return 0;
 }
 
+static struct papermono_hid_state preview_hid_state = {
+	.initialized = true,
+	.secured = true,
+	.bonded = true,
+};
+
+void preview_hid_set_state(const struct papermono_hid_state *state)
+{
+	preview_hid_state = *state;
+}
+
 void papermono_hid_get_state(struct papermono_hid_state *state)
 {
 	if (state == NULL) {
 		return;
 	}
-	memset(state, 0, sizeof(*state));
 	/* Demo fixture: link idle but ready (host bonded, not currently driving). */
-	state->initialized = true;
-	state->advertising = false;
-	state->connected = false;
-	state->secured = true;
-	state->bonded = true;
-	state->suspended = false;
-	state->passkey = 0U;
-	state->last_error = 0;
+	*state = preview_hid_state;
 }
 
 /* ------------------------------------------------------------ Wi-Fi / sync */

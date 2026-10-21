@@ -28,7 +28,7 @@ BOOT_MARKERS = ("Booting Zephyr", "TF content store mounted at /SD:",
                 "PaperMono LVGL page rendered", "Authenticated BLE small-data sync ready")
 HIL_MARKERS = ("Power HIL wake verified", "Power HIL endurance PASS")
 FATAL_MARKERS = ("Guru Meditation", "ZEPHYR FATAL ERROR", "ASSERTION FAIL",
-                 "Power HIL endurance FAIL")
+                 "BLE assert", "Power HIL endurance FAIL")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 

@@ -217,6 +217,10 @@ config PAPERMONO_BLE_HID
 	bool "BLE HID media, presentation, and mouse remote"
 	default y
 	depends on PAPERMONO_INTERACTIVE_UI && BT && BT_PERIPHERAL && BT_SMP
+	# The ESP controller is an HCI driver, so BT_CTLR_LE_ENC does not enable
+	# its security support automatically. SMP needs the controller's AES event
+	# handler as soon as the host starts pairing/encryption.
+	select ESP32_BT_CTLR_LE_SECURITY_ENABLE if BT_ESP32 && (SOC_SERIES_ESP32S3 || SOC_SERIES_ESP32C3)
 	help
 	  Expose a standard composite HID-over-GATT device. Pairing and bonds use
 	  Zephyr Settings; UI callbacks submit only compact HID reports.

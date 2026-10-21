@@ -91,6 +91,13 @@ class ResetTests(unittest.TestCase):
         self.assertTrue(reset.evidence("Power HIL endurance PASS: 50/50", "power-hil"))
         self.assertFalse(reset.evidence("Power HIL endurance PASS\nZEPHYR FATAL ERROR", "power-hil"))
 
+    def test_controller_assert_rejects_otherwise_complete_evidence(self):
+        crash = "\nBLE assert ke_event.c 200, param 00000000 00000000"
+        self.assertFalse(reset.evidence(boot() + crash, "boot"))
+        self.assertFalse(reset.evidence("Power HIL endurance PASS" + crash, "power-hil"))
+        self.assertFalse(reset.verified_after_reset(
+            "pro cpu reset by JTAG\n" + boot() + crash, "boot", True))
+
     def test_full_raw_ansi_utf8_and_trailing_line_kept(self):
         text = boot() + "\n\x1b[31m<wrn> 中文\x1b[0m"
         self.assertTrue(reset.evidence(text, "boot"))
