@@ -56,6 +56,11 @@ static uint32_t state_crc;
 static struct papermono_sync_state sync_state;
 K_MUTEX_DEFINE(ble_sync_lock);
 K_MSGQ_DEFINE(sync_messages, sizeof(struct sync_message), 8, 4);
+/* A disconnect must never be lost when the bounded queue is full; the worker
+ * also re-checks this flag before handling any queued message, so data from a
+ * previous connection cannot be written into a stale transaction.
+ */
+static atomic_t disconnect_pending;
 
 #define BT_UUID_PAPERMONO_SYNC_SERVICE_VAL \
 	BT_UUID_128_ENCODE(0xc1530001, 0x6f4d, 0x4f6e, 0x6f53, 0x796e63000001)
@@ -264,6 +269,20 @@ static int handle_control(const struct sync_message *message)
 	return -ENOTSUP;
 }
 
+static void abandon_transaction(void)
+{
+	int ret = transaction.active ?
+		papermono_content_store_import_abort(&transaction) : 0;
+
+	state_transfer = false;
+	state_verify_crc = false;
+	k_mutex_lock(&ble_sync_lock, K_FOREVER);
+	sync_state.active = false;
+	sync_state.last_error = ret;
+	k_mutex_unlock(&ble_sync_lock);
+	papermono_status_led_request_refresh();
+}
+
 static void sync_worker(void *first, void *second, void *third)
 {
 	ARG_UNUSED(first);
@@ -278,47 +297,48 @@ static void sync_worker(void *first, void *second, void *third)
 		}
 		uint8_t code = 0U;
 		if (message.type == SYNC_MESSAGE_DISCONNECT) {
-			ret = transaction.active ?
-				papermono_content_store_import_abort(&transaction) : 0;
-			state_transfer = false;
-			state_verify_crc = false;
-			k_mutex_lock(&ble_sync_lock, K_FOREVER);
-			sync_state.active = false;
-			sync_state.last_error = ret;
-			k_mutex_unlock(&ble_sync_lock);
-			papermono_status_led_request_refresh();
-		} else if (message.type == SYNC_MESSAGE_CONTROL) {
-			ret = handle_control(&message);
-			code = message.data[0];
-		} else if (!transaction.active && !state_transfer) {
-			ret = -EINVAL;
-		} else if (state_transfer) {
-			k_mutex_lock(&ble_sync_lock, K_FOREVER);
-			if (sync_state.received + message.length > sync_state.expected ||
-			    sync_state.received + message.length > SYNC_STATE_LIMIT) {
-				ret = -EFBIG;
-			} else {
-				memcpy(state_buffer + sync_state.received, message.data,
-					message.length);
-				state_crc = crc32_ieee_update(state_crc, message.data,
-					message.length);
-				sync_state.received += message.length;
-				ret = 0;
-			}
-			sync_state.last_error = ret;
-			k_mutex_unlock(&ble_sync_lock);
+			abandon_transaction();
 		} else {
-			ret = papermono_content_store_import_write(&transaction,
-				message.data, message.length);
-			k_mutex_lock(&ble_sync_lock, K_FOREVER);
-			if (ret == 0) {
-				sync_state.received += message.length;
+			/* A full queue at disconnect drops the notification; clean up
+			 * before this message is applied so a stale transaction can
+			 * never absorb data that belongs to the next connection.
+			 */
+			if (atomic_cas(&disconnect_pending, 1, 0)) {
+				abandon_transaction();
 			}
-			sync_state.last_error = ret;
-			k_mutex_unlock(&ble_sync_lock);
-		}
-		if (ret < 0 || message.type == SYNC_MESSAGE_CONTROL) {
-			notify_status(message.connection, code, ret);
+			if (message.type == SYNC_MESSAGE_CONTROL) {
+				ret = handle_control(&message);
+				code = message.data[0];
+			} else if (!transaction.active && !state_transfer) {
+				ret = -EINVAL;
+			} else if (state_transfer) {
+				k_mutex_lock(&ble_sync_lock, K_FOREVER);
+				if (sync_state.received + message.length > sync_state.expected ||
+				    sync_state.received + message.length > SYNC_STATE_LIMIT) {
+					ret = -EFBIG;
+				} else {
+					memcpy(state_buffer + sync_state.received, message.data,
+						message.length);
+					state_crc = crc32_ieee_update(state_crc, message.data,
+						message.length);
+					sync_state.received += message.length;
+					ret = 0;
+				}
+				sync_state.last_error = ret;
+				k_mutex_unlock(&ble_sync_lock);
+			} else {
+				ret = papermono_content_store_import_write(&transaction,
+					message.data, message.length);
+				k_mutex_lock(&ble_sync_lock, K_FOREVER);
+				if (ret == 0) {
+					sync_state.received += message.length;
+				}
+				sync_state.last_error = ret;
+				k_mutex_unlock(&ble_sync_lock);
+			}
+			if (ret < 0 || message.type == SYNC_MESSAGE_CONTROL) {
+				notify_status(message.connection, code, ret);
+			}
 		}
 		if (message.connection != NULL) {
 			bt_conn_unref(message.connection);
@@ -331,7 +351,10 @@ K_THREAD_DEFINE(sync_thread, 4096, sync_worker, NULL, NULL, NULL, 7, 0, 0);
 static void sync_disconnected(struct bt_conn *connection, uint8_t reason)
 {
 	ARG_UNUSED(reason);
-	(void)enqueue_message(connection, SYNC_MESSAGE_DISCONNECT, NULL, 0U);
+	if (enqueue_message(connection, SYNC_MESSAGE_DISCONNECT, NULL, 0U) < 0) {
+		/* Queue full: guarantee cleanup without dropping the notification. */
+		atomic_set(&disconnect_pending, 1);
+	}
 }
 
 BT_CONN_CB_DEFINE(sync_connection_callbacks) = {
