@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
@@ -56,6 +57,11 @@ struct epub_chapter_cache {
 	bool complete;
 };
 
+/* Import validation and the reader are different threads. Everything below
+ * this line parses through shared static buffers and the chapter cache, so the
+ * two public entry points are serialised.
+ */
+K_MUTEX_DEFINE(epub_parse_lock);
 static char chapter_buffer[EPUB_CHAPTER_CACHE_LIMIT] PAPERMONO_EPUB_BSS;
 static struct epub_chapter_cache chapter_cache;
 
@@ -831,7 +837,7 @@ static int parse_package(struct papermono_epub_book *epub,
 	return 0;
 }
 
-int papermono_epub_open(struct papermono_epub_book *epub,
+static int epub_open_locked(struct papermono_epub_book *epub,
 	const struct papermono_content_entry *source)
 {
 	char package_path[PAPERMONO_ZIP_NAME_MAX + 1U];
@@ -1201,7 +1207,7 @@ static int inflate_and_cache_chapter(struct papermono_epub_book *epub,
 	return 0;
 }
 
-int papermono_epub_read_page(struct papermono_epub_book *epub,
+static int epub_read_page_locked(struct papermono_epub_book *epub,
 	uint16_t chapter, uint32_t text_start, char *output, size_t output_size,
 	uint8_t columns, uint8_t lines, struct papermono_epub_page *result)
 {
@@ -1243,4 +1249,27 @@ int papermono_epub_read_page(struct papermono_epub_book *epub,
 		.chapter_eof = !page.stopped,
 	};
 	return 0;
+}
+
+int papermono_epub_open(struct papermono_epub_book *epub,
+	const struct papermono_content_entry *source)
+{
+	k_mutex_lock(&epub_parse_lock, K_FOREVER);
+	const int ret = epub_open_locked(epub, source);
+
+	k_mutex_unlock(&epub_parse_lock);
+	return ret;
+}
+
+int papermono_epub_read_page(struct papermono_epub_book *epub,
+	uint16_t chapter, uint32_t text_start, char *output,
+	size_t output_size, uint8_t columns, uint8_t lines,
+	struct papermono_epub_page *result)
+{
+	k_mutex_lock(&epub_parse_lock, K_FOREVER);
+	const int ret = epub_read_page_locked(epub, chapter, text_start, output,
+		output_size, columns, lines, result);
+
+	k_mutex_unlock(&epub_parse_lock);
+	return ret;
 }
