@@ -59,6 +59,10 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-o "$build_dir/test_power_state"
 "$build_dir/test_power_state"
 cc -std=c17 -Wall -Wextra -Werror \
+	-Iinclude tests/host/test_m5pm1_button.c \
+	-o "$build_dir/test_m5pm1_button"
+"$build_dir/test_m5pm1_button"
+cc -std=c17 -Wall -Wextra -Werror \
 	-Iinclude \
 	tests/host/test_hid_reports.c \
 	src/papermono_hid_reports.c \
@@ -80,6 +84,8 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-Itests/host/stubs -Iinclude \
 	tests/host/test_reader.c \
 	src/papermono_reader.c \
+	src/papermono_fs_read.c \
+	tests/host/stubs/fs_read_weak.c \
 	src/papermono_text_codec.c \
 	src/papermono_text_layout.c \
 	src/generated/papermono_gbk_table.c \
@@ -89,6 +95,8 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-Itests/host/stubs -Iinclude \
 	tests/host/test_reader_cache.c \
 	src/papermono_reader_cache.c \
+	src/papermono_fs_read.c \
+	tests/host/stubs/fs_read_weak.c \
 	-o "$build_dir/test_reader_cache"
 "$build_dir/test_reader_cache"
 cc -std=c17 -Wall -Wextra -Werror \
@@ -113,6 +121,8 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-Itests/host/stubs -Iinclude \
 	tests/host/test_weread_loader.c \
 	src/papermono_weread.c \
+	src/papermono_fs_read.c \
+	tests/host/stubs/fs_read_weak.c \
 	src/papermono_personal_data.c \
 	src/papermono_text_codec.c \
 	src/generated/papermono_gbk_table.c \
@@ -122,6 +132,8 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-Itests/host/stubs -Iinclude \
 	tests/host/test_epub.c \
 	src/papermono_epub.c \
+	src/papermono_fs_read.c \
+	tests/host/stubs/fs_read_weak.c \
 	src/papermono_text_codec.c \
 	src/papermono_text_layout.c \
 	src/generated/papermono_gbk_table.c \
@@ -140,6 +152,14 @@ cc -std=c17 -Wall -Wextra -Werror \
 	tests/host/test_ui_layout.c src/papermono_interaction.c \
 	-o "$build_dir/test_ui_layout"
 "$build_dir/test_ui_layout"
+cc -std=c17 -Wall -Wextra -Werror \
+	-Itests/host/stubs -Iinclude \
+	tests/host/test_fs_read.c \
+	src/papermono_fs_read.c \
+	-o "$build_dir/test_fs_read"
+"$build_dir/test_fs_read"
 python3 tests/host/test_font_coverage.py
 python3 tests/host/test_field_notes_assets.py
 python3 tests/host/test_content_web.py
+python3 tests/host/test_usb_reset.py
+python3 tests/host/test_esp_digest.py
