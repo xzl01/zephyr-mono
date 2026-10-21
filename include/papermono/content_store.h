@@ -101,6 +101,17 @@ int papermono_content_store_import_commit(
 int papermono_content_store_import_abort(
 	struct papermono_content_transaction *transaction);
 int papermono_content_store_delete(const struct papermono_content_entry *entry);
+/**
+ * @brief Create a fresh FAT filesystem on the TF card and mount it.
+ *
+ * Destructive: erases every existing partition and file on the card. Only call
+ * it after an explicit user confirmation. The volume is created as a
+ * super-floppy FAT (no MBR), which is what Elm FATFS can mount; cards that ship
+ * exFAT or GPT-partitioned are otherwise unreadable by this firmware.
+ *
+ * @retval 0 the card now carries a mounted FAT filesystem.
+ */
+int papermono_content_store_format(void);
 bool papermono_content_store_safe_name(const char *name);
 
 #ifdef __cplusplus

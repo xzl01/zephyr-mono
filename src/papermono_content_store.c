@@ -206,9 +206,35 @@ static uint64_t stable_hash(const char *path, uint64_t size, uint32_t modified)
 
 static int ensure_directory(const char *path)
 {
-	int ret = fs_mkdir(path);
+	struct fs_dirent entry;
+	int ret = fs_stat(path, &entry);
 
+	/* Probe first: fs_mkdir() logs an error for an already existing directory
+	 * before returning -EEXIST, and the store creates its directory tree on
+	 * every mount, so calling it blindly floods the console with
+	 * "failed to create directory (-17)" on every boot.
+	 */
+	if (ret == 0) {
+		return entry.type == FS_DIR_ENTRY_DIR ? 0 : -ENOTDIR;
+	}
+	if (ret != -ENOENT) {
+		return ret;
+	}
+	ret = fs_mkdir(path);
 	return ret == -EEXIST ? 0 : ret;
+}
+
+/* Remove a file only when it is actually there. fs_unlink() reports -ENOENT
+ * and Zephyr logs it at error level, so calling it unconditionally turns normal
+ * cleanup of an absent backup or upload artifact into console errors.
+ */
+static void unlink_if_present(const char *path)
+{
+	struct fs_dirent entry;
+
+	if (fs_stat(path, &entry) == 0) {
+		(void)fs_unlink(path);
+	}
 }
 
 static int transaction_directory_path(char *buffer, size_t capacity,
@@ -387,6 +413,34 @@ static bool content_entry_path_valid(
 		kind_matches_name(entry->kind, name);
 }
 
+/* An import is validated while it is still in the staging directory, so the
+ * EPUB reader has to be able to open "<dir>/.upload/<name>". The directory
+ * name itself starts with a dot and contains no slash, which is exactly what
+ * papermono_content_store_safe_name() rejects, so the staging shape gets its
+ * own check: the leaf name must still satisfy every rule a published file
+ * does, and the staging directory must be the only extra component.
+ */
+static bool content_upload_path_valid(
+	const struct papermono_content_entry *entry, const char *directory)
+{
+	const size_t directory_length = directory == NULL ? 0U : strlen(directory);
+	const size_t prefix_length =
+		sizeof(PAPERMONO_UPLOAD_DIRECTORY "/") - 1U;
+	const char *name;
+
+	if (entry == NULL || directory == NULL ||
+	    (size_t)directory_length == 0U ||
+	    strncmp(entry->path, directory, directory_length) != 0 ||
+	    entry->path[directory_length] != '/' ||
+	    strncmp(entry->path + directory_length + 1U,
+		    PAPERMONO_UPLOAD_DIRECTORY "/", prefix_length) != 0) {
+		return false;
+	}
+	name = entry->path + directory_length + 1U + prefix_length;
+	return papermono_content_store_safe_name(name) &&
+		kind_matches_name(entry->kind, name);
+}
+
 int papermono_content_store_mount(void)
 {
 	const int present = card_present();
@@ -410,8 +464,15 @@ int papermono_content_store_mount(void)
 	}
 	ret = fs_mount(&mount);
 	if (ret < 0) {
-		media_state = ret == -EINVAL || ret == -ENOTSUP ?
-			PAPERMONO_MEDIA_UNFORMATTED : PAPERMONO_MEDIA_ERROR;
+		/* The card answered at the SD layer (presence was checked above), so
+		 * a mount failure here means the volume carries no filesystem Elm
+		 * FATFS understands. -ENODEV is what fat_fs.c returns for
+		 * FR_NO_FILESYSTEM / FR_INVALID_DRIVE / FR_NOT_ENABLED, which is the
+		 * normal state of a card that shipped exFAT or GPT-partitioned.
+		 */
+		media_state = ret == -ENODEV || ret == -EINVAL ||
+			ret == -ENOTSUP ? PAPERMONO_MEDIA_UNFORMATTED :
+			PAPERMONO_MEDIA_ERROR;
 		goto deinit;
 	}
 	mounted = true;
@@ -455,6 +516,52 @@ deinit:
 out:
 	k_mutex_unlock(&content_lock);
 	return ret;
+}
+
+int papermono_content_store_format(void)
+{
+	int ret;
+
+#if defined(CONFIG_PAPERMONO_HIL_FAKE_UNFORMATTED)
+	/* Acceptance walkthrough only: never erase the mounted card. */
+	LOG_WRN("HIL: simulated TF format (card contents preserved)");
+	k_mutex_lock(&content_lock, K_FOREVER);
+	media_state = PAPERMONO_MEDIA_READY;
+	k_mutex_unlock(&content_lock);
+	return 0;
+#endif
+
+	if (card_present() <= 0) {
+		return -ENODEV;
+	}
+	k_mutex_lock(&content_lock, K_FOREVER);
+	if (mounted) {
+		/* Formatting a mounted volume would corrupt every open handle. */
+		k_mutex_unlock(&content_lock);
+		return -EBUSY;
+	}
+	ret = disk_access_ioctl(PAPERMONO_DISK_NAME, DISK_IOCTL_CTRL_INIT, NULL);
+	if (ret < 0) {
+		goto out;
+	}
+	/* Super-floppy FAT (no MBR): FM_SFD. Elm FATFS mounts that directly, and
+	 * it is the only layout this firmware can read. This erases the card.
+	 */
+	ret = fs_mkfs(FS_FATFS, (uintptr_t)PAPERMONO_DISK_NAME, NULL, 0);
+	if (ret < 0) {
+		LOG_ERR("TF format failed (%d)", ret);
+		(void)disk_access_ioctl(PAPERMONO_DISK_NAME,
+			DISK_IOCTL_CTRL_DEINIT, NULL);
+		goto out;
+	}
+	media_state = PAPERMONO_MEDIA_UNFORMATTED;
+	LOG_WRN("TF card formatted; all previous content was erased");
+out:
+	k_mutex_unlock(&content_lock);
+	if (ret < 0) {
+		return ret;
+	}
+	return papermono_content_store_mount();
 }
 
 int papermono_content_store_unmount(void)
@@ -503,7 +610,15 @@ int papermono_content_store_init(void)
 	}
 	detect_configured = true;
 	LOG_INF("TF detect initialized: inserted=%d", card_present());
-	return papermono_content_store_mount();
+	ret = papermono_content_store_mount();
+#if defined(CONFIG_PAPERMONO_TF_FORMAT_WHEN_UNFORMATTED)
+	/* Opt-in, destructive: HIL verification with a scratch card only. */
+	if (ret < 0 && media_state == PAPERMONO_MEDIA_UNFORMATTED) {
+		LOG_WRN("TF card has no usable filesystem; formatting (opt-in)");
+		ret = papermono_content_store_format();
+	}
+#endif
+	return ret;
 }
 
 int papermono_content_store_poll(void)
@@ -539,6 +654,10 @@ enum papermono_media_state papermono_content_store_media_state(void)
 {
 	enum papermono_media_state state;
 
+#if defined(CONFIG_PAPERMONO_HIL_FAKE_UNFORMATTED)
+	/* Acceptance walkthrough only: expose the format entry on a healthy card. */
+	return PAPERMONO_MEDIA_UNFORMATTED;
+#endif
 	k_mutex_lock(&content_lock, K_FOREVER);
 	state = media_state;
 	k_mutex_unlock(&content_lock);
@@ -709,7 +828,14 @@ int papermono_content_store_open(const struct papermono_content_entry *entry,
 {
 	const char *directory = entry == NULL ? NULL : kind_directory(entry->kind);
 
-	if (file == NULL || !content_entry_path_valid(entry, directory)) {
+	/* Import validation reads the file back from the staging directory, so
+	 * both the published and the not-yet-published location are openable.
+	 * Neither form can escape the content root: the leaf name is checked by
+	 * safe_name() and by the kind's expected filename in both cases.
+	 */
+	if (file == NULL ||
+	    !(content_entry_path_valid(entry, directory) ||
+	      content_upload_path_valid(entry, directory))) {
 		return -EINVAL;
 	}
 	if (papermono_content_store_poll() < 0) {
@@ -768,7 +894,11 @@ int papermono_content_store_import_begin(
 		ret = -ENAMETOOLONG;
 		goto out;
 	}
-	(void)fs_unlink(transaction->upload_path);
+	/* A leftover upload artifact only exists after an interrupted import, so
+	 * probe first: the unconditional unlink logged an error on every first
+	 * upload of a new file.
+	 */
+	unlink_if_present(transaction->upload_path);
 	fs_file_t_init(&transaction->file);
 	ret = fs_open(&transaction->file, transaction->upload_path,
 		FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
@@ -886,13 +1016,21 @@ int papermono_content_store_import_commit(
 	if (ret < 0) {
 		goto unlink_upload;
 	}
-	(void)fs_unlink(transaction->backup_path);
-	if (fs_stat(transaction->final_path, &existing) == 0) {
+	unlink_if_present(transaction->backup_path);
+	int stat_ret = fs_stat(transaction->final_path, &existing);
+
+	if (stat_ret == 0) {
 		ret = fs_rename(transaction->final_path, transaction->backup_path);
 		if (ret < 0) {
 			goto unlink_upload;
 		}
 		has_backup = true;
+	} else if (stat_ret != -ENOENT) {
+		/* Cannot tell whether a previous file exists. Overwriting blind could
+		 * destroy it with no backup, so refuse the commit.
+		 */
+		ret = stat_ret;
+		goto unlink_upload;
 	}
 	ret = fs_rename(transaction->upload_path, transaction->final_path);
 	if (ret < 0) {
@@ -900,6 +1038,26 @@ int papermono_content_store_import_commit(
 			(void)fs_rename(transaction->backup_path,
 				transaction->final_path);
 		}
+		goto finish;
+	}
+	/* Confirm the renamed file is visible with the expected size. This layer
+	 * does not sync the directory entry, so a failing medium can leave the name
+	 * missing or short; reporting success then would tell the client the upload
+	 * landed when it did not. Restore the previous file when there is one.
+	 */
+	struct fs_dirent committed;
+
+	if (fs_stat(transaction->final_path, &committed) < 0 ||
+	    committed.size != (size_t)transaction->written) {
+		LOG_ERR("Committed content failed verification (size %u, expected %u)",
+			(unsigned int)committed.size,
+			(unsigned int)transaction->written);
+		if (has_backup) {
+			(void)fs_unlink(transaction->final_path);
+			(void)fs_rename(transaction->backup_path,
+				transaction->final_path);
+		}
+		ret = -EIO;
 		goto finish;
 	}
 	if (has_backup) {

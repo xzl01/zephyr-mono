@@ -42,12 +42,29 @@ LOG_MODULE_REGISTER(papermono_content_server, LOG_LEVEL_INF);
 #define AP_RETRY_INITIAL_MS 500U
 #define AP_RETRY_MAX_MS 30000U
 #define AP_RETRY_MAX_SHIFT 6U
+/* A configured router may be temporarily unreachable (reboot, channel change,
+ * changed password). Keep retrying the saved station with backoff while the
+ * provisioning AP stays available, instead of leaving the device off the
+ * network with no way back in.
+ */
+#define STA_RETRY_INITIAL_MS 5000U
+#define STA_RETRY_MAX_MS 300000U
+#define STA_RETRY_MAX_SHIFT 6U
 #define AP_HANDOFF_DELAY_MS 20000U
 #define AP_HEALTH_DELAY_MS 750U
 #define AP_HEALTH_MAX_FAILURES 3U
 #define AP_MAX_TX_POWER_QDBM 78
 #define RESPONSE_BUFFER_SIZE 12288U
 #define WIFI_REQUEST_LIMIT 256U
+/* Reject reason used when the request declared no usable Content-Length. The
+ * captured headers are gone by the final callback, so the reason has to carry
+ * that fact instead of re-reading the header there.
+ */
+#define UPLOAD_REJECT_NO_LENGTH (-ENODATA)
+/* Reject reason for a request that was not paired. Recorded at the first
+ * callback, where the session header still exists.
+ */
+#define UPLOAD_REJECT_UNAUTHORIZED (-EACCES)
 
 /* Pairing-code throttle. A wrong code rotates the secret, so an attacker who
  * trips the lockout loses every code already tried and has to start over.
@@ -93,16 +110,29 @@ static struct k_work_delayable ap_health_work;
 static struct papermono_content_transaction upload_transaction;
 static struct http_client_ctx *upload_owner;
 static struct http_client_ctx *upload_rejected_client;
+static int upload_reject_reason;
+static int64_t upload_started_ms;
 static char response_buffer[RESPONSE_BUFFER_SIZE] PAPERMONO_SERVER_BSS;
 static uint8_t wifi_request_buffer[WIFI_REQUEST_LIMIT + 1U];
 static size_t wifi_request_length;
 static struct http_client_ctx *wifi_request_owner;
 static struct http_client_ctx *wifi_request_rejected_client;
+static bool wifi_request_authorized;
+static int64_t wifi_started_ms;
+/* Absolute deadline for a streamed request body. The HTTP server only closes a
+ * connection after it has been idle for the inactivity timeout, and any single
+ * received byte restarts that timer, so a client that drips its body can hold
+ * the one import slot forever. Our own deadline bounds that.
+ */
+#define STREAMING_REQUEST_DEADLINE_MS 30000
 static char session_token[17];
 static bool initialized;
 static bool ap_enabling;
 static uint8_t ap_retry_shift;
 static uint8_t ap_health_failures;
+static uint8_t station_retry_shift;
+static void station_retry(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(station_retry_work, station_retry);
 static atomic_t server_busy;
 K_MUTEX_DEFINE(server_lock);
 
@@ -140,6 +170,12 @@ HTTP_SERVER_REGISTER_HEADER_CAPTURE(capture_ticket, "X-PaperMono-Ticket");
 HTTP_SERVER_REGISTER_HEADER_CAPTURE(capture_name, "X-PaperMono-Name");
 HTTP_SERVER_REGISTER_HEADER_CAPTURE(capture_kind, "X-PaperMono-Kind");
 HTTP_SERVER_REGISTER_HEADER_CAPTURE(capture_crc, "X-PaperMono-CRC32");
+/* Zephyr only fills http_client_ctx.content_len on the HTTP/2 path, and this
+ * build is HTTP/1 only, so the body length has to be read from the header the
+ * client actually sent. Without it the store would be told every upload is
+ * zero bytes long.
+ */
+HTTP_SERVER_REGISTER_HEADER_CAPTURE(capture_length, "Content-Length");
 
 static const uint8_t index_html[] = {
 #include "papermono_content_center.html.inc"
@@ -270,12 +306,16 @@ static int append_json_string(char *buffer, size_t capacity, size_t *length,
 		if (*cursor < 0x20U) {
 			continue;
 		}
+		/* Every branch reserves room for the closing quote and the NUL as
+		 * well as the bytes it is about to write; the terminator below is
+		 * otherwise written one past the end of the buffer.
+		 */
 		if (*cursor == '"' || *cursor == '\\') {
-			if (*length + 2U >= capacity) {
+			if (*length + 4U > capacity) {
 				return -ENOSPC;
 			}
 			buffer[(*length)++] = '\\';
-		} else if (*length + 1U >= capacity) {
+		} else if (*length + 3U > capacity) {
 			return -ENOSPC;
 		}
 		buffer[(*length)++] = (char)*cursor;
@@ -445,6 +485,12 @@ static int state_handler(struct http_client_ctx *client,
 			(void)memset(ticket_slots, 0, sizeof(ticket_slots));
 			LOG_WRN("Pairing locked out; code rotated");
 			k_mutex_unlock(&server_lock);
+			/* The e-paper screen still shows the invalidated code. Without
+			 * this redraw the operator cannot pair at all until something
+			 * else triggers a repaint, while an attacker keeps the lockout
+			 * alive by sending bad codes every window.
+			 */
+			papermono_ui_request_background_refresh();
 			(void)snprintf(response_buffer,
 				sizeof(response_buffer),
 				"{\"error\":\"too many attempts\","
@@ -463,8 +509,15 @@ static int state_handler(struct http_client_ctx *client,
 
 	/* Correct code: hand back a one-time ticket, never the session token.
 	 * The operator redeems it over a POST body instead of a URL.
+	 *
+	 * client_paired is deliberately NOT set here. Pairing used to be latched
+	 * at this point, before the ticket was redeemed, so if the browser never
+	 * completed POST /api/v1/session (tab closed, Wi-Fi drop, TTL expiry) the
+	 * code path was closed, the token had never been disclosed, and every
+	 * authenticated endpoint returned 401 until a reboot or a manual Wi-Fi
+	 * reset. The code stays usable until a session actually exists; tickets
+	 * are still single-use with a short TTL, so this grants nothing extra.
 	 */
-	server_state.client_paired = true;
 	pairing_failures = 0U;
 	pairing_lockout_until_ms = 0;
 	const char *ticket = ticket_issue_locked(now_ms);
@@ -572,6 +625,7 @@ static int upload_handler(struct http_client_ctx *client,
 		}
 		if (client == upload_rejected_client) {
 			upload_rejected_client = NULL;
+			upload_reject_reason = 0;
 		}
 		return 0;
 	}
@@ -582,6 +636,7 @@ static int upload_handler(struct http_client_ctx *client,
 		}
 		if (client == upload_rejected_client) {
 			upload_rejected_client = NULL;
+			upload_reject_reason = 0;
 		}
 		return 0;
 	}
@@ -592,32 +647,64 @@ static int upload_handler(struct http_client_ctx *client,
 		}
 		return 0;
 	}
+	if (upload_owner == client && upload_transaction.active &&
+	    k_uptime_get() - upload_started_ms > STREAMING_REQUEST_DEADLINE_MS) {
+		LOG_WRN("Upload exceeded %d ms; aborting the transaction",
+			STREAMING_REQUEST_DEADLINE_MS);
+		(void)papermono_content_store_import_abort(&upload_transaction);
+		upload_owner = NULL;
+		content_server_set_busy(CONTENT_SERVER_BUSY_UPLOAD, false);
+		upload_rejected_client = client;
+		upload_reject_reason = -ETIMEDOUT;
+	}
 	if (!upload_transaction.active && upload_owner == NULL &&
 	    upload_rejected_client != client) {
 		const char *encoded_name = header_value(request, "X-PaperMono-Name");
 		const char *kind_text = header_value(request, "X-PaperMono-Kind");
 		const char *crc_text = header_value(request, "X-PaperMono-CRC32");
+		const char *length_text = header_value(request, "Content-Length");
 		uint32_t crc = 0U;
+		size_t declared_length = 0U;
 		bool verify_crc = false;
 		char name[MAX_FILE_NAME + 1U];
 
 		if (!session_authorized(request)) {
 			upload_rejected_client = client;
+			upload_reject_reason = UPLOAD_REJECT_UNAUTHORIZED;
 		} else {
+			/* The declared length is the only size the store will ever
+			 * see, so an unreadable or absent one must not be treated as
+			 * "empty but acceptable": that is what let a zero-length body
+			 * overwrite an existing file with nothing.
+			 */
+			const int length_ret =
+				papermono_http_parse_content_length(length_text,
+					&declared_length);
 			int name_ret = decode_content_name(encoded_name, name,
 				sizeof(name));
 			if (crc_text != NULL) {
 				verify_crc = papermono_http_parse_crc32(crc_text, &crc);
 			}
-			int ret = name_ret < 0 ? name_ret :
+			/* Every importable kind carries content. Committing a zero-byte
+			 * body would replace a real file with an empty one, so an empty
+			 * body is refused rather than passed to the text validators,
+			 * which accept it (papermono_text_detect() and
+			 * papermono_parse_ics() both treat "" as valid).
+			 */
+			int ret = length_ret == -ERANGE ? length_ret :
+				length_ret < 0 ? UPLOAD_REJECT_NO_LENGTH :
+				declared_length == 0U ? UPLOAD_REJECT_NO_LENGTH :
+				name_ret < 0 ? name_ret :
 				crc_text != NULL && !verify_crc ? -EINVAL :
 				papermono_content_store_import_begin(
 					&upload_transaction, parse_kind(kind_text), name,
-					client->content_len, verify_crc, crc);
+					declared_length, verify_crc, crc);
 			if (ret < 0) {
 				upload_rejected_client = client;
+				upload_reject_reason = ret;
 			} else {
 				upload_owner = client;
+				upload_started_ms = k_uptime_get();
 				content_server_set_busy(CONTENT_SERVER_BUSY_UPLOAD, true);
 			}
 		}
@@ -631,14 +718,36 @@ static int upload_handler(struct http_client_ctx *client,
 			upload_owner = NULL;
 			content_server_set_busy(CONTENT_SERVER_BUSY_UPLOAD, false);
 			upload_rejected_client = client;
+			upload_reject_reason = ret;
 		}
 	}
 	if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
 		if (upload_rejected_client == client || upload_owner != client ||
 		    !upload_transaction.active) {
-			response_json(response, session_authorized(request) ?
-				HTTP_400_BAD_REQUEST : HTTP_401_UNAUTHORIZED,
-				"{\"error\":\"upload rejected\"}");
+			/* session_authorized() cannot be asked here: the captured
+			 * headers are gone by the final callback, so it would report a
+			 * paired client as unpaired. The decision was made when the
+			 * request started and is reflected in upload_rejected_client.
+			 */
+			if (upload_reject_reason == UPLOAD_REJECT_UNAUTHORIZED) {
+				response_json(response, HTTP_401_UNAUTHORIZED,
+					"{\"error\":\"pairing required\"}");
+			} else if (upload_reject_reason == -ERANGE) {
+				response_json(response, HTTP_413_PAYLOAD_TOO_LARGE,
+					"{\"error\":\"body too large\"}");
+			} else if (upload_reject_reason == UPLOAD_REJECT_NO_LENGTH) {
+				response_json(response, HTTP_411_LENGTH_REQUIRED,
+					"{\"error\":\"content-length required\"}");
+			} else if (upload_reject_reason == -ETIMEDOUT) {
+				response_json(response, HTTP_408_REQUEST_TIMEOUT,
+					"{\"error\":\"upload timed out\"}");
+			} else {
+				(void)snprintf(response_buffer, sizeof(response_buffer),
+					"{\"error\":\"upload rejected\",\"code\":%d}",
+					upload_reject_reason);
+				response_json(response, HTTP_400_BAD_REQUEST,
+					response_buffer);
+			}
 			return 0;
 		}
 		int ret = papermono_content_store_import_commit(&upload_transaction);
@@ -663,16 +772,28 @@ struct find_content_context {
 	const char *id;
 	struct papermono_content_entry entry;
 	bool found;
+	/* The content ID is a 64-bit FNV-1a digest, so two different files can
+	 * in principle collide. Deleting the first match would then remove the
+	 * wrong book, so an ambiguous ID is refused instead.
+	 */
+	unsigned int matches;
 };
 
 static int find_entry(const struct papermono_content_entry *entry,
 	void *context)
 {
 	struct find_content_context *find = context;
+
 	if (strcmp(entry->id, find->id) == 0) {
-		find->entry = *entry;
-		find->found = true;
-		return 1;
+		if (find->matches == 0U) {
+			find->entry = *entry;
+			find->found = true;
+		}
+		++find->matches;
+		if (find->matches > 1U) {
+			/* Stop scanning: the answer is already "ambiguous". */
+			return 1;
+		}
 	}
 	return 0;
 }
@@ -699,6 +820,13 @@ static int delete_handler(struct http_client_ctx *client,
 			"{\"error\":\"content not found\"}");
 		return 0;
 	}
+	if (find.matches > 1U) {
+		LOG_ERR("Refusing DELETE: content id %s matches %u entries",
+			find.id, find.matches);
+		response_json(response, HTTP_409_CONFLICT,
+			"{\"error\":\"ambiguous content id\"}");
+		return 0;
+	}
 	int ret = papermono_content_store_delete(&find.entry);
 	if (ret < 0) {
 		response_json(response, HTTP_500_INTERNAL_SERVER_ERROR,
@@ -713,6 +841,51 @@ static int delete_handler(struct http_client_ctx *client,
 	return 0;
 }
 
+static int connect_station(void);
+
+static void schedule_station_retry(void)
+{
+	uint8_t shift;
+	uint32_t delay_ms;
+
+	k_mutex_lock(&server_lock, K_FOREVER);
+	if (server_state.station_connected || server_state.station_connecting ||
+	    !papermono_settings_get()->wifi_configured) {
+		k_mutex_unlock(&server_lock);
+		return;
+	}
+	shift = station_retry_shift;
+	if (station_retry_shift < STA_RETRY_MAX_SHIFT) {
+		++station_retry_shift;
+	}
+	k_mutex_unlock(&server_lock);
+	delay_ms = MIN(STA_RETRY_INITIAL_MS << shift, STA_RETRY_MAX_MS);
+	(void)k_work_reschedule(&station_retry_work, K_MSEC(delay_ms));
+	LOG_INF("Wi-Fi station retry scheduled in %u ms", delay_ms);
+}
+
+static void station_retry(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!papermono_settings_get()->wifi_configured) {
+		return;
+	}
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const bool busy = server_state.station_connected ||
+		server_state.station_connecting;
+	k_mutex_unlock(&server_lock);
+	if (busy) {
+		return;
+	}
+	const int ret = connect_station();
+
+	if (ret < 0) {
+		LOG_WRN("Wi-Fi station retry could not start (%d)", ret);
+		schedule_station_retry();
+	}
+}
+
 static void apply_wifi(struct k_work *work);
 static void disable_ap(struct k_work *work);
 
@@ -721,17 +894,21 @@ static int wifi_handler(struct http_client_ctx *client,
 	const struct http_request_ctx *request,
 	struct http_response_ctx *response, void *user_data)
 {
-	ARG_UNUSED(client);
 	ARG_UNUSED(user_data);
 	if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
 	    status == HTTP_SERVER_TRANSACTION_COMPLETE) {
 		if (wifi_request_owner == client) {
 			wifi_request_length = 0U;
 			wifi_request_owner = NULL;
+			wifi_request_authorized = false;
 			content_server_set_busy(CONTENT_SERVER_BUSY_WIFI_REQUEST,
 				false);
 		}
 		if (wifi_request_rejected_client == client) {
+			/* Only the client pointer is cleared here. The authorization
+			 * latch belongs to the request, and a later request re-decides
+			 * it on the callback that carries the headers.
+			 */
 			wifi_request_rejected_client = NULL;
 		}
 		return 0;
@@ -750,16 +927,40 @@ static int wifi_handler(struct http_client_ctx *client,
 		}
 		return 0;
 	}
-	if (!session_authorized(request)) {
+	/* Zephyr publishes the captured headers only in the first callback of a
+	 * request and then clears them, so session_authorized() cannot be asked
+	 * again once the body starts arriving: it would report a legitimate
+	 * request as unpaired and drop its body. Decide once, on the callback
+	 * that carries the headers, and remember the answer for the request.
+	 */
+	if (request->headers_status != HTTP_HEADER_STATUS_NONE) {
+		wifi_request_authorized = session_authorized(request);
+	}
+	if (!wifi_request_authorized) {
 		if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
 			response_json(response, HTTP_401_UNAUTHORIZED,
 				"{\"error\":\"pairing required\"}");
 		}
 		return 0;
 	}
+	if (wifi_request_owner == client &&
+	    k_uptime_get() - wifi_started_ms > STREAMING_REQUEST_DEADLINE_MS) {
+		LOG_WRN("Wi-Fi request exceeded %d ms; aborting",
+			STREAMING_REQUEST_DEADLINE_MS);
+		wifi_request_length = 0U;
+		wifi_request_owner = NULL;
+		content_server_set_busy(CONTENT_SERVER_BUSY_WIFI_REQUEST, false);
+		wifi_request_rejected_client = client;
+		if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
+			response_json(response, HTTP_408_REQUEST_TIMEOUT,
+				"{\"error\":\"request timed out\"}");
+		}
+		return 0;
+	}
 	if (wifi_request_owner == NULL) {
 		wifi_request_owner = client;
 		wifi_request_length = 0U;
+		wifi_started_ms = k_uptime_get();
 		content_server_set_busy(CONTENT_SERVER_BUSY_WIFI_REQUEST, true);
 	}
 	if (wifi_request_length + request->data_len > WIFI_REQUEST_LIMIT) {
@@ -827,13 +1028,18 @@ static int session_handler(struct http_client_ctx *client,
 		response_json(response, HTTP_200_OK, response_buffer);
 		return 0;
 	}
-	if (!server_state.client_paired ||
-	    !ticket_redeem_locked(ticket, now_ms)) {
+	if (!ticket_redeem_locked(ticket, now_ms)) {
 		k_mutex_unlock(&server_lock);
 		response_json(response, HTTP_401_UNAUTHORIZED,
 			"{\"error\":\"invalid or expired ticket\"}");
 		return 0;
 	}
+	/* The code is consumed here, at the moment a real session exists, rather
+	 * than when the ticket was issued. A ticket can only be obtained by
+	 * presenting the pairing code, so redeeming one is itself evidence that
+	 * the code was known.
+	 */
+	server_state.client_paired = true;
 	(void)snprintf(response_buffer, sizeof(response_buffer),
 		"{\"session\":\"%s\"}", session_token);
 	k_mutex_unlock(&server_lock);
@@ -859,6 +1065,11 @@ static struct http_resource_detail_dynamic state_resource_detail = {
 		.content_type = "application/json" },
 	.cb = state_handler,
 };
+static int delete_handler(struct http_client_ctx *client,
+	enum http_transaction_status status,
+	const struct http_request_ctx *request,
+	struct http_response_ctx *response, void *user_data);
+
 static int content_endpoint_handler(struct http_client_ctx *client,
 	enum http_transaction_status status,
 	const struct http_request_ctx *request,
@@ -867,12 +1078,20 @@ static int content_endpoint_handler(struct http_client_ctx *client,
 	if (client->method == HTTP_GET) {
 		return content_handler(client, status, request, response, user_data);
 	}
+	/* The server matches "/api/v1/content" as a leading directory of
+	 * "/api/v1/content/<id>", so DELETE requests can arrive on this exact
+	 * resource instead of the wildcard one.
+	 */
+	if (client->method == HTTP_DELETE) {
+		return delete_handler(client, status, request, response, user_data);
+	}
 	return upload_handler(client, status, request, response, user_data);
 }
 
 static struct http_resource_detail_dynamic content_resource_detail = {
 	.common = { .type = HTTP_RESOURCE_TYPE_DYNAMIC,
-		.bitmask_of_supported_http_methods = BIT(HTTP_GET) | BIT(HTTP_POST),
+		.bitmask_of_supported_http_methods =
+			BIT(HTTP_GET) | BIT(HTTP_POST) | BIT(HTTP_DELETE),
 		.content_type = "application/json" },
 	.cb = content_endpoint_handler,
 };
@@ -890,8 +1109,8 @@ static struct http_resource_detail_dynamic wifi_resource_detail = {
 };
 
 static uint16_t content_server_port = CONTENT_SERVER_PORT;
-HTTP_SERVICE_DEFINE(papermono_http, NULL, &content_server_port, 1, 2,
-	NULL, NULL, NULL);
+HTTP_SERVICE_DEFINE(papermono_http, NULL, &content_server_port,
+	CONFIG_HTTP_SERVER_MAX_CLIENTS, 2, NULL, NULL, NULL);
 HTTP_RESOURCE_DEFINE(index_resource, papermono_http, "/",
 	&index_resource_detail);
 HTTP_RESOURCE_DEFINE(status_resource, papermono_http, "/api/v1/status",
@@ -900,10 +1119,15 @@ HTTP_RESOURCE_DEFINE(state_resource, papermono_http, "/api/v1/state",
 	&state_resource_detail);
 HTTP_RESOURCE_DEFINE(session_resource, papermono_http, "/api/v1/session",
 	&session_resource_detail);
-HTTP_RESOURCE_DEFINE(content_resource, papermono_http, "/api/v1/content",
-	&content_resource_detail);
+/* The HTTP server matches wildcard resources with FNM_LEADING_DIR, so the
+ * exact "/api/v1/content" resource also matches "/api/v1/content/<id>". It
+ * must be registered after the delete wildcard, otherwise a DELETE is routed
+ * to the GET/POST resource and answered with 405 Method Not Allowed.
+ */
 HTTP_RESOURCE_DEFINE(delete_resource, papermono_http, "/api/v1/content/*",
 	&delete_resource_detail);
+HTTP_RESOURCE_DEFINE(content_resource, papermono_http, "/api/v1/content",
+	&content_resource_detail);
 HTTP_RESOURCE_DEFINE(wifi_resource, papermono_http, "/api/v1/wifi",
 	&wifi_resource_detail);
 
@@ -1215,6 +1439,7 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 	bool request_ap_health = false;
 	bool request_dhcp = false;
 	bool cancel_ap_health = false;
+	bool request_station_retry = false;
 	k_mutex_lock(&server_lock, K_FOREVER);
 	if (event == NET_EVENT_WIFI_AP_ENABLE_RESULT) {
 		ap_enabling = false;
@@ -1247,8 +1472,11 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 		request_time_sync = success;
 		if (success) {
 			ap_retry_shift = 0U;
+			station_retry_shift = 0U;
+			(void)k_work_cancel_delayable(&station_retry_work);
 		}
 		request_ap = !success && !server_state.ap_enabled;
+		request_station_retry = !success;
 		if (success && server_state.ap_enabled) {
 			(void)k_work_reschedule(&disable_ap_work,
 				K_MSEC(AP_HANDOFF_DELAY_MS));
@@ -1257,11 +1485,14 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 			success ? "complete" : "failed",
 			status == NULL ? -ENODATA : status->status);
 	} else if (event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
-		if (success) {
-			server_state.station_connecting = false;
-			server_state.station_connected = false;
-			request_ap = !server_state.ap_enabled;
-		}
+		/* The status may be non-zero (peer teardown, driver reset), but the
+		 * station link is gone in every case: restore the provisioning AP and
+		 * retry the saved network so the device never becomes unreachable.
+		 */
+		server_state.station_connecting = false;
+		server_state.station_connected = false;
+		request_ap = !server_state.ap_enabled;
+		request_station_retry = true;
 		LOG_INF("Wi-Fi station disconnect event (status=%d)",
 			status == NULL ? -ENODATA : status->status);
 	}
@@ -1283,6 +1514,9 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 	}
 	if (request_ap) {
 		schedule_recovery_ap();
+	}
+	if (request_station_retry) {
+		schedule_station_retry();
 	}
 #if defined(CONFIG_PAPERMONO_TIME_SYNC)
 	if (request_time_sync) {
@@ -1411,9 +1645,14 @@ int papermono_content_server_init(void)
 		schedule_recovery_ap();
 	}
 	initialized = true;
-	LOG_INF("Content center ready: %s / %s, pair code %s",
-		server_state.ap_ssid, server_state.ap_password,
-		server_state.pairing_code);
+	/* Log the SSID only. The AP password and the pairing code are live
+	 * credentials: this firmware's only diagnostic channel is the USB
+	 * serial/JTAG console, and capture logs are routinely pasted into
+	 * issues, so emitting them here hands out full pairing access. Both
+	 * values are already shown on the e-paper screen for the operator.
+	 */
+	LOG_INF("Content center ready: SoftAP \"%s\" (credentials shown on screen)",
+		server_state.ap_ssid);
 	papermono_ui_request_background_refresh();
 	return 0;
 }
@@ -1464,8 +1703,17 @@ int papermono_content_server_reset_wifi(void)
 	server_state.ap_verified = false;
 	ap_health_failures = 0U;
 	ap_retry_shift = 0U;
+	station_retry_shift = 0U;
+	/* A freshly generated code must be usable straight away: leaving the
+	 * previous lockout armed would reject the new code for up to 30 s, and a
+	 * stale failure count would rotate it again on the first typo.
+	 */
+	pairing_failures = 0U;
+	pairing_lockout_until_ms = 0;
+	(void)memset(ticket_slots, 0, sizeof(ticket_slots));
 	generate_credentials();
 	k_mutex_unlock(&server_lock);
+	papermono_ui_request_background_refresh();
 	ret = enable_ap();
 	if (ret < 0) {
 		schedule_recovery_ap();

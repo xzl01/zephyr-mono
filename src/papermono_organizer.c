@@ -11,6 +11,7 @@
 #include <zephyr/sys/util.h>
 
 #include <papermono/content_store.h>
+#include <papermono/fs_read.h>
 #include <papermono/organizer.h>
 
 LOG_MODULE_REGISTER(papermono_organizer, LOG_LEVEL_INF);
@@ -123,7 +124,7 @@ static int read_entry(const struct papermono_content_entry *entry,
 	if (ret < 0) {
 		return ret;
 	}
-	count = fs_read(&file, parse_buffer, (size_t)entry->size);
+	count = papermono_fs_read_chunked(&file, parse_buffer, (size_t)entry->size);
 	(void)fs_close(&file);
 	if (count < 0) {
 		return (int)count;

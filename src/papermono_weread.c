@@ -8,6 +8,7 @@
 #include <zephyr/logging/log.h>
 
 #include <papermono/content_store.h>
+#include <papermono/fs_read.h>
 #include <papermono/personal_data.h>
 #include <papermono/text_codec.h>
 #include <papermono/weread.h>
@@ -78,7 +79,7 @@ static int reload_catalog(void)
 		clear_catalog(ret);
 		return ret;
 	}
-	received = fs_read(&file, catalog_buffer, (size_t)found.entry.size);
+	received = papermono_fs_read_chunked(&file, catalog_buffer, (size_t)found.entry.size);
 	(void)fs_close(&file);
 	if (received < 0 || (uint64_t)received != found.entry.size) {
 		ret = received < 0 ? (int)received : -EIO;

@@ -11,6 +11,7 @@
 
 #include <miniz.h>
 
+#include <papermono/fs_read.h>
 #include <papermono/text_codec.h>
 #include <papermono/archive_safety.h>
 #include <papermono/zip_reader.h>
@@ -58,7 +59,7 @@ static int read_exact(struct fs_file_t *file, void *buffer, size_t length)
 	size_t received_total = 0U;
 
 	while (received_total < length) {
-		ssize_t received = fs_read(file, output + received_total,
+		ssize_t received = papermono_fs_read_chunked(file, output + received_total,
 			length - received_total);
 
 		if (received < 0) {
@@ -72,6 +73,19 @@ static int read_exact(struct fs_file_t *file, void *buffer, size_t length)
 	return 0;
 }
 
+/* Read one central-directory record and always advance past it.
+ *
+ * Returns 0 for a usable entry. Returns -ENOTSUP (ZIP64, encrypted, an
+ * unsupported method, or an oversized entry), -EPERM (unsafe name), or
+ * -ENAMETOOLONG (name too long) *after* consuming the record: those mean
+ * "this entry is unusable, but the rest of the archive is still readable".
+ * Any other negative value is an I/O or framing error and the archive cannot
+ * be trusted, because the cursor position is no longer meaningful.
+ *
+ * Treating an entry-level rejection as fatal used to make a whole book
+ * unopenable over one stray entry, which is common in real EPUBs (an encoder
+ * writing GBK chapter names, a cover image above the per-entry cap).
+ */
 static int read_central_entry(struct fs_file_t *file,
 	struct papermono_zip_entry *entry)
 {
@@ -91,7 +105,13 @@ static int read_central_entry(struct fs_file_t *file,
 	extra_length = read_le16(header + 30U);
 	comment_length = read_le16(header + 32U);
 	if (name_length == 0U || name_length > PAPERMONO_ZIP_NAME_MAX) {
-		return -ENAMETOOLONG;
+		/* Still consume the variable-length tail so the caller can move on
+		 * to the next record.
+		 */
+		ret = fs_seek(file,
+			(off_t)name_length + extra_length + comment_length,
+			FS_SEEK_CUR);
+		return ret < 0 ? ret : -ENAMETOOLONG;
 	}
 	memset(entry, 0, sizeof(*entry));
 	entry->flags = read_le16(header + 8U);
@@ -100,27 +120,27 @@ static int read_central_entry(struct fs_file_t *file,
 	entry->compressed_size = read_le32(header + 20U);
 	entry->uncompressed_size = read_le32(header + 24U);
 	entry->local_header_offset = read_le32(header + 42U);
-	if (entry->compressed_size == UINT32_MAX ||
-	    entry->uncompressed_size == UINT32_MAX ||
-	    entry->local_header_offset == UINT32_MAX ||
-	    (entry->flags & 1U) != 0U ||
-	    (entry->method != 0U && entry->method != 8U) ||
-	    entry->uncompressed_size > PAPERMONO_ZIP_ENTRY_UNCOMPRESSED_LIMIT) {
-		return -ENOTSUP;
-	}
+	const bool unsupported =
+		entry->compressed_size == UINT32_MAX ||
+		entry->uncompressed_size == UINT32_MAX ||
+		entry->local_header_offset == UINT32_MAX ||
+		(entry->flags & 1U) != 0U ||
+		(entry->method != 0U && entry->method != 8U) ||
+		entry->uncompressed_size > PAPERMONO_ZIP_ENTRY_UNCOMPRESSED_LIMIT;
+
 	ret = read_exact(file, entry->name, name_length);
 	if (ret < 0) {
 		return ret;
 	}
 	entry->name[name_length] = '\0';
-	if (!papermono_zip_safe_path(entry->name)) {
-		return -EPERM;
-	}
 	ret = fs_seek(file, (off_t)extra_length + comment_length, FS_SEEK_CUR);
 	if (ret < 0) {
 		return ret;
 	}
-	return 0;
+	if (unsupported) {
+		return -ENOTSUP;
+	}
+	return papermono_zip_safe_path(entry->name) ? 0 : -EPERM;
 }
 
 int papermono_zip_open(struct papermono_zip_archive *archive,
@@ -185,17 +205,26 @@ int papermono_zip_open(struct papermono_zip_archive *archive,
 	for (uint16_t index = 0U; ret == 0 && index < archive->entry_count;
 	     ++index) {
 		struct papermono_zip_entry entry;
+		int entry_ret = read_central_entry(&file, &entry);
 
-		ret = read_central_entry(&file, &entry);
-		if (ret == 0) {
-			expanded_total += entry.uncompressed_size;
-			if (papermono_archive_validate_limits(
-				archive->entry_count, archive->central_size,
-				expanded_total) < 0 ||
-			    (uint64_t)entry.local_header_offset + 30U +
-				entry.compressed_size > source->size) {
-				ret = -EFBIG;
-			}
+		if (entry_ret == -ENOTSUP || entry_ret == -EPERM ||
+		    entry_ret == -ENAMETOOLONG) {
+			/* This one entry cannot be used, but the archive is still
+			 * addressable: skip it rather than reject the book.
+			 */
+			continue;
+		}
+		if (entry_ret < 0) {
+			ret = entry_ret;
+			break;
+		}
+		expanded_total += entry.uncompressed_size;
+		if (papermono_archive_validate_limits(
+			archive->entry_count, archive->central_size,
+			expanded_total) < 0 ||
+		    (uint64_t)entry.local_header_offset + 30U +
+			entry.compressed_size > source->size) {
+			ret = -EFBIG;
 		}
 	}
 close:
@@ -220,8 +249,32 @@ int papermono_zip_find(const struct papermono_zip_archive *archive,
 	ret = ret ?: fs_seek(&file, archive->central_offset, FS_SEEK_SET);
 	for (uint16_t index = 0U; ret == 0 && index < archive->entry_count;
 	     ++index) {
-		ret = read_central_entry(&file, entry);
-		if (ret == 0 && strcmp(entry->name, name) == 0) {
+		int entry_ret = read_central_entry(&file, entry);
+
+		if (entry_ret == -ENOTSUP || entry_ret == -EPERM) {
+			/* The record was consumed, so keep scanning. Report the
+			 * per-entry reason only if this is the name that was
+			 * actually requested; entry->name is populated for both of
+			 * these statuses.
+			 */
+			if (strcmp(entry->name, name) == 0) {
+				(void)fs_close(&file);
+				k_mutex_unlock(&zip_lock);
+				return entry_ret;
+			}
+			continue;
+		}
+		if (entry_ret == -ENAMETOOLONG) {
+			/* The name was too long to be stored, so it cannot be the
+			 * requested one; keep scanning.
+			 */
+			continue;
+		}
+		if (entry_ret < 0) {
+			ret = entry_ret;
+			break;
+		}
+		if (strcmp(entry->name, name) == 0) {
 			(void)fs_close(&file);
 			k_mutex_unlock(&zip_lock);
 			return 0;

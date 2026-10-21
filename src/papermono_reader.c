@@ -9,6 +9,7 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/util.h>
 
+#include <papermono/fs_read.h>
 #include <papermono/reader.h>
 #include <papermono/settings.h>
 #include <papermono/text_layout.h>
@@ -184,7 +185,7 @@ static int detect_encoding(const struct papermono_content_entry *book,
 	if (ret < 0) {
 		return ret;
 	}
-	length = fs_read(&file, sample, sizeof(sample));
+	length = papermono_fs_read_chunked(&file, sample, sizeof(sample));
 	(void)fs_close(&file);
 	if (length < 0) {
 		return (int)length;
@@ -358,7 +359,7 @@ static int refill(struct fs_file_t *file, uint8_t *buffer, size_t *position,
 		memmove(buffer, buffer + *position, remaining);
 	}
 	*position = 0U;
-	received = fs_read(file, buffer + remaining,
+	received = papermono_fs_read_chunked(file, buffer + remaining,
 		READER_INPUT_BUFFER_SIZE - remaining);
 	if (received < 0) {
 		return (int)received;
@@ -371,9 +372,15 @@ static int refill(struct fs_file_t *file, uint8_t *buffer, size_t *position,
 /* EPUB progress weighted by chapter length instead of chapter count.
  *
  * Counting chapters treated a one page preface and a 500 page chapter as
- * equal, and left a single chapter book stuck at 50%. Chapter sizes are
- * learned as they are read, so chapters not yet opened are estimated from the
- * mean of the known ones; the figure sharpens as reading progresses.
+ * equal, and left a single chapter book stuck at 50%.
+ *
+ * Units: text_end counts CODEPOINTS emitted from the inflated chapter, so a
+ * chapter's learned length must count codepoints too. It is recorded as the
+ * final text_end when the end of that chapter is reached (see
+ * papermono_reader_read_page); chapters not yet opened are estimated from the
+ * mean of the known ones and their estimate caps the current chapter's partial
+ * contribution, so progress never over-reports. Before any chapter length is
+ * known the figure falls back to chapter ordinal.
  */
 static uint8_t epub_progress_percent(
 	const struct papermono_reader_session *session, uint32_t text_end)
@@ -402,13 +409,22 @@ static uint8_t epub_progress_percent(
 		}
 		if (i < session->chapter) {
 			done += size;
+		} else if (i == session->chapter) {
+			/* Cap by the chapter's own estimate: text_end can exceed it
+			 * while the chapter length is still unknown.
+			 */
+			done += MIN(text_end, size);
 		}
 		total += size;
 	}
 
-	done += text_end;
 	if (total == 0U) {
-		return 100U;
+		/* No chapter length learned yet: weight chapters evenly. */
+		if (session->epub.chapter_count == 0U) {
+			return 100U;
+		}
+		return (uint8_t)MIN((session->chapter * 100U) /
+			session->epub.chapter_count, 100U);
 	}
 	if (done > total) {
 		done = total;
@@ -441,6 +457,14 @@ int papermono_reader_read_page(struct papermono_reader_session *session,
 		}
 		session->next_chapter = session->chapter;
 		session->next_page_start = epub_page.text_end;
+		if (epub_page.chapter_eof) {
+			/* The end of a chapter reveals its length in the same unit as
+			 * text_end (emitted codepoints). Recording it here is what lets
+			 * the progress figure weight chapters by length.
+			 */
+			session->epub.chapters[session->chapter].size =
+				epub_page.text_end;
+		}
 		if (epub_page.chapter_eof &&
 		    session->chapter + 1U < session->epub.chapter_count) {
 			session->next_chapter = session->chapter + 1U;

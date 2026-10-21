@@ -6,6 +6,7 @@
 
 #include <zephyr/fs/fs.h>
 
+#include <papermono/fs_read.h>
 #include <papermono/reader_cache.h>
 
 #define CACHE_HEADER_SIZE 48U
@@ -119,9 +120,31 @@ static bool entries_equal(const struct papermono_reader_cache_entry *left,
 	return left->offset == right->offset && left->chapter == right->chapter;
 }
 
+/* Upper bounds for a plausible index entry. A TXT page start is a byte offset
+ * into the book; an EPUB page start is a codepoint offset into the inflated
+ * chapter, so it is bounded by the per-entry uncompressed limit rather than by
+ * the (compressed) file size.
+ */
+#define CACHE_MAX_CHAPTER 64U
+#define CACHE_MAX_EPUB_OFFSET (16U * 1024U * 1024U)
+
+static bool cache_entry_plausible(const struct papermono_reader_cache_key *key,
+	const struct papermono_reader_cache_entry *entry)
+{
+	if (entry->chapter >= CACHE_MAX_CHAPTER) {
+		return false;
+	}
+	if (key->kind == PAPERMONO_CONTENT_EPUB) {
+		return entry->offset <= CACHE_MAX_EPUB_OFFSET;
+	}
+	/* Only the TEXT kind has byte offsets, and only chapter 0 is valid. */
+	return entry->chapter == 0U &&
+		(key->book_size == 0U || entry->offset < key->book_size);
+}
+
 static int read_exact(struct fs_file_t *file, void *buffer, size_t length)
 {
-	const ssize_t received = fs_read(file, buffer, length);
+	const ssize_t received = papermono_fs_read_chunked(file, buffer, length);
 
 	return received < 0 ? (int)received :
 		received == (ssize_t)length ? 0 : -EBADMSG;
@@ -266,12 +289,50 @@ int papermono_reader_cache_open(struct papermono_reader_cache *cache,
 		return ret;
 	}
 	ret = read_exact(&file, header, sizeof(header));
+	if (ret == 0 && header_matches(header, key)) {
+		/* Validate the entries, not just the header. header_checksum()
+		 * covers bytes 0..43 only, so a corrupted entry payload used to be
+		 * trusted: an arbitrary page_start/chapter would park the reader on
+		 * a blank page. Entries written by this code are monotonic (page
+		 * starts advance, chapter never goes backwards), which makes
+		 * corruption detectable without rewriting the whole index on every
+		 * page turn.
+		 */
+		const uint32_t count = (uint32_t)((stat.size - CACHE_HEADER_SIZE) /
+			CACHE_ENTRY_SIZE);
+		struct papermono_reader_cache_entry previous = {0U, 0U};
+		bool have_previous = false;
+
+		for (uint32_t index = 0U; ret == 0 && index < count; ++index) {
+			uint8_t encoded[CACHE_ENTRY_SIZE];
+			struct papermono_reader_cache_entry entry;
+
+			ret = read_exact(&file, encoded, sizeof(encoded));
+			if (ret < 0) {
+				break;
+			}
+			decode_entry(encoded, &entry);
+			if (!cache_entry_plausible(key, &entry) ||
+			    (have_previous &&
+			     (entry.chapter < previous.chapter ||
+			      (entry.chapter == previous.chapter &&
+			       entry.offset <= previous.offset)))) {
+				ret = -EBADMSG;
+				break;
+			}
+			previous = entry;
+			have_previous = true;
+		}
+	}
 	{
 		const int close_ret = fs_close(&file);
 
 		ret = ret ?: close_ret;
 	}
 	if (ret < 0 || !header_matches(header, key)) {
+		/* A damaged or stale index is rebuilt, which is what the reader
+		 * documentation promises and what deleting .cache/reader achieves.
+		 */
 		return papermono_reader_cache_reset(cache, key, initial);
 	}
 	cache->key = *key;

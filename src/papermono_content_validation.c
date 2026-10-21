@@ -7,6 +7,7 @@
 #include <zephyr/fs/fs.h>
 #include <zephyr/sys/util.h>
 
+#include <papermono/fs_read.h>
 #include <papermono/content_validation.h>
 #include <papermono/epub.h>
 #include <papermono/personal_data.h>
@@ -19,6 +20,14 @@
 #endif
 
 static char validation_buffer[PAPERMONO_METADATA_FILE_LIMIT + 1U]
+	PAPERMONO_VALIDATION_BSS;
+/* Encoding detection only needs a prefix, but a 4 KiB stack frame does not fit
+ * comfortably on the HTTP server thread (CONFIG_HTTP_SERVER_STACK_SIZE is
+ * 6144) next to the parser and the upload handler's own frames, so the sample
+ * lives in the same external-RAM section as the other buffers.
+ */
+#define VALIDATION_SAMPLE_SIZE 4096U
+static uint8_t validation_sample[VALIDATION_SAMPLE_SIZE]
 	PAPERMONO_VALIDATION_BSS;
 static struct papermono_calendar validation_calendar PAPERMONO_VALIDATION_BSS;
 static struct papermono_task_list validation_tasks PAPERMONO_VALIDATION_BSS;
@@ -40,7 +49,7 @@ static int read_file(const char *path, uint64_t size)
 	if (ret < 0) {
 		return ret;
 	}
-	received = fs_read(&file, validation_buffer, (size_t)size);
+	received = papermono_fs_read_chunked(&file, validation_buffer, (size_t)size);
 	(void)fs_close(&file);
 	if (received < 0) {
 		return (int)received;
@@ -55,7 +64,6 @@ static int read_file(const char *path, uint64_t size)
 static int validate_txt(const char *path, uint64_t size)
 {
 	struct fs_file_t file;
-	uint8_t sample[4096];
 	ssize_t received;
 
 	fs_file_t_init(&file);
@@ -63,13 +71,18 @@ static int validate_txt(const char *path, uint64_t size)
 	if (ret < 0) {
 		return ret;
 	}
-	received = fs_read(&file, sample, MIN(size, sizeof(sample)));
+	/* One import is committed at a time (the store serialises them on
+	 * content_lock), so sharing this buffer between callers is safe.
+	 */
+	received = papermono_fs_read_chunked(&file, validation_sample,
+		MIN(size, (uint64_t)sizeof(validation_sample)));
 	(void)fs_close(&file);
 	if (received < 0) {
 		return (int)received;
 	}
-	return received == 0 || papermono_text_detect(sample, (size_t)received,
-		NULL) != PAPERMONO_TEXT_ENCODING_UNKNOWN ? 0 : -EILSEQ;
+	return received == 0 || papermono_text_detect(validation_sample,
+		(size_t)received, NULL) != PAPERMONO_TEXT_ENCODING_UNKNOWN ?
+		0 : -EILSEQ;
 }
 
 int papermono_content_validate(enum papermono_content_kind kind,
