@@ -567,9 +567,53 @@ static void test_settings_exact_root_suffixes(void)
 	scanned_book = NULL;
 }
 
+/* A corrupt/older NVS record may fill preview[] without a terminator. The
+ * bookmark list prints it with %s, so loading must force termination.
+ */
+static void test_bookmark_preview_termination(void)
+{
+	static const uint8_t text[] = "saved reader state for reset";
+	struct papermono_reader_session saved = make_session(
+		PAPERMONO_TEXT_ENCODING_UTF8, sizeof(text) - 1U);
+	struct papermono_reader_session loaded;
+	uint8_t *record;
+	bool found = false;
+
+	active_data = text;
+	active_length = sizeof(text) - 1U;
+	settings_enabled = true;
+	scanned_book = &saved.book;
+	saved.page_start = 3U;
+	saved.bookmark_count = 1U;
+	saved.bookmarks[0].offset = 3U;
+	(void)snprintf(saved.bookmarks[0].preview,
+		sizeof(saved.bookmarks[0].preview), "preview-marker");
+	assert(papermono_reader_save(&saved) == 0);
+
+	record = stored_settings[1].value;
+	for (size_t index = 0U; index + 14U < stored_settings[1].length; ++index) {
+		if (memcmp(&record[index], "preview-marker", 14U) == 0) {
+			memset(&record[index], 'Z', PAPERMONO_READER_PREVIEW_MAX);
+			found = true;
+			break;
+		}
+	}
+	assert(found);
+
+	settings_suffix = NULL;
+	assert(papermono_reader_open(&loaded, &saved.book) == 0);
+	assert(loaded.bookmark_count == 1U);
+	assert(memchr(loaded.bookmarks[0].preview, '\0',
+		PAPERMONO_READER_PREVIEW_MAX) != NULL);
+	assert(loaded.bookmarks[0].preview[PAPERMONO_READER_PREVIEW_MAX - 1U] == '\0');
+	settings_enabled = false;
+	scanned_book = NULL;
+}
+
 int main(void)
 {
 	test_settings_exact_root_suffixes();
+	test_bookmark_preview_termination();
 	test_utf8_paging_and_history();
 	test_gbk_boundary_and_empty_file();
 	test_cached_previous_beyond_ram_history();

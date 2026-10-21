@@ -1765,7 +1765,8 @@ static int render_library_bookmarks(struct library_ui_state *state, lv_obj_t *sc
 		struct papermono_rect rect;
 		char title[96], meta[96];
 		(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
-		if (mark->preview[0]) (void)snprintf(title, sizeof(title), "%s", mark->preview);
+		if (mark->preview[0]) (void)snprintf(title, sizeof(title), "%.*s",
+			(int)sizeof(mark->preview), mark->preview);
 		else (void)snprintf(title, sizeof(title), "书签 %u", index + 1U);
 		if (state->reader.book.kind == PAPERMONO_CONTENT_EPUB && mark->chapter < state->reader.epub.chapter_count)
 			(void)snprintf(meta, sizeof(meta), "%s · 位置 %u", state->reader.epub.chapters[mark->chapter].title, mark->offset);

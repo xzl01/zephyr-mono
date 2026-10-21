@@ -321,6 +321,15 @@ int papermono_reader_open(struct papermono_reader_session *session,
 			PAPERMONO_READER_BOOKMARK_LIMIT);
 		memcpy(session->bookmarks, loaded.record.bookmarks,
 			session->bookmark_count * sizeof(session->bookmarks[0]));
+		/* Persisted previews come from NVS and older/corrupt records may fill
+		 * the whole array. Force termination: the bookmark list prints these
+		 * with %s, so an unterminated field would read into neighbouring
+		 * fields.
+		 */
+		for (uint8_t index = 0U; index < session->bookmark_count; ++index) {
+			session->bookmarks[index].preview[
+				sizeof(session->bookmarks[index].preview) - 1U] = '\0';
+		}
 		if (book->kind == PAPERMONO_CONTENT_EPUB &&
 		    loaded.record.chapter < session->epub.chapter_count) {
 			session->chapter = loaded.record.chapter;
