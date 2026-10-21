@@ -43,7 +43,9 @@ keyboard.
   product stack.
 - Applications request refreshes through the display scheduler and background
   threads do not call LVGL directly.
-- The device does not provide a soft keyboard or unrestricted text editing.
+- Wi-Fi setup is performed directly on the device: scan, select a network, and
+  enter its password with a bounded ASCII touch keyboard. This keyboard is only
+  for connection settings, not unrestricted content authoring.
 - Current WeRead support is a credential-free local shelf summary; it does not
   embed account cookies, private APIs, or book contents.
 - Fonts must remain one-bit and cover every Chinese character shipped in the UI.
