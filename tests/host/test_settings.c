@@ -193,6 +193,17 @@ int main(void)
 	save_result = 0;
 	assert(papermono_settings_clear_wifi() == 0);
 	assert(!papermono_settings_get()->wifi_configured);
+	assert(papermono_settings_set_wifi("open-network", "") == 0);
+	assert(papermono_settings_get()->wifi_configured);
+	assert(papermono_settings_get()->wifi_psk[0] == '\0');
+	/* Reload the serialized open-network record, not merely the RAM copy. */
+	assert(settings_host_set_papermono(saved_config.key,
+		saved_config.length, read_fake, &saved_config) == 0);
+	assert(settings_host_commit_papermono() == 0);
+	assert(papermono_settings_get()->wifi_configured);
+	assert(strcmp(papermono_settings_get()->wifi_ssid, "open-network") == 0);
+	assert(papermono_settings_get()->wifi_psk[0] == '\0');
+	assert(papermono_settings_clear_wifi() == 0);
 	assert(papermono_settings_set_reader_resume(true) == 0);
 	assert(papermono_settings_get()->reader_resume);
 	const unsigned int resume_true_saves = save_count;

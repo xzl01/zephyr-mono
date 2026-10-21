@@ -32,6 +32,7 @@ enum papermono_app_id {
 	PAPERMONO_APP_CONTENT = 12,
 	/* App IDs are persisted in Settings/NVS. Append new values only. */
 	PAPERMONO_APP_WEREAD = 13,
+	PAPERMONO_APP_WIFI = 14,
 	PAPERMONO_APP_COUNT,
 };
 
@@ -64,6 +65,9 @@ struct papermono_app_event {
 	uint32_t duration_ms;
 	/* Uptime at capture, retained across a display refresh for latency logs. */
 	uint32_t queued_at_ms;
+	/* Keyboard layout epoch captured with input; stale coordinates never
+	 * become a character/action on a different displayed keyboard. */
+	uint32_t input_generation;
 };
 
 enum papermono_app_command_type {

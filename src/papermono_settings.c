@@ -134,7 +134,7 @@ static int settings_record_decode(
 	    record->active_app >= PAPERMONO_APP_COUNT ||
 	    (wifi_configured &&
 	     (ssid_length == 0U || ssid_length > PAPERMONO_WIFI_SSID_MAX ||
-	      psk_length < 8U || psk_length > PAPERMONO_WIFI_PSK_MAX))) {
+	      (psk_length != 0U && psk_length < 8U) || psk_length > PAPERMONO_WIFI_PSK_MAX))) {
 		return -EINVAL;
 	}
 	*decoded = defaults;
@@ -460,14 +460,16 @@ int papermono_settings_set_wifi(const char *ssid, const char *psk)
 		strnlen(psk, sizeof(preferences.wifi_psk));
 
 	if (ssid_length == 0U || ssid_length > PAPERMONO_WIFI_SSID_MAX ||
-	    psk_length < 8U || psk_length > PAPERMONO_WIFI_PSK_MAX) {
+	    (psk_length != 0U && psk_length < 8U) || psk_length > PAPERMONO_WIFI_PSK_MAX) {
 		return -EINVAL;
 	}
 	struct papermono_preferences candidate = preferences;
 	memset(candidate.wifi_ssid, 0, sizeof(candidate.wifi_ssid));
 	memset(candidate.wifi_psk, 0, sizeof(candidate.wifi_psk));
 	memcpy(candidate.wifi_ssid, ssid, ssid_length);
-	memcpy(candidate.wifi_psk, psk, psk_length);
+	if (psk_length != 0U) {
+		memcpy(candidate.wifi_psk, psk, psk_length);
+	}
 	candidate.wifi_configured = true;
 	return persist_preferences(&candidate, false);
 }

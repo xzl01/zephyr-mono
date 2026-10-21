@@ -159,6 +159,10 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-o "$build_dir/test_fs_read"
 "$build_dir/test_fs_read"
 cc -std=c17 -Wall -Wextra -Werror \
+	-Iinclude tests/host/test_wifi_input.c src/papermono_wifi_input.c \
+	-o "$build_dir/test_wifi_input"
+"$build_dir/test_wifi_input"
+cc -std=c17 -Wall -Wextra -Werror \
 	-Itests/host/stubs -Iinclude tests/host/test_info_provider.c \
 	-o "$build_dir/test_info_provider"
 "$build_dir/test_info_provider"
@@ -171,3 +175,4 @@ python3 tests/host/test_field_notes_assets.py
 python3 tests/host/test_content_web.py
 python3 tests/host/test_usb_reset.py
 python3 tests/host/test_esp_digest.py
+python3 tests/host/test_wifi_backend.py

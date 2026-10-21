@@ -121,9 +121,8 @@ static void papermono_ft6336_report_release(
 		if (ret < 0) {
 			LOG_WRN("FT6336 release event dropped (%d)", ret);
 		} else {
-			LOG_INF("FT6336 touch released at x=%d y=%d",
-				(int)atomic_get(&data->last_x),
-				(int)atomic_get(&data->last_y));
+			/* Coordinates can reveal on-device password keystrokes. */
+			LOG_DBG("FT6336 touch released");
 		}
 	}
 }
@@ -234,8 +233,7 @@ static int papermono_ft6336_process(const struct device *dev)
 		if (ret < 0) {
 			LOG_WRN("FT6336 press event dropped (%d)", ret);
 		} else {
-			LOG_INF("FT6336 touch pressed at x=%u y=%u", point.x,
-				point.y);
+			LOG_DBG("FT6336 touch pressed");
 		}
 	}
 	return 0;

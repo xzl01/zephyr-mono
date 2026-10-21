@@ -56,6 +56,7 @@
 #include <papermono/ui.h>
 #include <papermono/ui_layout.h>
 #include <papermono/weread.h>
+#include <papermono/wifi_input.h>
 
 LOG_MODULE_REGISTER(papermono_ui, LOG_LEVEL_INF);
 
@@ -160,13 +161,39 @@ struct weread_ui_state {
 static struct weread_ui_state weread_ui;
 static size_t launcher_page;
 
-#define LIBRARY_MAX_BOOKS 32U
-#define LIBRARY_VISIBLE_BOOKS 5U
 #if defined(CONFIG_ESP_SPIRAM)
 #define PAPERMONO_LARGE_BSS __attribute__((section(".ext_ram.bss")))
 #else
 #define PAPERMONO_LARGE_BSS
 #endif
+
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+enum wifi_ui_mode { WIFI_UI_LIST, WIFI_UI_PASSWORD, WIFI_UI_FORGET };
+static struct {
+	enum wifi_ui_mode mode;
+	struct papermono_wifi_state shown;
+	struct papermono_wifi_network selected;
+	struct papermono_wifi_input input;
+	char display_text[64];
+	size_t first;
+	int last_error;
+} wifi_ui PAPERMONO_LARGE_BSS;
+/* Read from the input callback as well as the UI thread. Never log keyboard
+ * coordinates: a sequence of key positions reveals the password. */
+static atomic_t wifi_keyboard_active;
+static atomic_t wifi_keyboard_overflow;
+static atomic_t wifi_input_generation;
+static atomic_t wifi_layout_transition;
+static void wifi_advance_input(void)
+{
+	/* Do not publish a clickable layout before it exists on the panel. */
+	atomic_set(&wifi_layout_transition, 1);
+	atomic_inc(&wifi_input_generation);
+}
+#endif
+
+#define LIBRARY_MAX_BOOKS 32U
+#define LIBRARY_VISIBLE_BOOKS 5U
 
 enum library_mode {
 	LIBRARY_MODE_LIST,
@@ -240,6 +267,9 @@ static int32_t touch_y;
 static int32_t touch_start_x;
 static int32_t touch_start_y;
 static uint32_t touch_start_ms;
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+static uint32_t touch_input_generation;
+#endif
 static uint32_t last_touch_action_ms;
 static bool touch_pressed;
 static bool touch_navigation_sent;
@@ -970,6 +1000,245 @@ static int render_content_center(void *context, lv_obj_t *screen)
 	make_footer(screen, "浏览器传输在后台执行");
 	return 0;
 }
+
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+/* Wi-Fi extends Field Notes: a ruled four-network list, then a dedicated
+ * bounded ASCII keyboard. Real state only; no LVGL calls from Wi-Fi workers. */
+static void wifi_input_close(void)
+{
+	wifi_advance_input();
+	atomic_set(&wifi_keyboard_active, 0);
+	papermono_wifi_input_wipe(&wifi_ui.input);
+	volatile char *wipe = wifi_ui.display_text;
+	for (size_t i = 0; i < sizeof(wifi_ui.display_text); ++i) wipe[i] = 0;
+	wifi_ui.mode = WIFI_UI_LIST;
+}
+
+static const char *wifi_error_text(int error)
+{
+	switch (error) {
+	case 0: return "";
+	case -EBUSY: return "网络正在处理，请稍后重试";
+	case -ENOTSUP: return "此网络不支持，请选择 2.4 GHz WPA2 网络";
+	case -EINVAL: return "密码需为 8 至 63 位字母、数字或符号";
+	case -ENOSPC: return "密码最多 63 位，请退格修改";
+	case -EOVERFLOW: return "输入过快，请返回后重新输入密码";
+	case -ETIMEDOUT: return "连接超时，请检查密码并重试";
+	default: return "操作失败，请检查密码和网络后重试";
+	}
+}
+
+static int wifi_open(void *context)
+{
+	ARG_UNUSED(context);
+	wifi_input_close();
+	wifi_ui.first = 0;
+	wifi_ui.last_error = papermono_content_server_scan_wifi();
+	if (wifi_ui.last_error == -EBUSY) wifi_ui.last_error = 0;
+	return 0;
+}
+
+static void wifi_close(void *context)
+{
+	ARG_UNUSED(context);
+	wifi_input_close();
+}
+
+static int render_wifi(void *context, lv_obj_t *screen)
+{
+	ARG_UNUSED(context);
+	char text[160];
+	make_header(screen, "连接设置");
+	if (wifi_ui.mode == WIFI_UI_FORGET) {
+		detail_icon(screen, &papermono_icon_wifi, 190);
+		(void)detail_text(screen, "忘记已保存的网络？", 22, 330, 436, 38, true);
+		(void)detail_text(screen, "将断开连接并清除网络密码。\n设备接入点与配对码也会更新。\nTF 卡内容不会删除。", 22, 388, 436, 90, false);
+		detail_button(screen, &detail_confirm_rect, "确认忘记", true);
+		detail_button(screen, &detail_cancel_rect, "取消", false);
+		make_footer(screen, "取消不会更改连接");
+		return 0;
+	}
+	if (wifi_ui.mode == WIFI_UI_PASSWORD) {
+		(void)detail_text(screen, wifi_ui.selected.ssid, 22, 132, 436, 34, true);
+		volatile char *wipe = wifi_ui.display_text;
+		for (size_t i = 0; i < sizeof(wifi_ui.display_text); ++i) wipe[i] = 0;
+		(void)papermono_wifi_input_display(&wifi_ui.input,
+			wifi_ui.display_text, sizeof(wifi_ui.display_text));
+		const size_t length = strlen(wifi_ui.display_text);
+		(void)snprintf(text, sizeof(text), "密码 · %zu / 63 位", length);
+		(void)detail_text(screen, text, 22, 172, 436, 24, false);
+		/* The complete value fits in three 16px-font lines (63 ASCII bytes),
+		 * so showing a password permits checking every character, not a tail.
+		 * Static WRAP text never allocates a second secret copy in LVGL. */
+		lv_obj_t *password = make_label(screen, "", &papermono_cjk_16, ink);
+		lv_obj_set_pos(password, 22, 198);
+		lv_obj_set_size(password, 436, 56);
+		lv_label_set_long_mode(password, LV_LABEL_LONG_WRAP);
+		lv_label_set_text_static(password, wifi_ui.display_text);
+		(void)detail_text(screen, wifi_ui.last_error ? wifi_error_text(wifi_ui.last_error) :
+			"区分大小写 · 支持空格和符号", 22, 258, 436, 28, false);
+		detail_button(screen, &wifi_connect_rect, "保存并连接", true);
+		for (size_t i = 0; i < papermono_wifi_input_key_count(); ++i) {
+			struct papermono_wifi_input_key key;
+			(void)papermono_wifi_input_key_at(&wifi_ui.input, i, &key);
+			struct papermono_rect rect = {key.x, key.y, key.width, key.height};
+			lv_obj_t *button = make_outline_shape(screen, rect.x, rect.y,
+				rect.width, rect.height, 1, 0);
+			lv_obj_t *label = make_label(button, key.label,
+				i < PAPERMONO_WIFI_INPUT_CHARACTER_KEYS && key.character != ' ' ?
+				&papermono_reading_24 : &papermono_cjk_16, ink);
+			lv_obj_set_size(label, rect.width - 4, 30);
+			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+			lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+			lv_obj_center(label);
+		}
+		make_footer(screen, "返回取消输入 · 密码不写入日志");
+		return 0;
+	}
+	const uint32_t previous_scan = wifi_ui.shown.scan_generation;
+	papermono_content_server_get_wifi_state(&wifi_ui.shown);
+	if (previous_scan != wifi_ui.shown.scan_generation) wifi_advance_input();
+	struct papermono_content_server_state network;
+	papermono_content_server_get_state(&network);
+	if (wifi_ui.first >= wifi_ui.shown.count) wifi_ui.first = 0;
+	(void)detail_text(screen, wifi_ui.shown.configured ? wifi_ui.shown.saved_ssid :
+		"尚未保存网络", 22, 132, 436, 34, true);
+	const char *status = wifi_ui.shown.request_busy ? "正在处理网络设置，请稍候" :
+		wifi_ui.shown.connection == PAPERMONO_WIFI_CONNECTED ?
+		(network.station_ipv4[0] ? network.station_ipv4 : "已连接，等待网络地址") :
+		wifi_ui.shown.connection == PAPERMONO_WIFI_CONNECTING ? "正在连接已保存的网络" :
+		(wifi_ui.shown.connection == PAPERMONO_WIFI_CONNECTION_ERROR || wifi_ui.shown.last_connection_error) ? "操作失败，请检查密码或重新选择网络" :
+		"未连接 · 选择下方网络";
+	(void)detail_text(screen, status, 22, 174, 436, 34, false);
+	const bool idle = !wifi_ui.shown.request_busy && !wifi_ui.shown.scan_busy &&
+		wifi_ui.shown.connection != PAPERMONO_WIFI_CONNECTING;
+	if (idle && wifi_ui.shown.scan_error != -ETIMEDOUT)
+		detail_button(screen, &wifi_scan_rect, "重新扫描", false);
+	else (void)detail_text(screen, wifi_ui.shown.scan_busy ? "扫描中" : "请稍候", 28, 232, 130, 28, false);
+	if (idle && wifi_ui.shown.configured) {
+		detail_button(screen, &wifi_reconnect_rect, "重新连接", false);
+		detail_button(screen, &wifi_forget_rect, "忘记网络", false);
+	} else {
+		(void)detail_text(screen, "重新连接", 180, 232, 128, 28, false);
+		(void)detail_text(screen, "忘记网络", 328, 232, 128, 28, false);
+	}
+	(void)detail_text(screen, wifi_ui.last_error ? wifi_error_text(wifi_ui.last_error) :
+		wifi_ui.shown.scan_error == -ETIMEDOUT ? "扫描超时，请重启设备后重试" :
+		wifi_ui.shown.scan_error ? "扫描失败，请重新扫描" :
+		wifi_ui.shown.scan_busy ? "正在扫描 2.4 GHz 网络" : "可用网络 · 轻触选择", 22, 276, 436, 24, false);
+	for (size_t row = 0; row < 4; ++row) {
+		const size_t index = wifi_ui.first + row;
+		if (index >= wifi_ui.shown.count) break;
+		struct papermono_wifi_network *item = &wifi_ui.shown.networks[index];
+		struct papermono_rect rect;
+		(void)papermono_interaction_grid_cell_rect(&wifi_network_grid, row, &rect);
+		(void)snprintf(text, sizeof(text), "%s · %d dBm · 信道 %u",
+			!item->supported ? "不支持" : item->security == PAPERMONO_WIFI_SECURITY_OPEN ? "开放网络" : "WPA2", item->rssi, item->channel);
+		(void)detail_row(screen, &rect, item->ssid[0] ? item->ssid : "隐藏网络", text,
+			wifi_ui.shown.configured && strcmp(item->ssid, wifi_ui.shown.saved_ssid) == 0, item->supported && idle);
+	}
+	if (!wifi_ui.shown.count && !wifi_ui.shown.scan_busy && !wifi_ui.shown.scan_error) {
+		(void)detail_text(screen, "未发现可用网络", 22, 360, 436, 38, true);
+		(void)detail_text(screen, "请确认路由器已开启 2.4 GHz Wi-Fi，\n靠近设备后重新扫描。", 22, 410, 436, 70, false);
+	}
+	if (idle && wifi_ui.first >= 4) detail_button(screen, &wifi_previous_rect, "上一页", false);
+	if (idle && wifi_ui.first + 4 < wifi_ui.shown.count) detail_button(screen, &wifi_next_rect, "下一页", false);
+	(void)snprintf(text, sizeof(text), "%u 个网络 · %u / %u 页",
+		wifi_ui.shown.count, (unsigned)(wifi_ui.first / 4 + 1),
+		(unsigned)MAX(1, (wifi_ui.shown.count + 3) / 4));
+	make_footer(screen, text);
+	return 0;
+}
+
+static int wifi_event(void *context, const struct papermono_app_event *event,
+	struct papermono_app_command *command)
+{
+	ARG_UNUSED(context);
+	const bool back = event->type == PAPERMONO_APP_EVENT_BACK ||
+		(event->type == PAPERMONO_APP_EVENT_PREVIOUS && papermono_app_event_is_touch(event)) ||
+		(event->type == PAPERMONO_APP_EVENT_TAP && event->y >= UI_DETAIL_FOOTER_TOP);
+	if (back) {
+		if (wifi_ui.mode != WIFI_UI_LIST) {
+			wifi_input_close();
+			wifi_ui.last_error = 0;
+			request_redraw(command);
+		} else command->type = PAPERMONO_APP_COMMAND_BACK;
+		return 0;
+	}
+	if (wifi_ui.mode == WIFI_UI_FORGET) {
+		if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &detail_cancel_rect)) {
+			wifi_ui.mode = WIFI_UI_LIST;
+			wifi_advance_input();
+			request_redraw(command);
+		} else if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &detail_confirm_rect)) {
+			wifi_ui.last_error = papermono_content_server_forget_wifi();
+			wifi_ui.mode = WIFI_UI_LIST;
+			wifi_advance_input();
+			request_redraw(command);
+		}
+		return 0;
+	}
+	if (wifi_ui.mode == WIFI_UI_PASSWORD) {
+		if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &wifi_connect_rect)) {
+			if (atomic_get(&wifi_keyboard_overflow)) {
+				wifi_ui.last_error = -EOVERFLOW;
+				request_redraw(command);
+				return 0;
+			}
+			wifi_ui.last_error = papermono_content_server_connect_wifi(&wifi_ui.selected, wifi_ui.input.text);
+			if (!wifi_ui.last_error) wifi_input_close();
+			request_redraw(command);
+		} else if (event->type == PAPERMONO_APP_EVENT_TAP) {
+			enum papermono_wifi_input_layer old_layer = wifi_ui.input.layer;
+			int ret = papermono_wifi_input_tap(&wifi_ui.input, event->x, event->y);
+			if (old_layer != wifi_ui.input.layer) wifi_advance_input();
+			if (ret != 0) {
+				wifi_ui.last_error = ret < 0 ? ret : 0;
+				request_redraw(command);
+			}
+		}
+		return 0;
+	}
+	if (wifi_ui.shown.request_busy || wifi_ui.shown.scan_busy ||
+	    wifi_ui.shown.connection == PAPERMONO_WIFI_CONNECTING) return 0;
+	if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &wifi_scan_rect)) {
+		if (wifi_ui.shown.scan_error == -ETIMEDOUT) return 0;
+		wifi_ui.last_error = papermono_content_server_scan_wifi();
+		wifi_ui.first = 0;
+	} else if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &wifi_reconnect_rect)) {
+		if (!wifi_ui.shown.configured) return 0;
+		wifi_ui.last_error = papermono_content_server_connect_saved();
+	} else if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &wifi_forget_rect)) {
+		if (wifi_ui.shown.configured) {
+			wifi_ui.mode = WIFI_UI_FORGET;
+			wifi_advance_input();
+		}
+	} else if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &wifi_previous_rect) ||
+		(event->type == PAPERMONO_APP_EVENT_PREVIOUS && papermono_app_event_is_button(event))) {
+		if (wifi_ui.first >= 4) { wifi_ui.first -= 4; wifi_advance_input(); }
+	} else if (papermono_interaction_contains(event, PAPERMONO_INTERACTION_TAP, &wifi_next_rect) || event->type == PAPERMONO_APP_EVENT_NEXT) {
+		if (wifi_ui.first + 4 < wifi_ui.shown.count) { wifi_ui.first += 4; wifi_advance_input(); }
+	} else {
+		size_t row;
+		if (papermono_interaction_spaced_grid_index(event, PAPERMONO_INTERACTION_TAP, &wifi_network_grid, &row) < 0 ||
+		    wifi_ui.first + row >= wifi_ui.shown.count) return 0;
+		wifi_ui.selected = wifi_ui.shown.networks[wifi_ui.first + row];
+		if (!wifi_ui.selected.supported) wifi_ui.last_error = -ENOTSUP;
+		else if (wifi_ui.selected.security == PAPERMONO_WIFI_SECURITY_OPEN) {
+			wifi_ui.last_error = papermono_content_server_connect_wifi(&wifi_ui.selected, "");
+		} else {
+			(void)papermono_wifi_input_init(&wifi_ui.input, PAPERMONO_WIFI_INPUT_PASSWORD);
+			wifi_ui.last_error = 0;
+			wifi_ui.mode = WIFI_UI_PASSWORD;
+			atomic_set(&wifi_keyboard_overflow, 0);
+			wifi_advance_input();
+			atomic_set(&wifi_keyboard_active, 1);
+		}
+	}
+	request_redraw(command);
+	return 0;
+}
+#endif
 
 static const char *weread_kind_text(enum papermono_weread_kind kind)
 {
@@ -2411,7 +2680,7 @@ static int render_settings(void *context, lv_obj_t *screen)
 	detail_section(screen, 134, "日常偏好");
 	detail_section(screen, 390, "连接");
 	detail_section(screen, 548, "设备");
-	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "重新配置 Wi-Fi", "清除蓝牙配对", "恢复默认设置", "电源选项"};
+	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "Wi-Fi 网络", "清除蓝牙配对", "恢复默认设置", "电源选项"};
 	/* The loop below walks detail_setting_rects and indexes titles with the
 	 * same counter, so the two tables have to stay the same length.
 	 */
@@ -3135,10 +3404,12 @@ static int settings_event(void *context,
 		request_redraw(command);
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_TAP, &wifi_rect)) {
-		confirmation_origin = PAPERMONO_APP_SETTINGS;
-		confirmation = CONFIRM_RESET_WIFI;
 		command->type = PAPERMONO_APP_COMMAND_OPEN;
-		command->target = PAPERMONO_APP_POWER;
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+		command->target = PAPERMONO_APP_WIFI;
+#else
+		command->target = PAPERMONO_APP_CONTENT;
+#endif
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_TAP, &ble_rect)) {
 		confirmation_origin = PAPERMONO_APP_SETTINGS;
@@ -3181,6 +3452,9 @@ static int system_event(void *context,
 }
 
 static const struct papermono_app_descriptor apps[] = {
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	{ PAPERMONO_APP_WIFI, "Wi-Fi", false, wifi_open, render_wifi, wifi_event, wifi_close, NULL },
+#endif
 	{ PAPERMONO_APP_HOME, "首页", true, NULL, render_home, home_event, NULL, NULL },
 	{ PAPERMONO_APP_LAUNCHER, "全部应用", true, NULL, render_launcher, launcher_event, NULL, NULL },
 	{ PAPERMONO_APP_LIBRARY, "书库", true, library_open, render_library, library_event, library_close, &library_state },
@@ -3237,6 +3511,18 @@ static void queue_pending_system_events(void)
 
 static int submit_input_event(const struct papermono_app_event *completed)
 {
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	/* Character taps must remain FIFO, not the single deferred navigation
+	 * slot. Saturation is explicit and disables connect until re-entered. */
+	if (atomic_get(&wifi_layout_transition) && papermono_app_event_is_touch(completed)) {
+		return -EAGAIN;
+	}
+	if (atomic_get(&wifi_keyboard_active)) {
+		int ret = k_msgq_put(&ui_events, completed, K_NO_WAIT);
+		if (ret < 0) atomic_set(&wifi_keyboard_overflow, 1);
+		return ret;
+	}
+#endif
 	if (atomic_get(&input_blocked) != 0) {
 		k_spinlock_key_t key = k_spin_lock(&deferred_touch_lock);
 		const bool still_blocked = atomic_get(&input_blocked) != 0;
@@ -3266,11 +3552,14 @@ static int submit_touch_gesture(enum papermono_app_event_type type,
 		.y = touch_start_y,
 		.duration_ms = duration_ms,
 		.queued_at_ms = now,
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+		.input_generation = touch_input_generation,
+#endif
 	};
 	const int ret = submit_input_event(&completed);
 
-	LOG_INF("UI touch gesture type=%d x=%d y=%d duration=%u queue=%d",
-		type, completed.x, completed.y, duration_ms, ret);
+	LOG_DBG("UI touch gesture type=%d duration=%u queue=%d",
+		type, duration_ms, ret);
 	if (ret == 0) {
 		last_touch_action_ms = now;
 	}
@@ -3344,8 +3633,11 @@ static void papermono_ui_input_event(struct input_event *event,
 			touch_start_x = touch_x;
 			touch_start_y = touch_y;
 			touch_start_ms = k_uptime_get_32();
-			LOG_INF("UI touch press x=%d y=%d blocked=%d", touch_start_x,
-				touch_start_y, (int)atomic_get(&input_blocked));
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+			touch_input_generation = atomic_get(&wifi_layout_transition) ? UINT32_MAX :
+				(uint32_t)atomic_get(&wifi_input_generation);
+#endif
+			LOG_DBG("UI touch press blocked=%d", (int)atomic_get(&input_blocked));
 		} else if (touch_pressed) {
 			const uint32_t now = k_uptime_get_32();
 			const uint32_t duration = now - touch_start_ms;
@@ -3361,9 +3653,7 @@ static void papermono_ui_input_event(struct input_event *event,
 				touch_start_y, touch_x, touch_y, duration,
 				UI_WIDTH, UI_HEIGHT, &type);
 			if (ret < 0) {
-				LOG_WRN("UI touch gesture rejected: start=%d,%d end=%d,%d duration=%u (%d)",
-					touch_start_x, touch_start_y, touch_x, touch_y,
-					duration, ret);
+				LOG_DBG("UI touch gesture rejected duration=%u (%d)", duration, ret);
 				return;
 			}
 			/* Controller bounce is filtered for taps only. A deliberate edge
@@ -3451,12 +3741,18 @@ static int render_current(enum papermono_refresh_quality quality)
 		return ret;
 	}
 	ret = papermono_display_refresh(quality);
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	if (ret == 0) atomic_set(&wifi_layout_transition, 0);
+#endif
 	last_refresh_ms = k_uptime_get();
 	return ret;
 }
 
 static int open_app(enum papermono_app_id target)
 {
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	wifi_advance_input();
+#endif
 	int ret = papermono_app_router_open(&app_router, target);
 
 	if (ret < 0) {
@@ -3477,6 +3773,9 @@ static int enter_power_state(bool shutdown)
 	int ret;
 
 	confirmation = CONFIRM_NONE;
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	wifi_input_close();
+#endif
 	if (!shutdown) {
 		ret = papermono_power_input_wake_ready(1000U);
 		if (ret < 0) {
@@ -3536,6 +3835,12 @@ static int __maybe_unused process_event(
 	const struct papermono_app_event *event)
 {
 	struct papermono_app_command command;
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	if (papermono_app_event_is_touch(event) &&
+	    event->input_generation != (uint32_t)atomic_get(&wifi_input_generation)) {
+		return 0;
+	}
+#endif
 	const bool background_refresh = event->type == PAPERMONO_APP_EVENT_REFRESH ||
 		event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED;
 	if (event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED) {
@@ -3556,6 +3861,9 @@ static int __maybe_unused process_event(
 		return enter_power_state(false);
 	}
 	if (event->type == PAPERMONO_APP_EVENT_HOME) {
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+		wifi_advance_input();
+#endif
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_HOME);
 		if (ret == 0) {
 			/* Home is a stack reset, not another page to return from. */
@@ -3581,6 +3889,9 @@ static int __maybe_unused process_event(
 	case PAPERMONO_APP_COMMAND_OPEN:
 		return open_app(command.target);
 	case PAPERMONO_APP_COMMAND_BACK:
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+		wifi_advance_input();
+#endif
 		ret = papermono_app_router_back(&app_router);
 		if (ret == 0) {
 			(void)papermono_settings_set_active_app(app_router.current);
@@ -3718,8 +4029,8 @@ int papermono_ui_run(void)
 				last_activity_ms = k_uptime_get();
 			}
 			if (papermono_app_event_is_touch(&event)) {
-				LOG_INF("UI processing touch type=%d x=%d y=%d duration=%u app=%d wait=%u ms",
-					event.type, event.x, event.y, event.duration_ms,
+				LOG_DBG("UI processing touch type=%d duration=%u app=%d wait=%u ms",
+					event.type, event.duration_ms,
 					app_router.current,
 					(uint32_t)(k_uptime_get_32() - event.queued_at_ms));
 			}

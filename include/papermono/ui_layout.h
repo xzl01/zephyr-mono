@@ -31,6 +31,18 @@ static const struct papermono_rect library_rescan_rect = {22, 148, 436, 370};
 /* System page: tap target that opens the TF format confirmation when the card
  * carries no filesystem this firmware can mount (exFAT/GPT out of the box). */
 static const struct papermono_rect system_storage_rect = {22, 680, 436, 44};
+/* On-device Wi-Fi: displayed rectangles are also the only touch targets. */
+static const struct papermono_rect wifi_scan_rect = {22, 218, 138, 50};
+static const struct papermono_rect wifi_reconnect_rect = {170, 218, 138, 50};
+static const struct papermono_rect wifi_forget_rect = {318, 218, 140, 50};
+static const struct papermono_interaction_grid_layout wifi_network_grid = {
+	.x = 22, .y = 306, .cell_width = 436, .cell_height = 76,
+	.column_gap = 0, .row_gap = 4, .columns = 1, .rows = 4,
+};
+static const struct papermono_rect wifi_previous_rect = {22, 646, 206, 54};
+static const struct papermono_rect wifi_next_rect = {252, 646, 206, 54};
+static const struct papermono_rect wifi_connect_rect = {22, 292, 436, 54};
+
 enum detail_setting_index {
 	DETAIL_SETTING_SLEEP, DETAIL_SETTING_TIME, DETAIL_SETTING_FRONTLIGHT,
 	DETAIL_SETTING_WIFI, DETAIL_SETTING_BLE, DETAIL_SETTING_RESET,

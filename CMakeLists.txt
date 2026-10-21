@@ -79,6 +79,7 @@ target_sources(app PRIVATE
   src/papermono_rgb_led.c
   src/papermono_ssd1677.c
   src/papermono_ui.c
+  src/papermono_wifi_input.c
 )
 
 target_sources_ifdef(CONFIG_PAPERMONO_FT6336 app PRIVATE

@@ -48,9 +48,9 @@ int main(void)
 	}
 	struct papermono_app_event e = tap(420, 30);
 	const struct papermono_interaction_grid_layout *detail_grids[] = {
-		&detail_list_grid, &detail_menu_grid,
+		&detail_list_grid, &detail_menu_grid, &wifi_network_grid,
 	};
-	for (size_t g = 0; g < 2; ++g) {
+	for (size_t g = 0; g < 3; ++g) {
 		const struct papermono_interaction_grid_layout *grid = detail_grids[g];
 		for (size_t i = 0; i < grid->rows; ++i) {
 			assert(papermono_interaction_grid_cell_rect(grid, i, &rect) == 0);
@@ -105,6 +105,18 @@ int main(void)
 		system_storage_rect.y + system_storage_rect.height / 2);
 	assert(papermono_interaction_contains(&e, PAPERMONO_INTERACTION_TAP,
 		&system_storage_rect));
+	const struct papermono_rect *wifi_buttons[] = {
+		&wifi_scan_rect, &wifi_reconnect_rect, &wifi_forget_rect,
+		&wifi_previous_rect, &wifi_next_rect, &wifi_connect_rect,
+	};
+	for (size_t i = 0; i < sizeof(wifi_buttons) / sizeof(wifi_buttons[0]); ++i) {
+		const struct papermono_rect *r = wifi_buttons[i];
+		assert(r->width >= 44 && r->height >= 44);
+		assert(r->x >= 0 && r->x + r->width <= PAPERMONO_UI_WIDTH);
+		assert(r->y + r->height < UI_DETAIL_FOOTER_TOP);
+		e = tap(r->x + r->width / 2, r->y + r->height / 2);
+		assert(papermono_interaction_contains(&e, PAPERMONO_INTERACTION_TAP, r));
+	}
 	puts("Field Notes UI hit targets and reader page fit: PASS");
 	return 0;
 }

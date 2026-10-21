@@ -136,6 +136,52 @@ static K_WORK_DELAYABLE_DEFINE(station_retry_work, station_retry);
 static atomic_t server_busy;
 K_MUTEX_DEFINE(server_lock);
 
+/* ESP32 scan/connect requests may call back synchronously. Never hold
+ * server_lock across net_mgmt(), NVS writes, or a driver call. All potentially
+ * blocking Wi-Fi operations run here, never on LVGL or the system workqueue.
+ */
+K_THREAD_STACK_DEFINE(wifi_work_stack, 4096);
+static struct k_work_q wifi_work_queue;
+static struct papermono_wifi_state wifi_state;
+static struct papermono_wifi_network scan_networks[PAPERMONO_WIFI_NETWORK_MAX];
+static uint8_t scan_count;
+static bool scan_inflight;
+static struct k_work scan_work;
+static struct k_work_delayable scan_timeout_work;
+static struct k_work_delayable wifi_command_work;
+
+enum wifi_command {
+	WIFI_COMMAND_NONE,
+	WIFI_COMMAND_CONNECT,
+	WIFI_COMMAND_SAVED,
+	WIFI_COMMAND_FORGET,
+	WIFI_COMMAND_RESET,
+};
+
+static enum wifi_command pending_wifi_command;
+static uint8_t wifi_command_phase;
+static int64_t wifi_command_deadline;
+static char pending_wifi_ssid[PAPERMONO_WIFI_SSID_MAX + 1U];
+static char pending_wifi_psk[PAPERMONO_WIFI_PSK_MAX + 1U];
+static void wifi_command_worker(struct k_work *work);
+static void scan_wifi_worker(struct k_work *work);
+static void scan_timeout_worker(struct k_work *work);
+
+static int wifi_reschedule(struct k_work_delayable *work, k_timeout_t delay)
+{
+	return k_work_reschedule_for_queue(&wifi_work_queue, work, delay);
+}
+
+/* Volatile stores prevent optimization from retaining transient credentials. */
+static void wipe_wifi_secret(void *memory, size_t length)
+{
+	volatile unsigned char *cursor = memory;
+
+	while (length-- > 0U) {
+		*cursor++ = 0U;
+	}
+}
+
 static void content_server_set_busy(enum content_server_busy_bit bit,
 	bool busy)
 {
@@ -850,6 +896,7 @@ static void schedule_station_retry(void)
 
 	k_mutex_lock(&server_lock, K_FOREVER);
 	if (server_state.station_connected || server_state.station_connecting ||
+	    wifi_state.request_busy || scan_inflight ||
 	    !papermono_settings_get()->wifi_configured) {
 		k_mutex_unlock(&server_lock);
 		return;
@@ -860,7 +907,7 @@ static void schedule_station_retry(void)
 	}
 	k_mutex_unlock(&server_lock);
 	delay_ms = MIN(STA_RETRY_INITIAL_MS << shift, STA_RETRY_MAX_MS);
-	(void)k_work_reschedule(&station_retry_work, K_MSEC(delay_ms));
+	(void)wifi_reschedule(&station_retry_work, K_MSEC(delay_ms));
 	LOG_INF("Wi-Fi station retry scheduled in %u ms", delay_ms);
 }
 
@@ -873,7 +920,7 @@ static void station_retry(struct k_work *work)
 	}
 	k_mutex_lock(&server_lock, K_FOREVER);
 	const bool busy = server_state.station_connected ||
-		server_state.station_connecting;
+		server_state.station_connecting || wifi_state.request_busy || scan_inflight;
 	k_mutex_unlock(&server_lock);
 	if (busy) {
 		return;
@@ -898,6 +945,7 @@ static int wifi_handler(struct http_client_ctx *client,
 	if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
 	    status == HTTP_SERVER_TRANSACTION_COMPLETE) {
 		if (wifi_request_owner == client) {
+			wipe_wifi_secret(wifi_request_buffer, sizeof(wifi_request_buffer));
 			wifi_request_length = 0U;
 			wifi_request_owner = NULL;
 			wifi_request_authorized = false;
@@ -982,19 +1030,33 @@ static int wifi_handler(struct http_client_ctx *client,
 		wifi_request_buffer[wifi_request_length] = '\0';
 		int parsed = json_obj_parse(wifi_request_buffer, wifi_request_length,
 			wifi_request_descr, ARRAY_SIZE(wifi_request_descr), &request_data);
-		int ret = parsed == BIT_MASK(ARRAY_SIZE(wifi_request_descr)) ?
-			papermono_settings_set_wifi(request_data.ssid, request_data.psk) :
-			-EINVAL;
+		struct papermono_wifi_network network = { .supported = true };
+		int ret = -EINVAL;
+
+		if (parsed == BIT_MASK(ARRAY_SIZE(wifi_request_descr)) &&
+		    request_data.ssid != NULL && request_data.psk != NULL) {
+			const size_t ssid_length = strnlen(request_data.ssid,
+				sizeof(network.ssid));
+
+			if (ssid_length > 0U && ssid_length <= PAPERMONO_WIFI_SSID_LENGTH) {
+				network.ssid_length = ssid_length;
+				memcpy(network.ssid, request_data.ssid, ssid_length);
+				network.security = request_data.psk[0] == '\0' ?
+					PAPERMONO_WIFI_SECURITY_OPEN : PAPERMONO_WIFI_SECURITY_WPA2_PSK;
+				ret = papermono_content_server_connect_wifi(&network, request_data.psk);
+			}
+		}
+		wipe_wifi_secret(wifi_request_buffer, sizeof(wifi_request_buffer));
 		wifi_request_length = 0U;
 		wifi_request_owner = NULL;
 		content_server_set_busy(CONTENT_SERVER_BUSY_WIFI_REQUEST, false);
 		if (ret < 0) {
-			response_json(response, HTTP_400_BAD_REQUEST,
+			response_json(response, ret == -EBUSY ? HTTP_409_CONFLICT : HTTP_400_BAD_REQUEST,
+				ret == -EBUSY ? "{\"error\":\"wifi operation busy\"}" :
 				"{\"error\":\"invalid wifi credentials\"}");
 			return 0;
 		}
 		response_json(response, HTTP_202_ACCEPTED, "{\"ok\":true}");
-		(void)k_work_reschedule(&apply_wifi_work, K_MSEC(500));
 	}
 	return 0;
 }
@@ -1264,26 +1326,50 @@ static int connect_station(void)
 	const struct papermono_preferences *prefs = papermono_settings_get();
 	struct net_if *iface = net_if_get_wifi_sta();
 	struct wifi_connect_req_params config = { 0 };
+	/* A private copy remains valid for the entire synchronous driver call;
+	 * a UI preference write must not alter the memory underneath net_mgmt.
+	 */
+	char ssid[PAPERMONO_WIFI_SSID_MAX + 1U];
+	char psk[PAPERMONO_WIFI_PSK_MAX + 1U];
+	int ret;
 
 	if (iface == NULL || !prefs->wifi_configured) {
 		return -ENODEV;
 	}
-	config.ssid = (const uint8_t *)prefs->wifi_ssid;
-	config.ssid_length = strlen(prefs->wifi_ssid);
-	config.psk = (const uint8_t *)prefs->wifi_psk;
-	config.psk_length = strlen(prefs->wifi_psk);
-	config.security = WIFI_SECURITY_TYPE_PSK;
+	memcpy(ssid, prefs->wifi_ssid, sizeof(ssid));
+	memcpy(psk, prefs->wifi_psk, sizeof(psk));
+	config.ssid_length = strnlen(ssid, sizeof(ssid));
+	config.psk_length = strnlen(psk, sizeof(psk));
+	/* The current ESP32 driver writes a terminator at password[length];
+	 * reject 64-byte legacy PSKs rather than overflowing its 64-byte array.
+	 */
+	if (config.ssid_length == 0U || config.ssid_length > 32U ||
+	    (config.psk_length != 0U &&
+	     (config.psk_length < 8U || config.psk_length > 63U))) {
+		wipe_wifi_secret(psk, sizeof(psk));
+		return -EINVAL;
+	}
+	config.ssid = (const uint8_t *)ssid;
+	config.psk = (const uint8_t *)psk;
+	config.security = config.psk_length == 0U ? WIFI_SECURITY_TYPE_NONE :
+		WIFI_SECURITY_TYPE_PSK;
+	config.mfp = config.psk_length == 0U ? WIFI_MFP_DISABLE : WIFI_MFP_OPTIONAL;
 	config.channel = WIFI_CHANNEL_ANY;
 	config.band = WIFI_FREQ_BAND_2_4_GHZ;
+	config.timeout = 30;
 	k_mutex_lock(&server_lock, K_FOREVER);
 	server_state.station_connecting = true;
+	wifi_state.connection = PAPERMONO_WIFI_CONNECTING;
+	wifi_state.last_connection_error = 0;
 	k_mutex_unlock(&server_lock);
-	const int ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &config,
-		sizeof(config));
-
-	if (ret < 0) {
+	ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &config, sizeof(config));
+	wipe_wifi_secret(psk, sizeof(psk));
+	if (ret != 0) {
+		ret = ret < 0 ? ret : -EIO;
 		k_mutex_lock(&server_lock, K_FOREVER);
 		server_state.station_connecting = false;
+		wifi_state.connection = PAPERMONO_WIFI_CONNECTION_ERROR;
+		wifi_state.last_connection_error = ret;
 		k_mutex_unlock(&server_lock);
 	}
 	return ret;
@@ -1295,7 +1381,8 @@ static void schedule_recovery_ap(void)
 	uint32_t delay_ms;
 
 	k_mutex_lock(&server_lock, K_FOREVER);
-	if (server_state.ap_enabled || server_state.station_connected || ap_enabling) {
+	if (server_state.ap_enabled || server_state.station_connected || ap_enabling ||
+	    wifi_state.request_busy) {
 		k_mutex_unlock(&server_lock);
 		return;
 	}
@@ -1305,20 +1392,316 @@ static void schedule_recovery_ap(void)
 	}
 	k_mutex_unlock(&server_lock);
 	delay_ms = MIN(AP_RETRY_INITIAL_MS << shift, AP_RETRY_MAX_MS);
-	(void)k_work_reschedule(&enable_ap_work, K_MSEC(delay_ms));
+	(void)wifi_reschedule(&enable_ap_work, K_MSEC(delay_ms));
 	LOG_INF("Recovery SoftAP retry scheduled in %u ms", delay_ms);
+}
+
+static enum papermono_wifi_security scan_security(enum wifi_security_type type)
+{
+	if (type == WIFI_SECURITY_TYPE_NONE) {
+		return PAPERMONO_WIFI_SECURITY_OPEN;
+	}
+	if (type == WIFI_SECURITY_TYPE_PSK) {
+		return PAPERMONO_WIFI_SECURITY_WPA2_PSK;
+	}
+	return PAPERMONO_WIFI_SECURITY_UNSUPPORTED;
+}
+
+/* Called only with server_lock held. Keep strongest BSS for each SSID/security,
+ * then keep the strongest bounded set. No driver or UI calls from this helper.
+ */
+static void scan_add_locked(const struct wifi_scan_result *result)
+{
+	struct papermono_wifi_network network = { 0 };
+	uint8_t index;
+
+	if (result->ssid_length > PAPERMONO_WIFI_SSID_LENGTH) {
+		return;
+	}
+	network.ssid_length = result->ssid_length;
+	memcpy(network.ssid, result->ssid, network.ssid_length);
+	network.ssid[network.ssid_length] = '\0';
+	network.rssi = result->rssi;
+	network.channel = result->channel;
+	network.security = scan_security(result->security);
+	network.hidden = network.ssid_length == 0U;
+	network.supported = !network.hidden &&
+		memchr(network.ssid, '\0', network.ssid_length) == NULL &&
+		result->band == WIFI_FREQ_BAND_2_4_GHZ &&
+		network.security != PAPERMONO_WIFI_SECURITY_UNSUPPORTED;
+	for (index = 0U; index < scan_count; ++index) {
+		if (scan_networks[index].ssid_length == network.ssid_length &&
+		    scan_networks[index].security == network.security &&
+		    scan_networks[index].supported == network.supported &&
+		    memcmp(scan_networks[index].ssid, network.ssid,
+			 network.ssid_length) == 0) {
+			if (scan_networks[index].rssi >= network.rssi) {
+				return;
+			}
+			break;
+		}
+	}
+	if (index == scan_count) {
+		if (scan_count < PAPERMONO_WIFI_NETWORK_MAX) {
+			++scan_count;
+		} else {
+			index = scan_count - 1U;
+			if (scan_networks[index].rssi >= network.rssi) {
+				return;
+			}
+		}
+	}
+	scan_networks[index] = network;
+	while (index > 0U && scan_networks[index].rssi >
+	       scan_networks[index - 1U].rssi) {
+		const struct papermono_wifi_network previous = scan_networks[index - 1U];
+
+		scan_networks[index - 1U] = scan_networks[index];
+		scan_networks[index--] = previous;
+	}
+}
+
+static void finish_scan_locked(int error)
+{
+	wifi_state.scan_busy = false;
+	wifi_state.scan_error = error;
+	wifi_state.count = scan_count;
+	memcpy(wifi_state.networks, scan_networks, sizeof(scan_networks));
+	++wifi_state.scan_generation;
+}
+
+static void scan_wifi_worker(struct k_work *work)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	struct wifi_scan_params params = { .scan_type = WIFI_SCAN_TYPE_ACTIVE };
+	int ret;
+
+	ARG_UNUSED(work);
+	/* Arm before issuing: the driver may report results and DONE before
+	 * net_mgmt returns. A nonzero return is failure, not a pending scan.
+	 */
+	(void)wifi_reschedule(&scan_timeout_work, K_SECONDS(30));
+	ret = iface == NULL ? -ENODEV :
+		net_mgmt(NET_REQUEST_WIFI_SCAN, iface, &params, sizeof(params));
+	if (ret != 0) {
+		k_mutex_lock(&server_lock, K_FOREVER);
+		if (scan_inflight) {
+			scan_inflight = false;
+			finish_scan_locked(ret < 0 ? ret : -EIO);
+		}
+		k_mutex_unlock(&server_lock);
+		(void)k_work_cancel_delayable(&scan_timeout_work);
+		schedule_station_retry();
+		papermono_ui_request_background_refresh();
+	}
+}
+
+static void scan_timeout_worker(struct k_work *work)
+{
+	bool changed = false;
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&server_lock, K_FOREVER);
+	if (scan_inflight && wifi_state.scan_busy) {
+		finish_scan_locked(-ETIMEDOUT);
+		/* Do not reuse this slot until the old DONE arrives: Zephyr has no
+		 * scan transaction ID/cancel API to distinguish late results.
+		 */
+		changed = true;
+	}
+	k_mutex_unlock(&server_lock);
+	if (changed) {
+		papermono_ui_request_background_refresh();
+	}
+}
+
+static int reset_wifi_now(void);
+
+static void wifi_command_complete(int error)
+{
+	k_mutex_lock(&server_lock, K_FOREVER);
+	pending_wifi_command = WIFI_COMMAND_NONE;
+	wifi_command_phase = 0U;
+	wifi_state.request_busy = false;
+	if (error != 0) {
+		wifi_state.last_connection_error = error < 0 ? error : -EIO;
+		wifi_state.connection = PAPERMONO_WIFI_CONNECTION_ERROR;
+	}
+	wipe_wifi_secret(pending_wifi_psk, sizeof(pending_wifi_psk));
+	memset(pending_wifi_ssid, 0, sizeof(pending_wifi_ssid));
+	k_mutex_unlock(&server_lock);
+	schedule_station_retry();
+	schedule_recovery_ap();
+	papermono_ui_request_background_refresh();
+}
+
+static void wifi_command_worker(struct k_work *work)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	enum wifi_command command;
+	bool linking;
+	int ret = 0;
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&server_lock, K_FOREVER);
+	command = pending_wifi_command;
+	linking = server_state.station_connected || server_state.station_connecting;
+	k_mutex_unlock(&server_lock);
+	if (command == WIFI_COMMAND_NONE) {
+		return;
+	}
+	if (wifi_command_phase == 0U) {
+		(void)k_work_cancel_delayable(&station_retry_work);
+		(void)k_work_cancel_delayable(&apply_wifi_work);
+		(void)k_work_cancel_delayable(&disable_ap_work);
+		(void)k_work_cancel_delayable(&enable_ap_work);
+		/* Persist before disturbing a working station. NVS failure leaves
+		 * the previous production connection and preferences untouched.
+		 */
+		if (command == WIFI_COMMAND_CONNECT) {
+			ret = papermono_settings_set_wifi(pending_wifi_ssid, pending_wifi_psk);
+		} else if (command == WIFI_COMMAND_FORGET || command == WIFI_COMMAND_RESET) {
+			ret = papermono_settings_clear_wifi();
+		}
+		wipe_wifi_secret(pending_wifi_psk, sizeof(pending_wifi_psk));
+		if (ret != 0) {
+			wifi_command_complete(ret);
+			return;
+		}
+		k_mutex_lock(&server_lock, K_FOREVER);
+		wifi_state.configured = papermono_settings_get()->wifi_configured;
+		memcpy(wifi_state.saved_ssid, papermono_settings_get()->wifi_ssid,
+			sizeof(wifi_state.saved_ssid));
+		wifi_state.saved_ssid[PAPERMONO_WIFI_SSID_LENGTH] = '\0';
+		k_mutex_unlock(&server_lock);
+		k_mutex_lock(&server_lock, K_FOREVER);
+		wifi_command_phase = 1U;
+		k_mutex_unlock(&server_lock);
+		wifi_command_deadline = k_uptime_get() + 5000;
+		if (linking) {
+			ret = iface == NULL ? -ENODEV :
+				net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0U);
+			if (ret != 0) {
+				wifi_command_complete(ret);
+				return;
+			}
+			(void)wifi_reschedule(&wifi_command_work, K_MSEC(50));
+			return;
+		}
+	}
+	if (wifi_command_phase == 1U) {
+		if (linking) {
+			if (k_uptime_get() >= wifi_command_deadline) {
+				wifi_command_complete(-ETIMEDOUT);
+			} else {
+				(void)wifi_reschedule(&wifi_command_work, K_MSEC(50));
+			}
+			return;
+		}
+		if (command == WIFI_COMMAND_FORGET || command == WIFI_COMMAND_RESET) {
+			struct net_if *ap = net_if_get_wifi_sap();
+			k_mutex_lock(&server_lock, K_FOREVER);
+			const bool ap_enabled = server_state.ap_enabled;
+			const bool ap_starting = ap_enabling;
+			k_mutex_unlock(&server_lock);
+			/* AP_ENABLE may still be in flight when forget is pressed.
+			 * Wait for that result before stopping/rotating its credentials.
+			 */
+			if (ap_starting) {
+				if (k_uptime_get() >= wifi_command_deadline) {
+					wifi_command_complete(-ETIMEDOUT);
+				} else {
+					(void)wifi_reschedule(&wifi_command_work, K_MSEC(50));
+				}
+				return;
+			}
+			if (ap_enabled) {
+				ret = ap == NULL ? -ENODEV :
+					net_mgmt(NET_REQUEST_WIFI_AP_DISABLE, ap, NULL, 0U);
+				if (ret != 0) {
+					wifi_command_complete(ret);
+					return;
+				}
+				k_mutex_lock(&server_lock, K_FOREVER);
+				wifi_command_phase = 3U;
+				k_mutex_unlock(&server_lock);
+				wifi_command_deadline = k_uptime_get() + 5000;
+				(void)wifi_reschedule(&wifi_command_work, K_MSEC(50));
+			} else {
+				ret = reset_wifi_now();
+				wifi_command_complete(ret);
+			}
+			return;
+		}
+		k_mutex_lock(&server_lock, K_FOREVER);
+		wifi_command_phase = 2U;
+		k_mutex_unlock(&server_lock);
+		wifi_command_deadline = k_uptime_get() + 35000;
+		ret = connect_station();
+		if (ret != 0) {
+			wifi_command_complete(ret);
+			schedule_station_retry();
+			return;
+		}
+	}
+	if (wifi_command_phase == 3U) {
+		k_mutex_lock(&server_lock, K_FOREVER);
+		const bool ap_enabled = server_state.ap_enabled;
+		k_mutex_unlock(&server_lock);
+		if (!ap_enabled) {
+			ret = reset_wifi_now();
+			wifi_command_complete(ret);
+		} else if (k_uptime_get() >= wifi_command_deadline) {
+			wifi_command_complete(-ETIMEDOUT);
+		} else {
+			(void)wifi_reschedule(&wifi_command_work, K_MSEC(50));
+		}
+		return;
+	}
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const bool connecting = server_state.station_connecting;
+	const int connection_error = wifi_state.last_connection_error;
+	k_mutex_unlock(&server_lock);
+	if (!connecting) {
+		wifi_command_complete(connection_error);
+	} else if (k_uptime_get() >= wifi_command_deadline) {
+		/* Terminate a lost callback, but do not sleep/wait in this queue. */
+		if (iface != NULL) {
+			(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0U);
+		}
+		k_mutex_lock(&server_lock, K_FOREVER);
+		server_state.station_connecting = false;
+		k_mutex_unlock(&server_lock);
+		wifi_command_complete(-ETIMEDOUT);
+		schedule_station_retry();
+	} else {
+		(void)wifi_reschedule(&wifi_command_work, K_MSEC(100));
+	}
 }
 
 static void apply_wifi(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const bool defer = scan_inflight;
+	const bool command_busy = wifi_state.request_busy;
+	k_mutex_unlock(&server_lock);
+	if (command_busy) {
+		return;
+	}
+	if (defer) {
+		(void)wifi_reschedule(&apply_wifi_work, K_MSEC(200));
+		return;
+	}
 	const int ret = connect_station();
 
 	if (ret < 0) {
 		LOG_WRN("Unable to start station connection (%d); keeping setup AP",
 			ret);
 		schedule_recovery_ap();
+		schedule_station_retry();
 	}
+	papermono_ui_request_background_refresh();
 }
 
 static void enable_ap_worker(struct k_work *work)
@@ -1394,7 +1777,7 @@ static void verify_ap_worker(struct k_work *work)
 			(int)MIN(status.ssid_len, sizeof(status.ssid)), status.ssid);
 	}
 	if (retry) {
-		(void)k_work_reschedule(&ap_health_work,
+		(void)wifi_reschedule(&ap_health_work,
 			K_MSEC(AP_HEALTH_DELAY_MS));
 	} else if (restart) {
 		LOG_ERR("SoftAP reported enabled but failed interface verification; "
@@ -1432,7 +1815,42 @@ static void disable_ap(struct k_work *work)
 static void wifi_event(struct net_mgmt_event_callback *callback,
 	uint64_t event, struct net_if *iface)
 {
-	const struct wifi_status *status = callback->info;
+	if (event == NET_EVENT_WIFI_SCAN_RESULT || event == NET_EVENT_WIFI_SCAN_DONE) {
+		bool changed = false;
+
+		if (iface != net_if_get_wifi_sta()) {
+			return;
+		}
+		k_mutex_lock(&server_lock, K_FOREVER);
+		if (scan_inflight && event == NET_EVENT_WIFI_SCAN_RESULT &&
+		    wifi_state.scan_busy && callback->info != NULL &&
+		    callback->info_length >= sizeof(struct wifi_scan_result)) {
+			scan_add_locked(callback->info);
+		} else if (scan_inflight && event == NET_EVENT_WIFI_SCAN_DONE) {
+			const struct wifi_status *done = callback->info;
+			int error = done != NULL && callback->info_length >= sizeof(*done) ?
+				done->status : -ENODATA;
+
+			scan_inflight = false;
+			if (wifi_state.scan_busy) {
+				finish_scan_locked(error == 0 ? 0 : error < 0 ? error : -EIO);
+			}
+			changed = true;
+		}
+		k_mutex_unlock(&server_lock);
+		if (changed) {
+			(void)k_work_cancel_delayable(&scan_timeout_work);
+			schedule_station_retry();
+			papermono_ui_request_background_refresh();
+		}
+		return;
+	}
+	if ((event == NET_EVENT_WIFI_CONNECT_RESULT ||
+	     event == NET_EVENT_WIFI_DISCONNECT_RESULT) && iface != net_if_get_wifi_sta()) {
+		return;
+	}
+	const struct wifi_status *status = callback->info != NULL &&
+		callback->info_length >= sizeof(struct wifi_status) ? callback->info : NULL;
 	const bool success = status != NULL && status->status == 0;
 	bool request_time_sync = false;
 	bool request_ap = false;
@@ -1469,6 +1887,10 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 	} else if (event == NET_EVENT_WIFI_CONNECT_RESULT) {
 		server_state.station_connecting = false;
 		server_state.station_connected = success;
+		wifi_state.connection = success ? PAPERMONO_WIFI_CONNECTED :
+			PAPERMONO_WIFI_CONNECTION_ERROR;
+		wifi_state.last_connection_error = success ? 0 :
+			status == NULL ? -ENODATA : status->status < 0 ? status->status : -EIO;
 		request_time_sync = success;
 		if (success) {
 			ap_retry_shift = 0U;
@@ -1478,7 +1900,7 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 		request_ap = !success && !server_state.ap_enabled;
 		request_station_retry = !success;
 		if (success && server_state.ap_enabled) {
-			(void)k_work_reschedule(&disable_ap_work,
+			(void)wifi_reschedule(&disable_ap_work,
 				K_MSEC(AP_HANDOFF_DELAY_MS));
 		}
 		LOG_INF("Wi-Fi station connect %s (status=%d)",
@@ -1491,6 +1913,14 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 		 */
 		server_state.station_connecting = false;
 		server_state.station_connected = false;
+		/* A disconnect in command phase 1 is intentional. A disconnect while
+		 * authenticating (ESP32 reports failures via this event) is an error.
+		 */
+		const bool intentional = wifi_state.request_busy && wifi_command_phase == 1U;
+		wifi_state.connection = intentional ? PAPERMONO_WIFI_DISCONNECTED :
+			PAPERMONO_WIFI_CONNECTION_ERROR;
+		wifi_state.last_connection_error = intentional ? 0 :
+			status == NULL ? -ENODATA : status->status < 0 ? status->status : -ENOTCONN;
 		request_ap = !server_state.ap_enabled;
 		request_station_retry = true;
 		LOG_INF("Wi-Fi station disconnect event (status=%d)",
@@ -1507,7 +1937,7 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 		}
 	}
 	if (request_ap_health) {
-		(void)k_work_reschedule(&ap_health_work,
+		(void)wifi_reschedule(&ap_health_work,
 			K_MSEC(AP_HEALTH_DELAY_MS));
 	} else if (cancel_ap_health) {
 		(void)k_work_cancel_delayable(&ap_health_work);
@@ -1608,13 +2038,23 @@ int papermono_content_server_init(void)
 {
 	const uint64_t event_mask = NET_EVENT_WIFI_CONNECT_RESULT |
 		NET_EVENT_WIFI_DISCONNECT_RESULT | NET_EVENT_WIFI_AP_ENABLE_RESULT |
-		NET_EVENT_WIFI_AP_DISABLE_RESULT;
+		NET_EVENT_WIFI_AP_DISABLE_RESULT | NET_EVENT_WIFI_SCAN_RESULT |
+		NET_EVENT_WIFI_SCAN_DONE;
 	int ret;
 
 	if (initialized) {
 		return 0;
 	}
 	generate_credentials();
+	k_work_queue_start(&wifi_work_queue, wifi_work_stack,
+		K_THREAD_STACK_SIZEOF(wifi_work_stack), 7, NULL);
+	k_work_init(&scan_work, scan_wifi_worker);
+	k_work_init_delayable(&scan_timeout_work, scan_timeout_worker);
+	k_work_init_delayable(&wifi_command_work, wifi_command_worker);
+	wifi_state.configured = papermono_settings_get()->wifi_configured;
+	memcpy(wifi_state.saved_ssid, papermono_settings_get()->wifi_ssid,
+		sizeof(wifi_state.saved_ssid));
+	wifi_state.saved_ssid[PAPERMONO_WIFI_SSID_LENGTH] = '\0';
 	k_work_init_delayable(&apply_wifi_work, apply_wifi);
 	k_work_init_delayable(&enable_ap_work, enable_ap_worker);
 	k_work_init_delayable(&disable_ap_work, disable_ap);
@@ -1631,20 +2071,15 @@ int papermono_content_server_init(void)
 	if (ret < 0) {
 		return ret;
 	}
-	if (papermono_settings_get()->wifi_configured) {
-		ret = connect_station();
-		if (ret < 0) {
-			LOG_WRN("Saved Wi-Fi could not start (%d); enabling setup AP", ret);
-			ret = enable_ap();
-		}
-	} else {
-		ret = enable_ap();
-	}
-	if (ret < 0) {
-		LOG_WRN("Wi-Fi interface is not ready yet (%d); retrying setup AP", ret);
-		schedule_recovery_ap();
-	}
+	/* Boot restoration follows the same private queue as UI and retries;
+	 * saved production NVS credentials are neither rewritten nor logged.
+	 */
 	initialized = true;
+	if (papermono_settings_get()->wifi_configured) {
+		(void)wifi_reschedule(&apply_wifi_work, K_NO_WAIT);
+	} else {
+		(void)wifi_reschedule(&enable_ap_work, K_NO_WAIT);
+	}
 	/* Log the SSID only. The AP password and the pairing code are live
 	 * credentials: this firmware's only diagnostic channel is the USB
 	 * serial/JTAG console, and capture logs are routinely pasted into
@@ -1681,19 +2116,154 @@ void papermono_content_server_get_state(
 
 bool papermono_content_server_busy(void)
 {
-	return atomic_get(&server_busy) != 0;
+	bool wifi_busy;
+
+	k_mutex_lock(&server_lock, K_FOREVER);
+	wifi_busy = wifi_state.request_busy || wifi_state.scan_busy;
+	k_mutex_unlock(&server_lock);
+	return atomic_get(&server_busy) != 0 || wifi_busy;
+}
+
+void papermono_content_server_get_wifi_state(struct papermono_wifi_state *state)
+{
+	if (state == NULL) {
+		return;
+	}
+	k_mutex_lock(&server_lock, K_FOREVER);
+	*state = wifi_state;
+	k_mutex_unlock(&server_lock);
+}
+
+int papermono_content_server_scan_wifi(void)
+{
+	int ret;
+
+	k_mutex_lock(&server_lock, K_FOREVER);
+	if (!initialized) {
+		ret = -EAGAIN;
+	} else if (scan_inflight || wifi_state.request_busy ||
+		   server_state.station_connecting) {
+		ret = -EBUSY;
+	} else {
+		scan_inflight = true;
+		scan_count = 0U;
+		memset(scan_networks, 0, sizeof(scan_networks));
+		wifi_state.scan_busy = true;
+		wifi_state.scan_error = 0;
+		ret = k_work_submit_to_queue(&wifi_work_queue, &scan_work);
+		if (ret < 0) {
+			scan_inflight = false;
+			finish_scan_locked(ret);
+		} else {
+			ret = 0;
+		}
+	}
+	k_mutex_unlock(&server_lock);
+	return ret;
+}
+
+/* Caller holds server_lock; submit itself never invokes the handler inline. */
+static int submit_wifi_command_locked(enum wifi_command command)
+{
+	if (!initialized) {
+		return -EAGAIN;
+	}
+	if (wifi_state.request_busy || scan_inflight) {
+		return -EBUSY;
+	}
+	pending_wifi_command = command;
+	wifi_command_phase = 0U;
+	wifi_state.request_busy = true;
+	wifi_state.last_connection_error = 0;
+	const int ret = wifi_reschedule(&wifi_command_work, K_NO_WAIT);
+
+	if (ret < 0) {
+		pending_wifi_command = WIFI_COMMAND_NONE;
+		wifi_state.request_busy = false;
+		return ret;
+	}
+	return 0;
+}
+
+int papermono_content_server_connect_wifi(
+	const struct papermono_wifi_network *network, const char *password)
+{
+	if (network == NULL || password == NULL || network->ssid_length == 0U ||
+	    network->ssid_length > PAPERMONO_WIFI_SSID_LENGTH ||
+	    memchr(network->ssid, '\0', network->ssid_length) != NULL) {
+		return -EINVAL;
+	}
+	if (network->hidden || !network->supported ||
+	    (network->security != PAPERMONO_WIFI_SECURITY_OPEN &&
+	     network->security != PAPERMONO_WIFI_SECURITY_WPA2_PSK)) {
+		return -ENOTSUP;
+	}
+	const size_t length = strnlen(password, PAPERMONO_WIFI_PSK_MAX + 1U);
+
+	if ((network->security == PAPERMONO_WIFI_SECURITY_OPEN && length != 0U) ||
+	    (network->security == PAPERMONO_WIFI_SECURITY_WPA2_PSK &&
+	     (length < 8U || length > 63U))) {
+		return -EINVAL;
+	}
+	for (size_t index = 0U; index < length; ++index) {
+		if ((unsigned char)password[index] < 0x20U ||
+		    (unsigned char)password[index] > 0x7eU) {
+			return -EINVAL;
+		}
+	}
+	k_mutex_lock(&server_lock, K_FOREVER);
+	/* Reserve and copy under the same lock so another UI/HTTP caller cannot
+	 * overwrite a command's credentials while its NVS write is running.
+	 */
+	int ret;
+
+	if (!initialized || wifi_state.request_busy || scan_inflight) {
+		ret = !initialized ? -EAGAIN : -EBUSY;
+	} else {
+		memset(pending_wifi_ssid, 0, sizeof(pending_wifi_ssid));
+		memcpy(pending_wifi_ssid, network->ssid, network->ssid_length);
+		memset(pending_wifi_psk, 0, sizeof(pending_wifi_psk));
+		memcpy(pending_wifi_psk, password, length);
+		ret = submit_wifi_command_locked(WIFI_COMMAND_CONNECT);
+		if (ret != 0) {
+			wipe_wifi_secret(pending_wifi_psk, sizeof(pending_wifi_psk));
+		}
+	}
+	k_mutex_unlock(&server_lock);
+	return ret;
+}
+
+int papermono_content_server_connect_saved(void)
+{
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const int ret = !wifi_state.configured ? -ENOENT :
+		submit_wifi_command_locked(WIFI_COMMAND_SAVED);
+	k_mutex_unlock(&server_lock);
+	return ret;
+}
+
+int papermono_content_server_forget_wifi(void)
+{
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const int ret = submit_wifi_command_locked(WIFI_COMMAND_FORGET);
+	k_mutex_unlock(&server_lock);
+	return ret;
 }
 
 int papermono_content_server_reset_wifi(void)
 {
-	int ret = papermono_settings_clear_wifi();
-	if (ret < 0) {
-		return ret;
-	}
-	struct net_if *station = net_if_get_wifi_sta();
-	if (station != NULL) {
-		(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, station, NULL, 0U);
-	}
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const int ret = submit_wifi_command_locked(WIFI_COMMAND_RESET);
+	k_mutex_unlock(&server_lock);
+	return ret;
+}
+
+static int reset_wifi_now(void)
+{
+	int ret;
+	/* NVS erase, station disconnect and AP stop completed in the worker.
+	 * Only now may the displayed and broadcast AP credentials rotate.
+	 */
 	(void)k_work_cancel_delayable(&disable_ap_work);
 	(void)k_work_cancel_delayable(&ap_health_work);
 	k_mutex_lock(&server_lock, K_FOREVER);
@@ -1701,6 +2271,8 @@ int papermono_content_server_reset_wifi(void)
 	server_state.station_connecting = false;
 	server_state.client_paired = false;
 	server_state.ap_verified = false;
+	wifi_state.connection = PAPERMONO_WIFI_DISCONNECTED;
+	wifi_state.last_connection_error = 0;
 	ap_health_failures = 0U;
 	ap_retry_shift = 0U;
 	station_retry_shift = 0U;
