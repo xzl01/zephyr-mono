@@ -191,3 +191,8 @@ cc -std=c17 -Wall -Wextra -Werror -ftrivial-auto-var-init=pattern \
 	src/papermono_archive_safety.c src/papermono_text_codec.c \
 	src/generated/papermono_gbk_table.c -o "$build_dir/test_zip_reader"
 "$build_dir/test_zip_reader"
+cc -std=c17 -Wall -Wextra -Werror -pthread \
+	-Itests/host/stubs-thread -Itests/host/stubs -Iinclude \
+	tests/host/test_settings_concurrency.c src/papermono_settings.c \
+	-o "$build_dir/test_settings_concurrency"
+"$build_dir/test_settings_concurrency"

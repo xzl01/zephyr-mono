@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/crc.h>
@@ -12,6 +13,12 @@
 #include <papermono/settings.h>
 
 LOG_MODULE_REGISTER(papermono_settings, LOG_LEVEL_INF);
+
+/* Settings setters run on the UI thread, while the content server persists
+ * Wi-Fi credentials from its own workqueue. Every read-modify-write below is
+ * serialised so one writer cannot store a stale copy of the other's fields.
+ */
+K_MUTEX_DEFINE(settings_lock);
 
 #if defined(CONFIG_PAPERMONO_UI_IDLE_SLEEP_DEFAULT_MINUTES)
 #define PAPERMONO_DEFAULT_SLEEP_MINUTES \
@@ -385,9 +392,13 @@ int papermono_settings_set_active_app(enum papermono_app_id app)
 	if (app >= PAPERMONO_APP_COUNT) {
 		return -EINVAL;
 	}
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	candidate.active_app = app;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_idle_sleep(uint8_t minutes)
@@ -395,9 +406,13 @@ int papermono_settings_set_idle_sleep(uint8_t minutes)
 	if (!sleep_minutes_valid(minutes)) {
 		return -EINVAL;
 	}
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	candidate.idle_sleep_minutes = minutes;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_frontlight(uint8_t percent)
@@ -405,16 +420,24 @@ int papermono_settings_set_frontlight(uint8_t percent)
 	if (percent > PAPERMONO_FRONTLIGHT_MAX) {
 		return -EINVAL;
 	}
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	candidate.frontlight_percent = percent;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_time_format(bool use_24_hour)
 {
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	candidate.use_24_hour = use_24_hour;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_reader_density(
@@ -423,16 +446,24 @@ int papermono_settings_set_reader_density(
 	if (density > PAPERMONO_READER_DENSITY_RELAXED) {
 		return -EINVAL;
 	}
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	candidate.reader_density = density;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_reader_resume(bool resume)
 {
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	candidate.reader_resume = resume;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_timezone(const char *name, int16_t offset_minutes)
@@ -445,11 +476,15 @@ int papermono_settings_set_timezone(const char *name, int16_t offset_minutes)
 	    offset_minutes < -720 || offset_minutes > 840) {
 		return -EINVAL;
 	}
+		k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	memset(candidate.timezone, 0, sizeof(candidate.timezone));
 	memcpy(candidate.timezone, name, length);
 	candidate.timezone_offset_minutes = offset_minutes;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_wifi(const char *ssid, const char *psk)
@@ -463,6 +498,7 @@ int papermono_settings_set_wifi(const char *ssid, const char *psk)
 	    (psk_length != 0U && psk_length < 8U) || psk_length > PAPERMONO_WIFI_PSK_MAX) {
 		return -EINVAL;
 	}
+	k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	memset(candidate.wifi_ssid, 0, sizeof(candidate.wifi_ssid));
 	memset(candidate.wifi_psk, 0, sizeof(candidate.wifi_psk));
@@ -471,16 +507,23 @@ int papermono_settings_set_wifi(const char *ssid, const char *psk)
 		memcpy(candidate.wifi_psk, psk, psk_length);
 	}
 	candidate.wifi_configured = true;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_clear_wifi(void)
 {
+	k_mutex_lock(&settings_lock, K_FOREVER);
 	struct papermono_preferences candidate = preferences;
 	memset(candidate.wifi_ssid, 0, sizeof(candidate.wifi_ssid));
 	memset(candidate.wifi_psk, 0, sizeof(candidate.wifi_psk));
 	candidate.wifi_configured = false;
-	return persist_preferences(&candidate, false);
+	const int ret = persist_preferences(&candidate, false);
+
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_reset(void)
@@ -497,8 +540,10 @@ int papermono_settings_reset(void)
 		"papermono/wifi_ssid",
 		"papermono/wifi_psk",
 	};
+	k_mutex_lock(&settings_lock, K_FOREVER);
 	int ret = persist_preferences(&defaults, true);
 
+	k_mutex_unlock(&settings_lock);
 	if (ret < 0) {
 		return ret;
 	}
