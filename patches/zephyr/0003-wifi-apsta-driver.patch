@@ -1,0 +1,66 @@
+diff --git a/drivers/wifi/esp32/src/esp_wifi_drv.c b/drivers/wifi/esp32/src/esp_wifi_drv.c
+index d96c3bfd8..e1f83140c 100644
+--- a/drivers/wifi/esp32/src/esp_wifi_drv.c
++++ b/drivers/wifi/esp32/src/esp_wifi_drv.c
+@@ -93,15 +93,39 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt
+ 	}
+ }
+ 
++static struct esp32_wifi_runtime *esp32_wifi_data_get(struct net_if *iface)
++{
++#if defined(CONFIG_ESP32_WIFI_AP_STA_MODE)
++	if (iface == esp32_wifi_iface_ap) {
++		return &esp32_ap_sta_data;
++	}
++#endif
++
++	__ASSERT(iface == esp32_wifi_iface, "Invalid ESP32 Wi-Fi interface");
++	return &esp32_data;
++}
++
+ static int esp32_wifi_send(const struct device *dev, struct net_pkt *pkt)
+ {
+-	struct esp32_wifi_runtime *data = dev->data;
++	struct esp32_wifi_runtime *data =
++		esp32_wifi_data_get(net_pkt_iface(pkt));
+ 	const int pkt_len = net_pkt_get_len(pkt);
+-	esp_interface_t ifx = data->state == ESP32_AP_CONNECTED ? ESP_IF_WIFI_AP : ESP_IF_WIFI_STA;
++	const bool ap_running = data->state == ESP32_AP_STARTED ||
++		data->state == ESP32_AP_CONNECTED ||
++		data->state == ESP32_AP_DISCONNECTED;
++	const bool sta_connected = data->state == ESP32_STA_CONNECTED;
++	esp_interface_t ifx = ap_running ? ESP_IF_WIFI_AP : ESP_IF_WIFI_STA;
++
++	ARG_UNUSED(dev);
+ 
+-	if (data->state != ESP32_STA_CONNECTED && data->state != ESP32_AP_CONNECTED) {
++	if (!sta_connected && !ap_running) {
+ 		return -EIO;
+ 	}
++	if (pkt_len > sizeof(data->frame_buf)) {
++		LOG_ERR("Packet too large to send: %d > %zu", pkt_len,
++			sizeof(data->frame_buf));
++		return -EMSGSIZE;
++	}
+ 
+ 	/* Read the packet payload */
+ 	if (net_pkt_read(pkt, data->frame_buf, pkt_len) < 0) {
+@@ -513,6 +537,10 @@ static int esp32_wifi_connect(const struct device *dev,
+ 		return -EAGAIN;
+ 	}
+ 
++	/* Disable WiFi power saving to keep the radio responsive for
++	 * authentication frames when BLE is also active. */
++	(void)esp_wifi_set_ps(WIFI_PS_NONE);
++
+ 	if (data->state != ESP32_STA_STARTED) {
+ 		LOG_ERR("Wi-Fi not in station mode");
+ 		wifi_mgmt_raise_connect_result_event(iface, -1);
+@@ -541,6 +569,7 @@ static int esp32_wifi_connect(const struct device *dev,
+ 		memcpy(wifi_config.sta.password, params->psk, params->psk_length);
+ 		wifi_config.sta.password[params->psk_length] = '\0';
+ 		wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
++		wifi_config.sta.pmf_cfg.capable = true;
+ 		wifi_config.sta.pmf_cfg.required = false;
+ 		data->status.security = WIFI_AUTH_WPA2_PSK;
+ 		break;

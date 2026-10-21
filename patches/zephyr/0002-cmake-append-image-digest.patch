@@ -1,0 +1,20 @@
+diff --git a/soc/espressif/common/CMakeLists.txt b/soc/espressif/common/CMakeLists.txt
+index dfede296b..8809eeedd 100644
+--- a/soc/espressif/common/CMakeLists.txt
++++ b/soc/espressif/common/CMakeLists.txt
+@@ -44,6 +44,15 @@ if((CONFIG_ESP_SIMPLE_BOOT OR CONFIG_MCUBOOT) AND NOT (CONFIG_SOC_ESP32C5_LPCORE
+       --flash-size ${esptoolpy_flashsize}MB
+       -o ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_BIN_NAME}
+       ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_ELF_NAME})
++
++    # --ram-only-header forces esptool to omit the image SHA-256 digest, which
++    # makes the ROM report "SHA-256 comparison failed". Re-add it in place.
++    if(NOT CONFIG_MCUBOOT AND EXISTS ${CMAKE_SOURCE_DIR}/scripts/append_esp_digest.py)
++      set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
++        COMMAND ${PYTHON_EXECUTABLE}
++        ARGS ${CMAKE_SOURCE_DIR}/scripts/append_esp_digest.py
++             ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_BIN_NAME})
++    endif()
+   endif()
+ endif()
+ 

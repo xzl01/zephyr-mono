@@ -1,0 +1,33 @@
+diff --git a/soc/espressif/common/loader.c b/soc/espressif/common/loader.c
+index 06001713c..b207d44fa 100644
+--- a/soc/espressif/common/loader.c
++++ b/soc/espressif/common/loader.c
+@@ -181,6 +181,12 @@ void map_rom_segments(int core, struct rom_segments *map)
+ 
+ 		if (ram_segments == bootloader_image_hdr.segment_count && !checksum) {
+ 			offset += (CHECKSUM_ALIGN - 1) - (offset % CHECKSUM_ALIGN) + 1;
++			if (bootloader_image_hdr.hash_appended) {
++				/* An appended SHA-256 digest must not be parsed as a
++				 * segment header by the continued scan.
++				 */
++				offset += 32;
++			}
+ 			checksum = true;
+ 		}
+ 	}
+@@ -316,8 +322,13 @@ void __start(void)
+ 
+ 	__asm__ __volatile__("" : : "g"(&__bss_start) : "memory");
+ 
+-	/* Disable normal interrupts. */
+-	__asm__ __volatile__("wsr %0, PS" : : "r"(PS_INTLEVEL(XCHAL_EXCM_LEVEL) | PS_UM | PS_WOE));
++	/* Mask every interrupt level until the kernel has installed its
++	 * per-CPU IRQ stack.  A whole-chip reset can leave a peripheral
++	 * interrupt pending; taking it while _kernel.cpus[0].irq_stack is
++	 * still zero makes the entry code fault (double exception).
++	 */
++	__asm__ __volatile__("wsr %0, PS" : : "r"(PS_INTLEVEL(XCHAL_NUM_INTLEVELS) |
++						 PS_UM | PS_WOE));
+ 
+ 	/* Initialize the architecture CPU pointer.  Some of the
+ 	 * initialization code wants a valid arch_curr_cpu() before
