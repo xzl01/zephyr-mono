@@ -175,4 +175,5 @@ python3 tests/host/test_field_notes_assets.py
 python3 tests/host/test_content_web.py
 python3 tests/host/test_usb_reset.py
 python3 tests/host/test_esp_digest.py
+python3 tests/host/test_esp_ble_compat.py
 python3 tests/host/test_wifi_backend.py
