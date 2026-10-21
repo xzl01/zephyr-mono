@@ -23,6 +23,7 @@ void preview_wifi_expect_connect(const struct papermono_wifi_network *network,
 bool preview_wifi_connect_matched(void);
 void preview_wifi_set_state(const struct papermono_wifi_state *state);
 void preview_display_result(int result);
+void preview_fs_mount_result(int result);
 
 #define PREVIEW_CHECK(condition) do { \
 	if (!(condition)) { \
@@ -329,6 +330,52 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 	lv_obj_clean(screen);
 	ui_fixed_line_count = 0U;
 	set_box_style(screen, paper, 0, 0);
+	const struct {
+		const char *name;
+		enum papermono_app_id app;
+	} pages[] = {
+		{"home", PAPERMONO_APP_HOME},
+		{"launcher-1", PAPERMONO_APP_LAUNCHER},
+		{"launcher-2", PAPERMONO_APP_LAUNCHER},
+		{"library", PAPERMONO_APP_LIBRARY},
+		{"weread", PAPERMONO_APP_WEREAD},
+		{"calendar", PAPERMONO_APP_CALENDAR},
+		{"tasks", PAPERMONO_APP_TASKS},
+		{"notes", PAPERMONO_APP_NOTES},
+		{"info", PAPERMONO_APP_INFO},
+		{"content-center", PAPERMONO_APP_CONTENT},
+		{"remote", PAPERMONO_APP_REMOTE},
+		{"tools", PAPERMONO_APP_TOOLS},
+		{"system", PAPERMONO_APP_SYSTEM},
+		{"system-unformatted", PAPERMONO_APP_SYSTEM},
+		{"power", PAPERMONO_APP_POWER},
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(pages); ++i) {
+		if (strcmp(name, pages[i].name) != 0) continue;
+		if (strcmp(name, "system-unformatted") == 0) {
+			PREVIEW_CHECK(papermono_content_store_unmount() == 0);
+			preview_fs_mount_result(-EINVAL);
+			PREVIEW_CHECK(papermono_content_store_mount() == -EINVAL);
+			PREVIEW_CHECK(papermono_content_store_media_state() == PAPERMONO_MEDIA_UNFORMATTED);
+		}
+		ret = papermono_app_router_open(&app_router, pages[i].app);
+		if (ret < 0) return ret;
+		launcher_page = strcmp(name, "launcher-2") == 0 ? 1U : 0U;
+		return papermono_app_router_render(&app_router, screen);
+	}
+	const struct {
+		const char *name;
+		enum confirmation_kind kind;
+	} confirmations[] = {
+		{"confirm-sleep", CONFIRM_SLEEP}, {"confirm-shutdown", CONFIRM_SHUTDOWN},
+		{"confirm-ble", CONFIRM_RESET_BLE}, {"confirm-reset", CONFIRM_RESET_SETTINGS},
+		{"confirm-format", CONFIRM_FORMAT_TF},
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(confirmations); ++i) {
+		if (strcmp(name, confirmations[i].name) != 0) continue;
+		confirmation = confirmations[i].kind;
+		return render_power(NULL, screen);
+	}
 	if (strcmp(name, "settings") == 0) {
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_SETTINGS);
 		return ret < 0 ? ret : papermono_app_router_render(&app_router, screen);

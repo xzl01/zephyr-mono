@@ -22,6 +22,30 @@ static uint8_t draw_buffer[STRIDE * HEIGHT + PALETTE_BYTES]
 static uint8_t bitmap[STRIDE * HEIGHT];
 static unsigned flushes;
 
+static bool clipped_labels_fit(lv_obj_t *object)
+{
+	if (lv_obj_check_type(object, &lv_label_class) &&
+	    lv_label_get_long_mode(object) == LV_LABEL_LONG_CLIP) {
+		lv_point_t size;
+		lv_text_get_size(&size, lv_label_get_text(object),
+			lv_obj_get_style_text_font(object, LV_PART_MAIN),
+			lv_obj_get_style_text_letter_space(object, LV_PART_MAIN),
+			lv_obj_get_style_text_line_space(object, LV_PART_MAIN),
+			LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+		if (size.x > lv_obj_get_content_width(object) ||
+		    size.y > lv_obj_get_content_height(object)) {
+			fprintf(stderr, "preview: clipped label needs %dx%d, available %dx%d\n",
+				(int)size.x, (int)size.y, (int)lv_obj_get_content_width(object),
+				(int)lv_obj_get_content_height(object));
+			return false;
+		}
+	}
+	for (uint32_t i = 0; i < lv_obj_get_child_count(object); ++i) {
+		if (!clipped_labels_fit(lv_obj_get_child(object, i))) return false;
+	}
+	return true;
+}
+
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
 	if (lv_display_get_color_format(display) != LV_COLOR_FORMAT_I1 ||
@@ -69,6 +93,7 @@ int main(int argc, char **argv)
 		lv_timer_handler();
 	}
 	lv_obj_update_layout(lv_screen_active());
+	if (!clipped_labels_fit(lv_screen_active())) return 1;
 	lv_refr_now(display);
 	if (!flushes) {
 		fprintf(stderr, "preview: no display flush\n");

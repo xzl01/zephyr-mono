@@ -95,9 +95,23 @@ if ".fallback = &papermono_cjk_16," not in reading_source:
     fail("reading font must retain complete CJK fallback")
 require_subset(Path("src/generated/papermono_heading_48.c"), "papermono_heading_48",
                "0123456789%应用书库微信读日历待办便签内容中心遥控器信息卡片硬件工具设置电源系统状态阅读菜单目录连接设备确认休眠关机重新配网清除蓝牙对恢复默认？")
+# Validate the actual headings/confirmation copy, including newly added pages,
+# instead of relying only on the original design's fixed character list.
+heading_copy = []
+for arguments in re.findall(r"\bmake_header\(screen,(.*?)\);", ui_source, re.S):
+    heading_copy += re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', arguments)
+confirmation_copy = re.search(r"const char \*title = confirmation ==.*?;", ui_source, re.S)
+if confirmation_copy:
+    heading_copy += re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', confirmation_copy.group())
+heading_copy += re.findall(r'\bdetail_confirmation\(screen,\s*&\w+,\s*"([^"\\]*)"', ui_source)
+require_subset(Path("src/generated/papermono_heading_48.c"), "papermono_heading_48",
+               "".join(heading_copy))
 require_subset(Path("src/generated/papermono_reading_24.c"), "papermono_reading_24", "°℃")
 require_subset(Path("src/generated/papermono_state_40.c"), "papermono_state_40",
                "本地书架不可用没有可显示的书籍暂无日程待办便签尚未配置数据源书签")
+state_copy = re.findall(r'\bdetail_state_title\(screen,\s*"([^"\\]*)"', ui_source)
+require_subset(Path("src/generated/papermono_state_40.c"), "papermono_state_40",
+               "".join(state_copy))
 for codepoint in ui_codepoints:
     if codepoint not in reading_glyphs and codepoint not in glyphs:
         fail(f"reading/title font missing U+{codepoint:04X}")

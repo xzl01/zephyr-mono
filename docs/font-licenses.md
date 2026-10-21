@@ -2,7 +2,8 @@
 
 仓库根目录的 GPL-3.0 许可证不会把下列第三方字体字形重新授权为 GPL-3.0。生成后的
 LVGL 字体数据继续按原字体的 SIL Open Font License 1.1（OFL-1.1）分发；
-`src/generated/` 下的图标位图保留 MIT 声明，字体位图保留 OFL-1.1；它们作为独立素材计入 GPL-3.0 工程的聚合分发。已弃用的 Phosphor 猫图标
+`src/generated/` 下原有 33 个图标位图保留 MIT 声明，新增的 `papermono_icon_wifi_focal.c`
+遵循当前工程的 GPL-3.0-only，字体位图保留 OFL-1.1。已弃用的 Phosphor 猫图标
 不再分发任何派生产物，仅保留其许可证文本用于来源审计。
 
 ## Field Notes 当前字体
@@ -12,7 +13,7 @@ LVGL 字体数据继续按原字体的 SIL Open Font License 1.1（OFL-1.1）分
 | `src/generated/papermono_clock_148.c` | Libre Bodoni 148 px、1 bpp；`U+002D`、`U+0030-U+003A`，用于首页时钟 | OFL-1.1；`licenses/LibreBodoni-OFL-1.1.txt` |
 | `src/generated/papermono_reading_24.c` | Source Han Serif SC Regular 24 px、1 bpp；ASCII、`U+3000-U+301F`、完整基础 CJK、全角范围及 `·—…°℃`，用于阅读、内容标题和主要操作文字 | OFL-1.1；`licenses/SourceHanSerifSC-OFL-1.1.txt` |
 | `src/generated/papermono_heading_48.c` | Source Han Serif SC Regular 48 px、1 bpp；ASCII 和当前全部页头/确认标题中文子集，含中文问号。准确字符列表见生成脚本的 `--symbols` | OFL-1.1；`licenses/SourceHanSerifSC-OFL-1.1.txt` |
-| `src/generated/papermono_state_40.c` | Source Han Serif SC Regular 40 px、1 bpp；当前书库、微信读书、日历、待办、便签、信息和书签空状态标题所用的 28 个中文字符 | OFL-1.1；`licenses/SourceHanSerifSC-OFL-1.1.txt` |
+| `src/generated/papermono_state_40.c` | Source Han Serif SC Regular 40 px、1 bpp；当前书库、微信读书、日历、待办、便签、信息、书签和 Wi-Fi 空状态标题所用的 32 个中文字符 | OFL-1.1；`licenses/SourceHanSerifSC-OFL-1.1.txt` |
 
 Libre Bodoni Copyright 2012 The Libre Bodoni Project Authors；源文件保存在
 `assets/fonts/LibreBodoni.ttf`，上游为 [Libre Bodoni](https://github.com/googlefonts/Libre-Bodoni)。
@@ -56,7 +57,7 @@ Montserrat Copyright 2011 The Montserrat Project Authors。首页字标使用 LV
 
 ## Field Notes 原创几何图标
 
-`scripts/generate_field_notes_assets.py` 使用 Pillow 的确定性几何绘图生成 33 个
+`scripts/generate_field_notes_assets.py` 使用 Pillow 的确定性几何绘图生成 34 个
 图标，所有公开符号均以 `papermono_icon_` 开头，输出路径为
 `src/generated/papermono_icon_*.c`：
 
@@ -64,10 +65,11 @@ Montserrat Copyright 2011 The Montserrat Project Authors。首页字标使用 LV
 | --- | --- |
 | 96 × 96，应用、电源选项与确认动作（17 个） | `library`、`weread`、`calendar`、`tasks`、`notes`、`remote`、`content`、`info`、`tools`、`settings`、`power`、`sleep`、`bookmark`、`document`、`wifi`、`bluetooth`、`restore` |
 | 48 × 48，内容类型与操作图标通道（10 个） | `book_small`、`headphones_small`、`bookmark_small`、`settings_small`、`sun_small`、`toc_small`、`return_small`、`library_small`、`document_small`、`info_small` |
-| 176 × 176，空状态焦点符号（6 个） | `library_focal`、`weread_focal`、`calendar_focal`、`tasks_focal`、`document_focal`、`bookmark_focal` |
+| 176 × 176，空状态焦点符号（7 个） | `library_focal`、`weread_focal`、`calendar_focal`、`tasks_focal`、`document_focal`、`bookmark_focal`、`wifi_focal` |
 
 各尺寸从同一原创几何图形以最近邻方式生成。图标不描摹参考图中的栅格图像；
-脚本和生成 C 文件使用 MIT 标识，适用仓库根目录 `LICENSE`。
+现有 33 个素材保留文件头的 MIT 标识；本轮新增的 Wi-Fi 焦点素材使用
+GPL-3.0-only。此次只增加新素材，没有改写原有素材的许可标识。
 
 图像格式为 LVGL A8，stride 等于各图标宽度，每个像素仅有 0 或 255 透明度，以支持实际
 单色软件渲染路径；这不是 1 bpp 存储，也不是灰阶素材。运行时重着色为黑色，
@@ -87,7 +89,7 @@ Field Notes 方向用原创几何图标取代了首页猫形标记，因此派�
 
 删除原因包含一项实测缺陷：该资源声明为 `LV_COLOR_FORMAT_I1`，而 LVGL 9.5 的
 软件渲染器 `lv_draw_sw_img.c` 没有 I1 源图像路径，`lv_image_set_src()` 对它
-静默不绘制。若将来重新引入单色位图，必须改走 A8（见上节 33 个图标），或在
+静默不绘制。若将来重新引入单色位图，必须改走 A8（见上节 34 个图标），或在
 vendor 树中补齐 I1 源图像路径。删除后
 `scripts/generate_ui_asset.py` 成为不产出构建输入的通用 SVG→1 bpp 转换工具，
 保留供后续使用。
@@ -95,7 +97,7 @@ vendor 树中补齐 I1 源图像路径。删除后
 ## 构建接入
 
 上述字体文件（`papermono_cjk_16`、`papermono_clock_148`、`papermono_reading_24`、
-`papermono_heading_48`、`papermono_state_40` 以及 GBK 码表）和 33 个 Field Notes 图标
+`papermono_heading_48`、`papermono_state_40` 以及 GBK 码表）和 34 个 Field Notes 图标
 均在根目录 `CMakeLists.txt` 的
 `target_sources(app PRIVATE ...)` 中显式列出。字体源文件和 SVG 只用于来源审计
 与重新生成，不会作为运行时文件系统内容部署到设备。

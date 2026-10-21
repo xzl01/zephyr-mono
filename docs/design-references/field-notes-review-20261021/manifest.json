@@ -1,0 +1,313 @@
+{
+  "date": "2026-10-21",
+  "baseline_commit": "f453559ce75195e88e26fe1fe01b41779251ab0e",
+  "renderer": "production C UI and real LVGL, native 480x800 I1; synthetic content, hardware and Wi-Fi; not device photos",
+  "fixture_date": "2026-09-30",
+  "viewport": [
+    480,
+    800
+  ],
+  "format": "I1",
+  "lvgl_heap_bytes": 65536,
+  "pages": {
+    "settings": {
+      "sha256": "6005d70edb309ab71f6cdc2855b197e46e21dac0918991f4ff2b80a4cf952128",
+      "before_sha256": "6005d70edb309ab71f6cdc2855b197e46e21dac0918991f4ff2b80a4cf952128",
+      "changed_pixels": null
+    },
+    "wifi-scan": {
+      "sha256": "9ded5f480ffd362f46112c834e869ad00364459c6aa8e4572919b963e52afb8b",
+      "before_sha256": "9ded5f480ffd362f46112c834e869ad00364459c6aa8e4572919b963e52afb8b",
+      "changed_pixels": null
+    },
+    "wifi-list": {
+      "sha256": "55ccb301dd3ed864202b128575212208d5f7fc37e0b69ff3bc4a629b47095ee3",
+      "before_sha256": "55ccb301dd3ed864202b128575212208d5f7fc37e0b69ff3bc4a629b47095ee3",
+      "changed_pixels": null
+    },
+    "wifi-list-2": {
+      "sha256": "f0896a91bf26f015fc97b7a9333c4607fad3881074fa8d0e88e31cb660605f12",
+      "before_sha256": "f0896a91bf26f015fc97b7a9333c4607fad3881074fa8d0e88e31cb660605f12",
+      "changed_pixels": null
+    },
+    "wifi-password": {
+      "sha256": "f0b7d2a4c8c9e7c2f7492a9e4af84cb469168e2c24489b193e181f98c997f173",
+      "before_sha256": "1f1c8dd755d8c346170717874012d88c86c73449b544411b112767868f25a434",
+      "changed_pixels": [
+        31,
+        641,
+        445,
+        663
+      ]
+    },
+    "wifi-symbols": {
+      "sha256": "dbab219112a9d30b2e7bca8b277c3789c4bcee8fb604703a8c82e78ee29a22cb",
+      "before_sha256": "6987bcff41737f45e385fb966ca951dd519675268801f8d8932f1f29b225d11b",
+      "changed_pixels": [
+        31,
+        640,
+        445,
+        663
+      ]
+    },
+    "wifi-63chars": {
+      "sha256": "1607d0233171b58c48fbf2ddafe79522034848116ea90433845b20099fd18f17",
+      "before_sha256": "4f49fc0e0ccdc45ecaa9e69abf20b66b4ec4281b41e439364a6e68b62f7b36d1",
+      "changed_pixels": [
+        31,
+        640,
+        445,
+        663
+      ]
+    },
+    "wifi-connecting": {
+      "sha256": "370fd9a8b08ce4f91a4a9d471e7785b835368fc916f4f1bcdf3a7367d3d53566",
+      "before_sha256": "370fd9a8b08ce4f91a4a9d471e7785b835368fc916f4f1bcdf3a7367d3d53566",
+      "changed_pixels": null
+    },
+    "wifi-failure": {
+      "sha256": "e6ba933a450f31a3253e33612ea63bbeb0585fdb2107121ad26e2bfe8f07b62f",
+      "before_sha256": "e6ba933a450f31a3253e33612ea63bbeb0585fdb2107121ad26e2bfe8f07b62f",
+      "changed_pixels": null
+    },
+    "wifi-scan-failure": {
+      "sha256": "f3d2b5b910b3bafe540f717809d8fb847f156689507a7afb2b5642c1357d52cf",
+      "before_sha256": "f3d2b5b910b3bafe540f717809d8fb847f156689507a7afb2b5642c1357d52cf",
+      "changed_pixels": null
+    },
+    "wifi-empty": {
+      "sha256": "e9df289ac4afc56ed69255605f46844e8578a09eeb75adf776883ebd7881fe87",
+      "before_sha256": "494ed33582fb7124629d89c9313a5cabd9a38e71b8fc6e75445005fdda63bfe8",
+      "changed_pixels": [
+        22,
+        361,
+        379,
+        601
+      ]
+    },
+    "wifi-forget": {
+      "sha256": "0c761cc48ff136a0fb9acd7e554db4ba8ef55561ddb7dffa0b4e96c4ae49eee5",
+      "before_sha256": "4ef537621c3aee66a55c854aa015e64f34cc48c1a088f4c8ec9bbff4ae1842d1",
+      "changed_pixels": [
+        23,
+        225,
+        382,
+        496
+      ]
+    },
+    "home": {
+      "sha256": "537baecc556b2570ac89af52c9e94414162bf64ca94944ef498a1e179952b22c",
+      "before_sha256": "537baecc556b2570ac89af52c9e94414162bf64ca94944ef498a1e179952b22c",
+      "changed_pixels": null
+    },
+    "launcher-1": {
+      "sha256": "4773bda6e0221304ac1c25f9c57ec9d94d8a1ad4b2dc8197e821a420d5e3ee25",
+      "before_sha256": "4773bda6e0221304ac1c25f9c57ec9d94d8a1ad4b2dc8197e821a420d5e3ee25",
+      "changed_pixels": null
+    },
+    "launcher-2": {
+      "sha256": "3dec8ab4a8e56028fc9b531bd3e61d553f34844991955fece26f25142daa2527",
+      "before_sha256": "3dec8ab4a8e56028fc9b531bd3e61d553f34844991955fece26f25142daa2527",
+      "changed_pixels": null
+    },
+    "library": {
+      "sha256": "baa6dcdd52333598f913d44005ba32bf3bb595ee107d464415607690d9cb5014",
+      "before_sha256": "baa6dcdd52333598f913d44005ba32bf3bb595ee107d464415607690d9cb5014",
+      "changed_pixels": null
+    },
+    "weread": {
+      "sha256": "3a1c6100c3dd9d7be82ba30c8dee66b5a4f83c6d046c0a3cab46d96520e1d8cd",
+      "before_sha256": "3a1c6100c3dd9d7be82ba30c8dee66b5a4f83c6d046c0a3cab46d96520e1d8cd",
+      "changed_pixels": null
+    },
+    "calendar": {
+      "sha256": "f4950121f396481a2912b268f00f84fd454ba423a186857c830b83c68c83f36f",
+      "before_sha256": "f4950121f396481a2912b268f00f84fd454ba423a186857c830b83c68c83f36f",
+      "changed_pixels": null
+    },
+    "tasks": {
+      "sha256": "92a1ecffb91b253a2995fd1fe33a07f6f76e2a817f382185a69d2df455f1f43c",
+      "before_sha256": "92a1ecffb91b253a2995fd1fe33a07f6f76e2a817f382185a69d2df455f1f43c",
+      "changed_pixels": null
+    },
+    "notes": {
+      "sha256": "4c34833b8e94899ee6612f26d27db25cd83cae8ea746f1cd3c79f58c7f524887",
+      "before_sha256": "4c34833b8e94899ee6612f26d27db25cd83cae8ea746f1cd3c79f58c7f524887",
+      "changed_pixels": null
+    },
+    "info": {
+      "sha256": "e7ace903a59d636e4682fa97613fa3333846eb055228ae11170d350c8e753f59",
+      "before_sha256": "e7ace903a59d636e4682fa97613fa3333846eb055228ae11170d350c8e753f59",
+      "changed_pixels": null
+    },
+    "content-center": {
+      "sha256": "a01edd2d83ba4ca4e50ad252928be548783ee5922acd3d7068d6af549133bf19",
+      "before_sha256": "a01edd2d83ba4ca4e50ad252928be548783ee5922acd3d7068d6af549133bf19",
+      "changed_pixels": null
+    },
+    "remote": {
+      "sha256": "0c525e253c83498ab23e1ac63a3601afcebcb4165a53c23c78cd9965cd589630",
+      "before_sha256": "0c525e253c83498ab23e1ac63a3601afcebcb4165a53c23c78cd9965cd589630",
+      "changed_pixels": null
+    },
+    "tools": {
+      "sha256": "0fd36570323e7374f3b14fc6acf1ab2f90ffddabfd1ece13e037d464d26a9f07",
+      "before_sha256": "0fd36570323e7374f3b14fc6acf1ab2f90ffddabfd1ece13e037d464d26a9f07",
+      "changed_pixels": null
+    },
+    "system": {
+      "sha256": "9624b075cd49d1be298ad2242c9bd60886756a96ba16fe03f034782e6f10956c",
+      "before_sha256": "a37c69e78f13ab36a3b37d344fe4fe16781a244b3c0adc8f5db1887135e10f88",
+      "changed_pixels": [
+        414,
+        353,
+        421,
+        363
+      ],
+      "note": "Only the synthetic host uptime value differs; layout unchanged."
+    },
+    "system-unformatted": {
+      "sha256": "1aab6f9d41f2d9d79f339e693648898beca062faa32c94b750d9a920d73ac45f",
+      "before_sha256": "b9356ebd23f01f1f8b50318893b0dec17f27504837c3f9c8695946592137c2a7",
+      "changed_pixels": [
+        414,
+        353,
+        421,
+        363
+      ],
+      "note": "Only the synthetic host uptime value differs; layout unchanged."
+    },
+    "power": {
+      "sha256": "0a47b1dba089cb81291de7f24a91ecef521db9001a781c410c96c3cd8738ef14",
+      "before_sha256": "0a47b1dba089cb81291de7f24a91ecef521db9001a781c410c96c3cd8738ef14",
+      "changed_pixels": null
+    },
+    "confirm-sleep": {
+      "sha256": "b3145b52209c7715e9a7c6540e60bd37706f1c539c9b32ca0510f3b48bbc5f38",
+      "before_sha256": "b3145b52209c7715e9a7c6540e60bd37706f1c539c9b32ca0510f3b48bbc5f38",
+      "changed_pixels": null
+    },
+    "confirm-shutdown": {
+      "sha256": "6519c7dab4b51eadbc7262c950829eea73037113f503b73c75d7445a5aeb4b25",
+      "before_sha256": "6519c7dab4b51eadbc7262c950829eea73037113f503b73c75d7445a5aeb4b25",
+      "changed_pixels": null
+    },
+    "confirm-ble": {
+      "sha256": "514a44f43a0b98393de899c5062d0b72c8a0b4ecbfde3ff48838c067dfbee58c",
+      "before_sha256": "514a44f43a0b98393de899c5062d0b72c8a0b4ecbfde3ff48838c067dfbee58c",
+      "changed_pixels": null
+    },
+    "confirm-reset": {
+      "sha256": "6860440a6840b2ec9b919fc72f317c1215b8ef9a9583001544ad95adcb8ec2aa",
+      "before_sha256": "6860440a6840b2ec9b919fc72f317c1215b8ef9a9583001544ad95adcb8ec2aa",
+      "changed_pixels": null
+    },
+    "confirm-format": {
+      "sha256": "b8d409fdaa18f6302692533333325d90417e43e52ae7895b89b0702298d22878",
+      "before_sha256": "a578589402718ed6d1918ec6837d891b9ee5bb56419402cfa2ff5bc136cc2d9f",
+      "changed_pixels": [
+        22,
+        58,
+        377,
+        407
+      ]
+    }
+  },
+  "sources": {
+    "CMakeLists.txt": "07291acfa9fad127131edcf44306e98e9e124aa06cf8e14508ba434464f95222",
+    "include/papermono/ui_layout.h": "78bad0666c51857531fdf4b20febb7bcd0a1f490798ead78e2d05e062d8c8877",
+    "scripts/generate_field_notes_assets.py": "9574d79f2ef2434743a45b22988baaf79045328ae92bf9d0803dcb3c3bc603cf",
+    "scripts/generate_field_notes_fonts.sh": "56734d8a606b1378c24d8d72de4357410fbb46715c3c2e60be1b61b96bccf60a",
+    "src/generated/papermono_cjk_16.c": "1651cb8f0c7eb23136bdc8723ca11fecc600efabeb11b8ee8565dea4966f56b7",
+    "src/generated/papermono_clock_148.c": "2e65bb41eff76e20ba8e0f6efaafe17ad22d22893d8d944c4b45e9a3eda6a795",
+    "src/generated/papermono_gbk_table.c": "48580ac4ef61b4f5da3678c14fd31b006a0c6a56e02fcba6d713eac6396b8184",
+    "src/generated/papermono_heading_48.c": "7f7f0ae18545d858313a95edb2b2f99509c0c88b31f15d3e89075b29122112b7",
+    "src/generated/papermono_icon_bluetooth.c": "c2c93aad7e6945037429107cdc2910911d30a9c6ad4ebc055be98b94fc3e3dc7",
+    "src/generated/papermono_icon_book_small.c": "9eef3f42e72425e4f7f2cb18c29ef2fe773d03471fabd83eea355fb776dba5a8",
+    "src/generated/papermono_icon_bookmark.c": "69f91c4ae190d63c6be0482701401f421145822fcea22b8c0988955f77859a94",
+    "src/generated/papermono_icon_bookmark_focal.c": "ade8e9c75fb6442ec1674a2a81367222c34080806c8459f32830798c74eedb20",
+    "src/generated/papermono_icon_bookmark_small.c": "79eb2dc540a18ade979bf4fedc0c64a40abb59c6547ff284906ad001dd8c44d0",
+    "src/generated/papermono_icon_calendar.c": "9d62281b80ae36399331c4e5afe9c52125ef42079a60782c359c3e5ba78280bd",
+    "src/generated/papermono_icon_calendar_focal.c": "4acf285883cc5298b471aa7f8242848beda5db12eb5abc1c26264de5772acdab",
+    "src/generated/papermono_icon_content.c": "d69e30658589f54ae8c295cb62ef7000a57ac5dd0c72991693889cb62b9d3c35",
+    "src/generated/papermono_icon_document.c": "bca83a9a7a853bc05b33d86f1f0bd32f317675d6c960ea51ded1943fc918f9c6",
+    "src/generated/papermono_icon_document_focal.c": "fcbd71eb62f34aba338b9536fa857ab89f50508f5167c2547959cfc5b4794ec3",
+    "src/generated/papermono_icon_document_small.c": "ab3edf7e797cb9328c6acf1d29d339c8460726f740f496ee3e72de41ac776703",
+    "src/generated/papermono_icon_headphones_small.c": "d7c4a93c9ae203a49272efafbf954d6044daf43de704608854945eafc4c17b0f",
+    "src/generated/papermono_icon_info.c": "e4a210e85d021a070ab2e97df2d5852020db39e110269d38e3b253cba322d36e",
+    "src/generated/papermono_icon_info_small.c": "dc55cc3941fde53e6eebf384125efc12d86c75cac6dd3ae088e0e4549c84d47d",
+    "src/generated/papermono_icon_library.c": "b16a5324bcbb236bd024db2f4681f3a3199318107f49b6e53b2ea93bec9aad30",
+    "src/generated/papermono_icon_library_focal.c": "bb983e4bfac8ad8e50ff219626562e078a487f149aae58dc556fe05c48b533d9",
+    "src/generated/papermono_icon_library_small.c": "0621cf3ead9d98d8a01ad3dca7f3ab9dd99f0c049e875b919472203ce904791f",
+    "src/generated/papermono_icon_notes.c": "03bdecd03471ed200363733577512566f58f649b472dfe869223d8861f92b0a5",
+    "src/generated/papermono_icon_power.c": "d82b1ad630ebd3a3526f8b6ac4b29daf676d8e359b72358083e00a1ede31f3f7",
+    "src/generated/papermono_icon_remote.c": "a1483ead55f662f1a368721a8c18225979f4bf798c6b93f099d6285aef7e8af6",
+    "src/generated/papermono_icon_restore.c": "f3d638b17a0fd43744d1d0dba8917233ce4bea75c464d3245b32b9a25ac9882f",
+    "src/generated/papermono_icon_return_small.c": "361c49a405f60b78a00482a2d2640a03d429be999a544c39cb0ae47d2b9fad31",
+    "src/generated/papermono_icon_settings.c": "47675f43202d489cc895d2ef81560eed5da5bc22202afe14096c24c1db8a87c3",
+    "src/generated/papermono_icon_settings_small.c": "26035d3be179a9a84981d8c0ea405954b9639e22245060e679871956a3412cbb",
+    "src/generated/papermono_icon_sleep.c": "15cf97f69674c681da717874d12e3247c6a61d41248a8126c5fb580af72d6ebf",
+    "src/generated/papermono_icon_sun_small.c": "4550b5e823a1a13a1cf6b8d0dbaf7019fcbdde2a3068d1faa94239bce9c2b5ff",
+    "src/generated/papermono_icon_tasks.c": "68a57ef4c11fa5b58967dedf1b7379d75614b25df326547ff72e3751d95946cd",
+    "src/generated/papermono_icon_tasks_focal.c": "7d01cd50b88b15a20d5a3c88a60ba247a6283f044449fc58e71a5976e87cca97",
+    "src/generated/papermono_icon_toc_small.c": "b1f7394963b89834ee1aeefe3ed2cd86d720d8828b70da962fa2882584fa13bc",
+    "src/generated/papermono_icon_tools.c": "4885a94edd8c1e799e0427a4f7f4fd45a4674cade5ea8f4803e35f08f1dce382",
+    "src/generated/papermono_icon_weread.c": "7ae37bae1282188d42fd49f8e6013925253dd38e1d4bbc80648c9735084f2688",
+    "src/generated/papermono_icon_weread_focal.c": "0fc99147ae71c31214255f66b44a5bcc4fb0227c9db645fb87c9a343e1e3e4c5",
+    "src/generated/papermono_icon_wifi.c": "b902ac1251be700781e49fef581098d9f271e4c9e6ea31dbbeb990a4c2d023ab",
+    "src/generated/papermono_icon_wifi_focal.c": "317ee04de8a72d354e267fe10fc2b23a3ddd53dd2b3b627bcae307348d94735a",
+    "src/generated/papermono_reading_24.c": "3c1dcbba870d38956edd68ca73e5760a0cd824288e4fc9417a15d8e0bba4ec85",
+    "src/generated/papermono_selftest_epub.c": "6d3e55a3a4abefeddd584088b2e9ca8c8e6c91bdfd0522a4363747f58732f049",
+    "src/generated/papermono_state_40.c": "ff3c27fde4544e9bf25f659fa47592361eab69e28dec2e1bc71e79945e7ef08b",
+    "src/papermono_ui.c": "2458ba8f91eaa96888d859abce171498a08362a3996013cbea436f906c285cb9",
+    "tests/preview/lv_conf.h": "800f6efd1694166e537b3584736c8484ccaa60af890695aa503859564d3805d4",
+    "tests/preview/scripts/build.py": "e56f19b561671a7f797dd027014a25c0848d73b000b45348f48ac4d42cb7e25a",
+    "tests/preview/scripts/fs_host.c": "3b60b00bcde12ef32f4809a39229053f70db53dee88d3cf6f2ba821eab165768",
+    "tests/preview/scripts/patch_ui.py": "b1d4cef4e7cade0d8bf60492495afa2a18edc17645efe6a918054fbd53271832",
+    "tests/preview/scripts/pbm_to_png.py": "2314537a92407c8a5b35199445cf3e59a01c4fd4abbfcf0639552b316491cfe1",
+    "tests/preview/scripts/preview_main.c": "3978471d3e10d15482855c67e8f163bbead789a820260e775bb97c6275581384",
+    "tests/preview/scripts/verify.py": "0fd1c27440c02ebfb698e9a102adcefc8c21116c474f0165b45c4e49bb8623ab",
+    "tests/preview/scripts/zephyr_host.c": "b6605a222922b79a075e3f3cc541dfec74339913b200835e578ffdf26a74c16e",
+    "tests/preview/shims/ff.h": "f97cad38a6207277e385e5b4d0b6b3201f1dbfad2fa9e13aa0aba3685c4cef65",
+    "tests/preview/shims/lvgl/lvgl.h": "607018bbbced86a7d786c7c6ef3cc2be311b0b6e796b613f6134524514706781",
+    "tests/preview/shims/papermono_preview_nodes.h": "c8e8b34c52e4bed984a8e2ac46d6684236af42a8239cbeb836029b969d9a47d6",
+    "tests/preview/shims/zephyr/device.h": "6e006e9bfeea6435d6f03b6d78567bcedced9340323a42600274e7ae6c97bedc",
+    "tests/preview/shims/zephyr/devicetree.h": "b05898f4e9fd4876c94f79073aa15a48d49748d81c9ced090328990f68adaab5",
+    "tests/preview/shims/zephyr/drivers/display.h": "fcf97428994505cd1c5741d90a45574ef130bb85168cae6fbf08db9a1f9e96c4",
+    "tests/preview/shims/zephyr/drivers/gpio.h": "fdcf13b72b433747116b0444ca723ef3b08e01aae59f90256d47a6d7f23e197f",
+    "tests/preview/shims/zephyr/drivers/rtc.h": "8b8d200a29f67052199f4198e3da038b3c3f43a35c6d8e45d0b7719be2939a37",
+    "tests/preview/shims/zephyr/drivers/sensor.h": "96200ac0dcbebd02d0038e8c24cbae3143a295cc22e8e44a5c3b4e47d941017f",
+    "tests/preview/shims/zephyr/fs/fs.h": "ad9395d9755d3462353658e9275f17b695a96f80793a0dee5ae8975333d17c50",
+    "tests/preview/shims/zephyr/input/input.h": "7155a2cf0b71ea7da62dcb0e85fc410cdac0d60c6b51c09b8c4431f8548cc165",
+    "tests/preview/shims/zephyr/kernel.h": "6e703e6a624f93b3f03b5ceb8dbfe7aad08811e10750aa277e22c87ef4aa40f1",
+    "tests/preview/shims/zephyr/logging/log.h": "be3c3bda80efa6ade5f0e4c57811b5b21682ac96035c756b12fdaee86517a956",
+    "tests/preview/shims/zephyr/settings/settings.h": "96f0309fb11d90c9ad6b4272528a7769332c6ece535e81ca5e45e0f30fbdd698",
+    "tests/preview/shims/zephyr/storage/disk_access.h": "92504d3e6e37d596c32444c0fdf814137eb5549925f1925544a8e3cd6441c463",
+    "tests/preview/shims/zephyr/sys/atomic.h": "464969e01eda7128671ed571c320d98a241f434e57e3f4d970819c965a8697b0",
+    "tests/preview/shims/zephyr/sys/crc.h": "270600ede85a013cadfc63b6ce7f28af202ec5c31d294e2d75e324c94f239831",
+    "tests/preview/shims/zephyr/sys/util.h": "cf51a71a8d61133cf224dac1b6c6d48f65c5e2002dcddc753c57b4341c045267",
+    "tests/preview/shims/zephyr/version.h": "3a2afed66317c014881f57f9d8bb0fd29f1008bc4b6befa5166d2151f78bbe70",
+    "tests/preview/stubs/papermono_stubs.c": "f3db34fcdd791b9e21bb19c2ee43e1883b1a924dbc8859b42132de39e4ad9146"
+  },
+  "builds": {
+    "default": {
+      "sha256": "c8e4e0e0edeec548066a59ddb36d59fefad0acfc77b1cfd19f1f89eda5586715",
+      "flash_bytes": 4548868,
+      "dram_bytes": 337816,
+      "dram_capacity_bytes": 399108
+    },
+    "partial": {
+      "sha256": "b6b284023f295f31cac78ac402d3b8285bf4febf0e022e3f205658705921d756",
+      "flash_bytes": 4423908,
+      "dram_bytes": 312136,
+      "dram_capacity_bytes": 399108
+    },
+    "selftest": {
+      "sha256": "e0932b99953886ce0e7f351c6d9da446c8f78d82c0769da37d60bceda1561bb6",
+      "flash_bytes": 4429188,
+      "dram_bytes": 314800,
+      "dram_capacity_bytes": 399108
+    }
+  },
+  "lvgl_heap_peak_bytes": 45808
+}

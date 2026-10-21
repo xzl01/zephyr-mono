@@ -4,7 +4,8 @@ from pathlib import Path
 import re
 
 assets = sorted(Path("src/generated").glob("papermono_icon_*.c"))
-assert len(assets) >= 33
+assert len(assets) >= 34
+assert Path("src/generated/papermono_icon_wifi_focal.c") in assets
 for path in assets:
     name = path.stem
     source = path.read_text()
@@ -12,6 +13,10 @@ for path in assets:
     dimensions = re.search(r"\.w = (\d+), \.h = (\d+), \.stride = (\d+)", source)
     size, height, stride = map(int, dimensions.groups())
     assert size in (48, 96, 176) and size == height == stride, name
+    if name.endswith("_focal"):
+        assert size == 176, name
+    if name.endswith("_small"):
+        assert size == 48, name
     array = source.split("_map[] = {", 1)[1].split("};", 1)[0]
     pixels = [int(v, 16) for v in re.findall(r"0x([0-9a-f]{2})", array)]
     assert len(pixels) == size * size, name

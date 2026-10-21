@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
-# Native I1 preview and Wi-Fi interaction regression
+# Native I1 preview and Field Notes/Wi-Fi regressions
 
 Minimal host preview adopted from `tmp/field-notes/preview`; that older tool is
 left untouched. This tool compiles a snapshot of the current production UI,
@@ -45,6 +45,17 @@ at the end of a build prints a reminder to rebuild.
 | `wifi-empty` | Completed empty scan |
 | `wifi-forget` | Destructive-action confirmation |
 
+The default run also covers the existing Field Notes shell and storage flow:
+`home`, `launcher-1`, `launcher-2`, `library`, `weread`, `calendar`, `tasks`,
+`notes`, `info`, `content-center`, `remote`, `tools`, `system`,
+`system-unformatted`, `power`, `confirm-sleep`, `confirm-shutdown`,
+`confirm-ble`, `confirm-reset` and `confirm-format` (32 fixtures total).
+Content pages use the host filesystem, initially empty. The unformatted-card
+fixture injects a mount error into the host filesystem shim and reaches the
+real portable storage model; it never formats or accesses a host disk.
+Confirmation fixtures render the real production page without executing its
+destructive action. Dates, network state and measurements remain synthetic.
+
 Test/fixture glue is appended to the byte-for-byte source snapshot in the same
 translation unit. It directly calls production `settings_event`, `wifi_event`,
 `process_event`, `render_current` and the router's registered `wifi_close`
@@ -59,8 +70,8 @@ Every preview process initializes the real portable modules/router, runs the
 assertion runner **before** selecting its screenshot fixture, then resets test
 state and renders that fixture. A failed assertion prints its condition and
 snapshot line and exits **1** without writing the requested PBM. The runner is
-independent of `assert`/`NDEBUG`; there is no screenshot-only bypass. The same
-12 fixtures above remain available, without new demo screens or renderer polish.
+independent of `assert`/`NDEBUG`; there is no screenshot-only bypass. The 12
+Wi-Fi fixtures remain available alongside the neighboring Field Notes pages.
 
 Coverage uses production hit rectangles and actual keyboard hit testing:
 
@@ -107,6 +118,9 @@ nor forget success runs a radio/NVS worker or mutates saved credentials.
   rendering errors/no flush, then checks dimensions, 1-bit format and
   nonblank/non-solid ink coverage. Reported heap peak includes the assertion
   renders as well as the final fixture.
+- Labels using `LV_LABEL_LONG_CLIP`, including keyboard keys, must fit their
+  actual content rectangle with the current font. Truncated captions fail the
+  preview instead of silently producing an incomplete key.
 - This is a host event regression plus visual smoke test, not Wi-Fi integration,
   provisioning/security, asynchronous worker, physical input or panel-refresh
   verification. `CONFIG_PAPERMONO_INTERACTIVE_UI` is not enabled in this build:

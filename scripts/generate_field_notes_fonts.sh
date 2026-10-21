@@ -20,12 +20,12 @@ npx --yes lv_font_conv@1.5.3 --no-compress --no-prefilter --bpp 1 --size 148 \
     --font assets/fonts/LibreBodoni.ttf -r 0x2D,0x30-0x3A --format lvgl \
     -o src/generated/papermono_clock_148.c --force-fast-kern-format --lv-include lvgl.h
 npx --yes lv_font_conv@1.5.3 --no-compress --no-prefilter --bpp 1 --size 48 \
-    --font "$task_serif_font" -r 0x20-0x7e --symbols '应用书库微信读日历待办便签内容中心遥控器信息卡片硬件工具设置电源系统状态阅读菜单目录连接设备确认休眠关机重新配网清除蓝牙对恢复默认？' --format lvgl \
+    --font "$task_serif_font" -r 0x20-0x7e --symbols '应用书库微信读日历待办便签内容中心遥控器信息卡片硬件工具设置电源系统状态阅读菜单目录连接设备确认休眠关机重新配网清除蓝牙对恢复默认存储格式化忘记网络？' --format lvgl \
     -o src/generated/papermono_heading_48.c --force-fast-kern-format --lv-include lvgl.h
 npx --yes lv_font_conv@1.5.3 --no-compress --no-prefilter --no-kerning --bpp 1 --size 24 \
     --font "$task_serif_font" -r 0x20-0x7e,0x3000-0x301f,0x4e00-0x9fff,0xff00-0xffef \
     --symbols '·—…°℃' --format lvgl -o src/generated/papermono_reading_24.c --lv-include lvgl.h
 npx --yes lv_font_conv@1.5.3 --no-compress --no-prefilter --no-kerning --bpp 1 --size 40 \
-    --font "$task_serif_font" --symbols '本地书架不可用没有可显示的书籍暂无日程待办便签尚未配置数据源书签' --format lvgl \
+    --font "$task_serif_font" --symbols '本地书架不可用没有可显示的书籍暂无日程待办便签尚未配置数据源书签未发现可用网络' --format lvgl \
     -o src/generated/papermono_state_40.c --lv-include lvgl.h
 python3 scripts/normalize_field_notes_fonts.py

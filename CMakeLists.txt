@@ -70,6 +70,7 @@ target_sources(app PRIVATE
   src/generated/papermono_icon_tasks_focal.c
   src/generated/papermono_icon_document_focal.c
   src/generated/papermono_icon_bookmark_focal.c
+  src/generated/papermono_icon_wifi_focal.c
   src/papermono_settings.c
   src/papermono_power_state.c
   src/m5ioe1.c

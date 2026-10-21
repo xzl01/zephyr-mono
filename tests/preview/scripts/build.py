@@ -12,7 +12,11 @@ HERE = Path(__file__).resolve().parents[1]
 REPO = HERE.parents[1]
 PAGES = ["settings", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-password",
          "wifi-symbols", "wifi-63chars", "wifi-connecting", "wifi-failure",
-         "wifi-scan-failure", "wifi-empty", "wifi-forget"]
+         "wifi-scan-failure", "wifi-empty", "wifi-forget",
+         "home", "launcher-1", "launcher-2", "library", "weread", "calendar",
+         "tasks", "notes", "info", "content-center", "remote", "tools", "system",
+         "system-unformatted", "power", "confirm-sleep", "confirm-shutdown",
+         "confirm-ble", "confirm-reset", "confirm-format"]
 MODULES = ["app", "interaction", "settings", "content_store", "content_validation",
            "organizer", "reader", "personal_data", "text_codec", "text_layout",
            "reader_cache", "epub", "archive_safety", "weread", "weread_view",
@@ -64,7 +68,7 @@ def main():
     manifest_paths += [p for p in HERE.rglob("*") if p.is_file()]
     revision = subprocess.run(["git", "-C", str(lvgl), "rev-parse", "HEAD"],
                               capture_output=True, text=True)
-    manifest = "Synthetic Wi-Fi state; real UI + native LVGL I1, 480x800; LVGL heap 65536 bytes\n"
+    manifest = "Synthetic content, hardware and Wi-Fi; real UI + native LVGL I1, 480x800; LVGL heap 65536 bytes\n"
     manifest += f"repo: {REPO}\nlvgl: {lvgl}\nlvgl revision: {revision.stdout.strip() or 'unknown'}\nfixtures: {' '.join(pages)}\n"
     manifest += "\n".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p}" for p in manifest_paths)
     (out / "SOURCES.txt").write_text(manifest + "\n")

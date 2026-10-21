@@ -98,6 +98,7 @@ LV_IMAGE_DECLARE(papermono_icon_calendar_focal);
 LV_IMAGE_DECLARE(papermono_icon_tasks_focal);
 LV_IMAGE_DECLARE(papermono_icon_document_focal);
 LV_IMAGE_DECLARE(papermono_icon_bookmark_focal);
+LV_IMAGE_DECLARE(papermono_icon_wifi_focal);
 
 #define UI_WIDTH PAPERMONO_UI_WIDTH
 #define UI_HEIGHT PAPERMONO_UI_HEIGHT
@@ -545,6 +546,21 @@ static void detail_image_at(lv_obj_t *parent, const lv_image_dsc_t *icon, int32_
 static void detail_icon(lv_obj_t *screen, const lv_image_dsc_t *icon, int32_t y)
 {
 	detail_image_at(screen, icon, (UI_WIDTH - icon->header.w) / 2, y);
+}
+
+static void detail_confirmation(lv_obj_t *screen, const lv_image_dsc_t *icon,
+	const char *title, const char *body, const char *action, const char *hint)
+{
+	detail_icon(screen, icon, 216);
+	lv_obj_t *label = make_label(screen, title, &papermono_heading_48, ink);
+	lv_obj_set_pos(label, 22, 352);
+	lv_obj_set_size(label, 436, 58);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	label = detail_text(screen, body, 22, 434, 436, 70, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	detail_button(screen, &detail_confirm_rect, action, true);
+	detail_button(screen, &detail_cancel_rect, "取消", false);
+	make_footer(screen, hint);
 }
 
 static void detail_state_title(lv_obj_t *screen, const char *title, int32_t y)
@@ -1050,12 +1066,9 @@ static int render_wifi(void *context, lv_obj_t *screen)
 	char text[160];
 	make_header(screen, "连接设置");
 	if (wifi_ui.mode == WIFI_UI_FORGET) {
-		detail_icon(screen, &papermono_icon_wifi, 190);
-		(void)detail_text(screen, "忘记已保存的网络？", 22, 330, 436, 38, true);
-		(void)detail_text(screen, "将断开连接并清除网络密码。\n设备接入点与配对码也会更新。\nTF 卡内容不会删除。", 22, 388, 436, 90, false);
-		detail_button(screen, &detail_confirm_rect, "确认忘记", true);
-		detail_button(screen, &detail_cancel_rect, "取消", false);
-		make_footer(screen, "取消不会更改连接");
+		detail_confirmation(screen, &papermono_icon_wifi, "确认忘记网络？",
+			"将断开连接并清除网络密码。\n设备接入点与配对码也会更新。\nTF 卡内容不会删除。",
+			"确认忘记", "取消不会更改连接");
 		return 0;
 	}
 	if (wifi_ui.mode == WIFI_UI_PASSWORD) {
@@ -1084,9 +1097,9 @@ static int render_wifi(void *context, lv_obj_t *screen)
 			struct papermono_rect rect = {key.x, key.y, key.width, key.height};
 			lv_obj_t *button = make_outline_shape(screen, rect.x, rect.y,
 				rect.width, rect.height, 1, 0);
+			/* Two full-size CJK glyphs exceed a 44px character key. */
 			lv_obj_t *label = make_label(button, key.label,
-				i < PAPERMONO_WIFI_INPUT_CHARACTER_KEYS && key.character != ' ' ?
-				&papermono_reading_24 : &papermono_cjk_16, ink);
+				key.character == ' ' ? &papermono_cjk_16 : &papermono_reading_24, ink);
 			lv_obj_set_size(label, rect.width - 4, 30);
 			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 			lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
@@ -1138,8 +1151,13 @@ static int render_wifi(void *context, lv_obj_t *screen)
 			wifi_ui.shown.configured && strcmp(item->ssid, wifi_ui.shown.saved_ssid) == 0, item->supported && idle);
 	}
 	if (!wifi_ui.shown.count && !wifi_ui.shown.scan_busy && !wifi_ui.shown.scan_error) {
-		(void)detail_text(screen, "未发现可用网络", 22, 360, 436, 38, true);
-		(void)detail_text(screen, "请确认路由器已开启 2.4 GHz Wi-Fi，\n靠近设备后重新扫描。", 22, 410, 436, 70, false);
+		/* Keep saved-network controls above the empty result. The focal icon
+		 * and state typography match other Field Notes empty pages. */
+		detail_icon(screen, &papermono_icon_wifi_focal, 306);
+		detail_state_title(screen, "未发现可用网络", 502);
+		lv_obj_t *label = detail_text(screen,
+			"请确认路由器已开启 2.4 GHz Wi-Fi，\n靠近设备后重新扫描。", 32, 560, 416, 66, false);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 	}
 	if (idle && wifi_ui.first >= 4) detail_button(screen, &wifi_previous_rect, "上一页", false);
 	if (idle && wifi_ui.first + 4 < wifi_ui.shown.count) detail_button(screen, &wifi_next_rect, "下一页", false);
@@ -2639,22 +2657,16 @@ static int render_power(void *context, lv_obj_t *screen)
 			confirmation == CONFIRM_RESET_BLE ? "将删除已保存的蓝牙主机。\n内容文件不会删除。" :
 			confirmation == CONFIRM_FORMAT_TF ? "卡上全部分区和文件都会被删除。\n此操作不可撤销。" :
 			"偏好设置将恢复为默认值。\n内容文件不会删除。";
-		detail_icon(screen, confirmation == CONFIRM_RESET_SETTINGS ||
+		const lv_image_dsc_t *icon = confirmation == CONFIRM_RESET_SETTINGS ||
 			confirmation == CONFIRM_FORMAT_TF ? &papermono_icon_restore :
 			confirmation == CONFIRM_RESET_WIFI ? &papermono_icon_wifi :
 			confirmation == CONFIRM_RESET_BLE ? &papermono_icon_bluetooth :
-			confirmation == CONFIRM_SLEEP ? &papermono_icon_sleep : &papermono_icon_power, 216);
-		lv_obj_t *label = make_label(screen, title, &papermono_heading_48, ink);
-		lv_obj_set_pos(label, 22, 352); lv_obj_set_size(label, 436, 58);
-		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-		label = detail_text(screen, body, 22, 434, 436, 70, false);
-		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-		detail_button(screen, &detail_confirm_rect, confirmation == CONFIRM_SLEEP ? "确认休眠" :
+			confirmation == CONFIRM_SLEEP ? &papermono_icon_sleep : &papermono_icon_power;
+		const char *action = confirmation == CONFIRM_SLEEP ? "确认休眠" :
 			confirmation == CONFIRM_SHUTDOWN ? "确认关机" : confirmation == CONFIRM_RESET_WIFI ?
 			"确认重新配网" : confirmation == CONFIRM_RESET_BLE ? "确认清除配对" :
-			confirmation == CONFIRM_FORMAT_TF ? "确认格式化" : "确认恢复", true);
-		detail_button(screen, &detail_cancel_rect, "取消", false);
-		make_footer(screen, "取消可返回上一页");
+			confirmation == CONFIRM_FORMAT_TF ? "确认格式化" : "确认恢复";
+		detail_confirmation(screen, icon, title, body, action, "取消可返回上一页");
 		return 0;
 	}
 	detail_power_option(screen, &detail_sleep_rect, &papermono_icon_sleep, "立即休眠", "保留当前墨水屏画面。\n触摸或电源键唤醒。");

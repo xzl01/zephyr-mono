@@ -117,7 +117,7 @@ if __name__ == "__main__":
             "content", "info", "tools", "settings", "power", "sleep", "bookmark", "document",
             "wifi", "bluetooth", "restore")
     small = ("book", "headphones", "bookmark", "settings", "sun", "toc", "return", "library", "document", "info")
-    focal = ("library", "weread", "calendar", "tasks", "document", "bookmark")
+    focal = ("library", "weread", "calendar", "tasks", "document", "bookmark", "wifi")
     variants = [(kind, "", 96) for kind in base] + [(kind, "_small", 48) for kind in small] + [(kind, "_focal", 176) for kind in focal]
     for kind, suffix, size in variants:
         name = "papermono_icon_" + kind + suffix

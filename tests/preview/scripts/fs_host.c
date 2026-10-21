@@ -306,10 +306,19 @@ int fs_mkfs(int fs_type, uintptr_t dev_id, void *cfg, int flags)
 	return -ENOTSUP;
 }
 
+static int preview_mount_result;
+
+/* Preview-only injection, used to reach the real storage model's unformatted
+ * state. It never formats or mounts a host disk. */
+void preview_fs_mount_result(int result)
+{
+	preview_mount_result = result;
+}
+
 int fs_mount(struct fs_mount_t *mount)
 {
 	(void)mount;
-	return 0;
+	return preview_mount_result;
 }
 
 int fs_unmount(struct fs_mount_t *mount)
