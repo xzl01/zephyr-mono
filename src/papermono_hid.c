@@ -76,6 +76,9 @@ static bool mouse_enabled;
 static int16_t mouse_x, mouse_y, mouse_wheel;
 static uint32_t mouse_generation, mouse_pending_since;
 static uint32_t mouse_reports, mouse_retries;
+static uint32_t mouse_last_attempt_ms;
+static bool mouse_clock_valid;
+#define MOUSE_REPORT_INTERVAL_MS 15U
 K_MUTEX_DEFINE(hid_lock);
 K_MUTEX_DEFINE(hid_report_lock);
 
@@ -289,6 +292,7 @@ static void connected(struct bt_conn *connection, uint8_t error)
 	hid_state.suspended = false;
 	hid_state.passkey_visible = false;
 	clear_mouse_locked();
+	mouse_clock_valid = false;
 	k_mutex_unlock(&hid_lock);
 	/* Force authenticated pairing so the passkey callback can put the code on
 	 * the e-paper display. Bonds are restored by Settings on later boots.
@@ -318,6 +322,7 @@ static void disconnected(struct bt_conn *connection, uint8_t reason)
 	hid_state.suspended = false;
 	hid_state.passkey_visible = false;
 	clear_mouse_locked();
+	mouse_clock_valid = false;
 	k_mutex_unlock(&hid_lock);
 	papermono_ui_request_background_refresh();
 }
@@ -551,10 +556,30 @@ int papermono_hid_send_action(const struct papermono_hid_action *action)
 static void mouse_work_handler(struct k_work *work);
 K_WORK_DELAYABLE_DEFINE(mouse_work, mouse_work_handler);
 
+static void schedule_mouse(uint32_t delay)
+{
+	if (delay == 0U) {
+		/* A previous mode may have left a delayed wakeup pending. Pull only
+		 * immediate work forward; normal samples must not postpone a slot.
+		 */
+		(void)k_work_reschedule(&mouse_work, K_NO_WAIT);
+	} else {
+		(void)k_work_schedule(&mouse_work, K_MSEC(delay));
+	}
+}
+
 static void accumulate_mouse(int16_t *pending, int16_t delta)
 {
 	/* Bound congestion to four reports instead of building a cursor backlog. */
 	*pending = CLAMP((int)*pending + delta, -508, 508);
+}
+
+static uint32_t mouse_delay_locked(uint32_t now)
+{
+	const uint32_t elapsed = now - mouse_last_attempt_ms;
+
+	return !mouse_clock_valid || elapsed >= MOUSE_REPORT_INTERVAL_MS ? 0U :
+		MOUSE_REPORT_INTERVAL_MS - elapsed;
 }
 
 static void mouse_work_handler(struct k_work *work)
@@ -562,7 +587,7 @@ static void mouse_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 	struct bt_conn *connection = NULL;
 	uint8_t report[4];
-	uint32_t generation, since;
+	uint32_t generation, since, delay;
 	bool pending;
 	int ret = 0;
 
@@ -574,8 +599,23 @@ static void mouse_work_handler(struct k_work *work)
 		clear_mouse_locked();
 	}
 	pending = mouse_x != 0 || mouse_y != 0 || mouse_wheel != 0;
+	delay = mouse_delay_locked(k_uptime_get_32());
+	if (pending && delay > 0U) {
+		/* An input sample may have queued this work just before the previous
+		 * attempt reserved its time slot. Enforce spacing in the worker too.
+		 */
+		k_mutex_unlock(&hid_lock);
+		k_mutex_unlock(&hid_report_lock);
+		schedule_mouse(delay);
+		return;
+	}
 	if (pending && active_connection != NULL) {
 		connection = bt_conn_ref(active_connection);
+		/* Reserve before dropping hid_lock: an input callback can preempt
+		 * bt_gatt_notify(), and must see this slot as already occupied.
+		 */
+		mouse_last_attempt_ms = k_uptime_get_32();
+		mouse_clock_valid = true;
 	}
 	generation = mouse_generation;
 	since = mouse_pending_since;
@@ -615,13 +655,14 @@ static void mouse_work_handler(struct k_work *work)
 		}
 	}
 	pending = mouse_x != 0 || mouse_y != 0 || mouse_wheel != 0;
+	delay = mouse_delay_locked(k_uptime_get_32());
 	k_mutex_unlock(&hid_lock);
 	if (connection != NULL) {
 		bt_conn_unref(connection);
 	}
 	k_mutex_unlock(&hid_report_lock);
 	if (pending) {
-		(void)k_work_schedule(&mouse_work, K_MSEC(16));
+		schedule_mouse(delay);
 	}
 }
 
@@ -631,6 +672,7 @@ void papermono_hid_mouse_enable(bool enabled)
 	if (mouse_enabled != enabled) {
 		mouse_enabled = enabled;
 		clear_mouse_locked();
+		mouse_clock_valid = false;
 		LOG_INF("BLE touchpad stream %s; reports=%u retries=%u",
 			enabled ? "enabled" : "disabled", mouse_reports, mouse_retries);
 	}
@@ -640,6 +682,7 @@ void papermono_hid_mouse_enable(bool enabled)
 void papermono_hid_mouse_move(int16_t x, int16_t y, int16_t wheel)
 {
 	bool pending = false;
+	uint32_t delay = 0U;
 
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	if (mouse_enabled && hid_state.connected && hid_state.secured &&
@@ -651,13 +694,14 @@ void papermono_hid_mouse_move(int16_t x, int16_t y, int16_t wheel)
 		accumulate_mouse(&mouse_y, y);
 		accumulate_mouse(&mouse_wheel, wheel);
 		pending = mouse_x != 0 || mouse_y != 0 || mouse_wheel != 0;
+		delay = mouse_delay_locked(k_uptime_get_32());
 	}
 	k_mutex_unlock(&hid_lock);
 	if (pending) {
-		/* schedule(), unlike reschedule(), does not keep postponing a report
-		 * as the 8 ms input samples arrive. The display thread is uninvolved.
+		/* Idle first motion has no coalescing delay. Later samples share the
+		 * next 15 ms slot; schedule() never postpones an existing deadline.
 		 */
-		(void)k_work_schedule(&mouse_work, K_MSEC(16));
+		schedule_mouse(delay);
 	}
 }
 

@@ -3636,7 +3636,7 @@ static void papermono_ui_input_event(struct input_event *event,
 			}
 			int16_t dx, dy, wheel;
 			if (papermono_touchpad_update(&touchpad_contact,
-				touch_x, touch_y, &dx, &dy, &wheel)) {
+				touch_x, touch_y, k_uptime_get_32(), &dx, &dy, &wheel)) {
 				papermono_hid_mouse_move(dx, dy, wheel);
 				atomic_set(&remote_touchpad_activity, k_uptime_get_32());
 			}
@@ -3680,7 +3680,7 @@ static void papermono_ui_input_event(struct input_event *event,
 				touch_y < remote_mouse_pad.y + remote_mouse_pad.height;
 			if (touchpad_captured) {
 				papermono_touchpad_begin(&touchpad_contact,
-					touch_x, touch_y, touch_x >= 360);
+					touch_x, touch_y, touch_start_ms, touch_x >= 360);
 			}
 #endif
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)

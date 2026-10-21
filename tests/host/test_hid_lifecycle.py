@@ -28,6 +28,7 @@ static inline void test_log(const char *format, ...) {(void)format;}
 #define LOG_WRN(...) test_log(__VA_ARGS__)
 #define CONFIG_BT_DEVICE_NAME "test"
 #define K_FOREVER 0
+#define K_NO_WAIT 0
 struct device;
 struct k_mutex { int unused; };
 #define K_MUTEX_DEFINE(n) struct k_mutex n
@@ -36,17 +37,27 @@ static inline void k_mutex_unlock(struct k_mutex *m) {(void)m;}
 static inline void k_msleep(int t) {(void)t;}
 struct k_work { void (*handler)(struct k_work *); };
 static struct k_work *queued;
+static uint32_t queued_due;
 struct k_work_delayable {struct k_work work;};
 #define K_WORK_DELAYABLE_DEFINE(n,f) struct k_work_delayable n = {.work={.handler=f}}
 #define K_MSEC(v) (v)
 static uint32_t mock_uptime=100;
 static inline uint32_t k_uptime_get_32(void) {return mock_uptime;}
-static inline int k_work_schedule(struct k_work_delayable *w,int t) {(void)t;queued=&w->work;return 1;}
+static inline int k_work_schedule(struct k_work_delayable *w,int t) {
+ if(queued==&w->work)return 0;
+ assert(queued==NULL);queued=&w->work;queued_due=mock_uptime+t;return 1;
+}
+static inline int k_work_reschedule(struct k_work_delayable *w,int t) {
+ assert(queued==NULL || queued==&w->work);
+ queued=&w->work;queued_due=mock_uptime+t;return 1;
+}
 #define K_WORK_DEFINE(n, f) struct k_work n = {.handler=f}
-static inline int k_work_submit(struct k_work *w) {queued=w;return 1;}
+static inline int k_work_submit(struct k_work *w) {queued=w;queued_due=mock_uptime;return 1;}
 static void drain_work(void) {
+ if(!queued || (int32_t)(mock_uptime-queued_due)<0)return;
  struct k_work *w=queued;queued=NULL;if(w)w->handler(w);
 }
+static void advance_work(void) {assert(queued);mock_uptime=queued_due;drain_work();}
 struct bt_conn { int refs; };
 static struct bt_conn slot;
 typedef uint8_t bt_security_t;
@@ -95,7 +106,14 @@ static inline ssize_t bt_gatt_attr_read(struct bt_conn *c,const struct bt_gatt_a
 static inline bool bt_gatt_is_subscribed(struct bt_conn *c,const struct bt_gatt_attr *a,int v) {(void)c;(void)a;(void)v;return true;}
 static int notify_result, notify_calls;
 static uint8_t notified[8];
-static inline int bt_gatt_notify(struct bt_conn *c,const struct bt_gatt_attr *a,const void *p,size_t l) {(void)c;(void)a;notify_calls++;assert(l<=sizeof(notified));__builtin_memcpy(notified,p,l);return notify_result;}
+static uint32_t notify_times[64];
+static void (*notify_hook)(void);
+static inline int bt_gatt_notify(struct bt_conn *c,const struct bt_gatt_attr *a,const void *p,size_t l) {
+ (void)c;(void)a;assert(notify_calls<64);notify_times[notify_calls++]=mock_uptime;
+ assert(l<=sizeof(notified));__builtin_memcpy(notified,p,l);
+ if(notify_hook){void (*hook)(void)=notify_hook;notify_hook=NULL;hook();}
+ return notify_result;
+}
 static inline int bt_bas_set_battery_level(uint8_t p) {(void)p;return 0;}
 #define sys_cpu_to_le16(v) (v)
 struct bt_data {int unused;};
@@ -117,11 +135,13 @@ static void reset(void) {
  memset(&hid_state,0,sizeof(hid_state));hid_state.initialized=true;
  active_connection=NULL;slot.refs=0;queued=NULL;adv_calls=0;
  mouse_enabled=false;clear_mouse_locked();notify_calls=0;notify_result=0;
+ mouse_clock_valid=false;mock_uptime=100;queued_due=0;notify_hook=NULL;
 }
 static void connect_slot(void) {
  slot.refs=1;connection_callbacks.connected(&slot,0);
  assert(hid_state.connected && slot.refs==2);
 }
+static void preempt_with_sample(void) {papermono_hid_mouse_move(3,0,0);}
 int main(void) {
  reset();connect_slot();
  connection_callbacks.disconnected(&slot,0x13);
@@ -155,23 +175,53 @@ int main(void) {
 
  reset();connect_slot();hid_state.secured=true;papermono_hid_mouse_enable(true);
  papermono_hid_mouse_move(12,5,0);papermono_hid_mouse_move(7,-2,0);
- assert(notify_calls==0);drain_work();
+ assert(notify_calls==0 && queued_due==mock_uptime);drain_work();
  assert(notify_calls==1 && (int8_t)notified[1]==19 && (int8_t)notified[2]==3);
- papermono_hid_mouse_move(400,-300,0);drain_work();
+ mock_uptime=108;papermono_hid_mouse_move(400,-300,0);drain_work();
+ assert(notify_calls==1 && queued_due==115);advance_work();
  assert((int8_t)notified[1]==127 && (int8_t)notified[2]==-127);
- drain_work();assert((int8_t)notified[1]==127);
+ advance_work();assert((int8_t)notified[1]==127);
  papermono_hid_mouse_enable(false);int calls=notify_calls;
- drain_work();assert(notify_calls==calls); /* no backlog after page exit */
+ advance_work();assert(notify_calls==calls); /* no backlog after page exit */
 
  papermono_hid_mouse_enable(true);notify_result=-ENOMEM;
  papermono_hid_mouse_move(20,4,0);drain_work();assert(mouse_x==20);
- notify_result=0;drain_work();assert((int8_t)notified[1]==20 && mouse_x==0);
+ notify_result=0;advance_work();assert((int8_t)notified[1]==20 && mouse_x==0);
  papermono_hid_mouse_move(30,0,0);calls=notify_calls;mock_uptime+=101;
  drain_work();assert(notify_calls==calls && mouse_x==0); /* discard stale motion */
  papermono_hid_mouse_move(10,0,0);
  connection_callbacks.disconnected(&slot,0x13);bt_conn_unref(&slot);
  connect_slot();hid_state.secured=true;calls=notify_calls;
  drain_work();assert(notify_calls==calls); /* no move crosses a reconnect */
+
+ reset();connect_slot();hid_state.secured=true;papermono_hid_mouse_enable(true);
+ papermono_hid_mouse_move(1,0,0);drain_work();assert(notify_times[0]==100);
+ mock_uptime=108;papermono_hid_mouse_move(1,0,0);assert(queued_due==115);
+ mock_uptime=114;papermono_hid_mouse_move(2,0,0);assert(queued_due==115);
+ drain_work();assert(notify_calls==1);advance_work();
+ assert(notify_calls==2 && notified[1]==3 && notify_times[1]-notify_times[0]==15);
+ mock_uptime=200;papermono_hid_mouse_move(5,0,0);
+ assert(queued_due==200);drain_work();assert(notify_times[2]==200);
+
+ reset();connect_slot();hid_state.secured=true;papermono_hid_mouse_enable(true);
+ notify_hook=preempt_with_sample;papermono_hid_mouse_move(5,0,0);drain_work();
+ assert(notify_calls==1 && queued_due==115); /* slot reserved before notify */
+ queued_due=mock_uptime;drain_work(); /* an already queued early wakeup */
+ assert(notify_calls==1 && queued_due==115);advance_work();
+ assert(notify_calls==2 && notified[1]==3 && notify_times[1]-notify_times[0]==15);
+
+ reset();connect_slot();hid_state.secured=true;papermono_hid_mouse_enable(true);
+ mock_uptime=UINT32_MAX-4U;papermono_hid_mouse_move(5,0,0);drain_work();
+ mock_uptime=3;papermono_hid_mouse_move(5,0,0);assert(queued_due==10);
+ drain_work();assert(notify_calls==1);advance_work();
+ assert(notify_calls==2 && (uint32_t)(notify_times[1]-notify_times[0])==15U);
+
+ reset();connect_slot();hid_state.secured=true;papermono_hid_mouse_enable(true);
+ papermono_hid_mouse_move(5,0,0);drain_work();
+ mock_uptime=108;papermono_hid_mouse_move(4,0,0);assert(queued_due==115);
+ papermono_hid_mouse_enable(false);papermono_hid_mouse_enable(true);
+ mock_uptime=109;papermono_hid_mouse_move(2,0,0);assert(queued_due==109);
+ drain_work();assert(notify_calls==2 && notified[1]==2);
  return 0;
 }
 """
