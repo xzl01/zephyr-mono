@@ -186,3 +186,8 @@ cc -std=c17 -Wall -Wextra -Werror -Itests/host/stubs \
 	-o "$build_dir/test_esp_wifi_compat"
 "$build_dir/test_esp_wifi_compat"
 python3 tests/host/test_wifi_backend.py
+cc -std=c17 -Wall -Wextra -Werror -ftrivial-auto-var-init=pattern \
+	-Itests/host/stubs -Iinclude tests/host/test_zip_reader.c \
+	src/papermono_archive_safety.c src/papermono_text_codec.c \
+	src/generated/papermono_gbk_table.c -o "$build_dir/test_zip_reader"
+"$build_dir/test_zip_reader"

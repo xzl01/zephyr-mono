@@ -245,6 +245,10 @@ int papermono_zip_find(const struct papermono_zip_archive *archive,
 		return -EINVAL;
 	}
 	k_mutex_lock(&zip_lock, K_FOREVER);
+	/* open_source() leaves the handle untouched when the medium is gone, so
+	 * initialise first: the failure path closes it unconditionally below.
+	 */
+	fs_file_t_init(&file);
 	ret = open_source(archive, &file);
 	ret = ret ?: fs_seek(&file, archive->central_offset, FS_SEEK_SET);
 	for (uint16_t index = 0U; ret == 0 && index < archive->entry_count;
@@ -391,6 +395,10 @@ int papermono_zip_extract(const struct papermono_zip_archive *archive,
 		return -EINVAL;
 	}
 	k_mutex_lock(&zip_lock, K_FOREVER);
+	/* Same contract as papermono_zip_find(): close the handle even when the
+	 * open failed, so it must be initialised before that attempt.
+	 */
+	fs_file_t_init(&file);
 	ret = open_source(archive, &file);
 	ret = ret ?: fs_seek(&file, entry->local_header_offset, FS_SEEK_SET);
 	ret = ret ?: read_exact(&file, local_header, sizeof(local_header));
