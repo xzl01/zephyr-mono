@@ -34,6 +34,10 @@ cc -std=c17 -Wall -Wextra -Werror \
 	src/papermono_touch_gesture.c \
 	-o "$build_dir/test_touch_gesture"
 "$build_dir/test_touch_gesture"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_touchpad.c src/papermono_touchpad.c \
+	-o "$build_dir/test_touchpad"
+"$build_dir/test_touchpad"
 cc -std=c17 -Wall -Wextra -Werror \
 	-Iinclude \
 	tests/host/test_frontlight.c \
@@ -176,4 +180,9 @@ python3 tests/host/test_content_web.py
 python3 tests/host/test_usb_reset.py
 python3 tests/host/test_esp_digest.py
 python3 tests/host/test_esp_ble_compat.py
+python3 tests/host/test_hid_lifecycle.py
+cc -std=c17 -Wall -Wextra -Werror -Itests/host/stubs \
+	tests/host/test_esp_wifi_compat.c src/papermono_esp_wifi_compat.c \
+	-o "$build_dir/test_esp_wifi_compat"
+"$build_dir/test_esp_wifi_compat"
 python3 tests/host/test_wifi_backend.py

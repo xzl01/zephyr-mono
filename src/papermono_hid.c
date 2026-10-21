@@ -23,6 +23,8 @@ LOG_MODULE_REGISTER(papermono_hid, LOG_LEVEL_INF);
 	defined(CONFIG_SOC_SERIES_ESP32C3))
 BUILD_ASSERT(IS_ENABLED(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE),
 	"BLE HID pairing requires ESP controller security support");
+BUILD_ASSERT(CONFIG_BT_RX_STACK_SIZE >= 2048,
+	"BLE HID bonding requires at least 2048 bytes of Bluetooth RX stack");
 #endif
 
 enum {
@@ -70,8 +72,18 @@ static uint8_t control_point;
 
 static struct papermono_hid_state hid_state;
 static struct bt_conn *active_connection;
+static bool mouse_enabled;
+static int16_t mouse_x, mouse_y, mouse_wheel;
+static uint32_t mouse_generation, mouse_pending_since;
+static uint32_t mouse_reports, mouse_retries;
 K_MUTEX_DEFINE(hid_lock);
 K_MUTEX_DEFINE(hid_report_lock);
+
+static void clear_mouse_locked(void)
+{
+	mouse_x = mouse_y = mouse_wheel = 0;
+	++mouse_generation;
+}
 
 static ssize_t read_info(struct bt_conn *connection,
 	const struct bt_gatt_attr *attribute, void *buffer, uint16_t length,
@@ -215,13 +227,45 @@ static int start_advertising(void)
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	if (ret == 0 || ret == -EALREADY) {
 		hid_state.advertising = true;
+		hid_state.last_error = 0;
 		ret = 0;
 	} else {
 		hid_state.advertising = false;
 		hid_state.last_error = ret;
 	}
 	k_mutex_unlock(&hid_lock);
+	if (ret < 0) {
+		LOG_WRN("BLE HID advertising failed (%d)", ret);
+	} else {
+		LOG_INF("BLE HID advertising ready");
+	}
 	return ret;
+}
+
+static void restart_advertising(struct k_work *work)
+{
+	bool needed;
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	needed = hid_state.initialized && !hid_state.connected &&
+		!hid_state.advertising;
+	k_mutex_unlock(&hid_lock);
+	if (needed) {
+		(void)start_advertising();
+		papermono_ui_request_background_refresh();
+	}
+}
+
+K_WORK_DEFINE(advertising_work, restart_advertising);
+
+static void connection_recycled(void)
+{
+	/* disconnected() still runs with a stack-owned connection reference.
+	 * With BT_MAX_CONN=1, connectable advertising must wait for this event.
+	 * Queue HCI work instead of starting it inside the stack callback.
+	 */
+	(void)k_work_submit(&advertising_work);
 }
 
 static void connected(struct bt_conn *connection, uint8_t error)
@@ -230,8 +274,8 @@ static void connected(struct bt_conn *connection, uint8_t error)
 		LOG_WRN("BLE HID connection failed (0x%02x)", error);
 		k_mutex_lock(&hid_lock, K_FOREVER);
 		hid_state.last_error = -EIO;
+		hid_state.advertising = false;
 		k_mutex_unlock(&hid_lock);
-		(void)start_advertising();
 		return;
 	}
 	k_mutex_lock(&hid_lock, K_FOREVER);
@@ -244,6 +288,7 @@ static void connected(struct bt_conn *connection, uint8_t error)
 	hid_state.advertising = false;
 	hid_state.suspended = false;
 	hid_state.passkey_visible = false;
+	clear_mouse_locked();
 	k_mutex_unlock(&hid_lock);
 	/* Force authenticated pairing so the passkey callback can put the code on
 	 * the e-paper display. Bonds are restored by Settings on later boots.
@@ -269,10 +314,11 @@ static void disconnected(struct bt_conn *connection, uint8_t reason)
 	}
 	hid_state.connected = false;
 	hid_state.secured = false;
+	hid_state.advertising = false;
 	hid_state.suspended = false;
 	hid_state.passkey_visible = false;
+	clear_mouse_locked();
 	k_mutex_unlock(&hid_lock);
-	(void)start_advertising();
 	papermono_ui_request_background_refresh();
 }
 
@@ -297,10 +343,20 @@ static void security_changed(struct bt_conn *connection, bt_security_t level,
 	}
 }
 
+static void connection_parameters_updated(struct bt_conn *connection,
+	uint16_t interval, uint16_t latency, uint16_t timeout)
+{
+	ARG_UNUSED(connection);
+	ARG_UNUSED(timeout);
+	LOG_INF("BLE HID interval=%u us latency=%u", interval * 1250U, latency);
+}
+
 BT_CONN_CB_DEFINE(connection_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.recycled = connection_recycled,
 	.security_changed = security_changed,
+	.le_param_updated = connection_parameters_updated,
 };
 
 static void passkey_display(struct bt_conn *connection, unsigned int passkey)
@@ -492,6 +548,119 @@ int papermono_hid_send_action(const struct papermono_hid_action *action)
 	return ret;
 }
 
+static void mouse_work_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(mouse_work, mouse_work_handler);
+
+static void accumulate_mouse(int16_t *pending, int16_t delta)
+{
+	/* Bound congestion to four reports instead of building a cursor backlog. */
+	*pending = CLAMP((int)*pending + delta, -508, 508);
+}
+
+static void mouse_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	struct bt_conn *connection = NULL;
+	uint8_t report[4];
+	uint32_t generation, since;
+	bool pending;
+	int ret = 0;
+
+	k_mutex_lock(&hid_report_lock, K_FOREVER);
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (!mouse_enabled || !hid_state.connected || !hid_state.secured ||
+	    hid_state.suspended || hid_state.passkey_visible ||
+	    k_uptime_get_32() - mouse_pending_since > 100U) {
+		clear_mouse_locked();
+	}
+	pending = mouse_x != 0 || mouse_y != 0 || mouse_wheel != 0;
+	if (pending && active_connection != NULL) {
+		connection = bt_conn_ref(active_connection);
+	}
+	generation = mouse_generation;
+	since = mouse_pending_since;
+	report[0] = 0;
+	report[1] = (uint8_t)(int8_t)CLAMP(mouse_x, -127, 127);
+	report[2] = (uint8_t)(int8_t)CLAMP(mouse_y, -127, 127);
+	report[3] = (uint8_t)(int8_t)CLAMP(mouse_wheel, -127, 127);
+	mouse_x -= (int8_t)report[1];
+	mouse_y -= (int8_t)report[2];
+	mouse_wheel -= (int8_t)report[3];
+	k_mutex_unlock(&hid_lock);
+	if (connection != NULL) {
+		const struct bt_gatt_attr *attribute =
+			&papermono_hid_service.attrs[HID_ATTR_MOUSE_VALUE];
+		/* Keep this connection referenced through submission. A queued move
+		 * must never be redirected to a newly connected host.
+		 */
+		ret = bt_gatt_is_subscribed(connection, attribute,
+			BT_GATT_CCC_NOTIFY) ? bt_gatt_notify(connection, attribute,
+				report, sizeof(report)) : -EACCES;
+	}
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (connection != NULL && generation == mouse_generation) {
+		if (ret == -ENOMEM || ret == -EAGAIN) {
+			accumulate_mouse(&mouse_x, (int8_t)report[1]);
+			accumulate_mouse(&mouse_y, (int8_t)report[2]);
+			accumulate_mouse(&mouse_wheel, (int8_t)report[3]);
+			mouse_pending_since = since;
+			++mouse_retries;
+		} else if (ret == 0) {
+			++mouse_reports;
+			hid_state.last_error = 0;
+			mouse_pending_since = k_uptime_get_32();
+		} else {
+			clear_mouse_locked();
+			hid_state.last_error = ret;
+		}
+	}
+	pending = mouse_x != 0 || mouse_y != 0 || mouse_wheel != 0;
+	k_mutex_unlock(&hid_lock);
+	if (connection != NULL) {
+		bt_conn_unref(connection);
+	}
+	k_mutex_unlock(&hid_report_lock);
+	if (pending) {
+		(void)k_work_schedule(&mouse_work, K_MSEC(16));
+	}
+}
+
+void papermono_hid_mouse_enable(bool enabled)
+{
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (mouse_enabled != enabled) {
+		mouse_enabled = enabled;
+		clear_mouse_locked();
+		LOG_INF("BLE touchpad stream %s; reports=%u retries=%u",
+			enabled ? "enabled" : "disabled", mouse_reports, mouse_retries);
+	}
+	k_mutex_unlock(&hid_lock);
+}
+
+void papermono_hid_mouse_move(int16_t x, int16_t y, int16_t wheel)
+{
+	bool pending = false;
+
+	k_mutex_lock(&hid_lock, K_FOREVER);
+	if (mouse_enabled && hid_state.connected && hid_state.secured &&
+	    !hid_state.suspended && !hid_state.passkey_visible) {
+		if (mouse_x == 0 && mouse_y == 0 && mouse_wheel == 0) {
+			mouse_pending_since = k_uptime_get_32();
+		}
+		accumulate_mouse(&mouse_x, x);
+		accumulate_mouse(&mouse_y, y);
+		accumulate_mouse(&mouse_wheel, wheel);
+		pending = mouse_x != 0 || mouse_y != 0 || mouse_wheel != 0;
+	}
+	k_mutex_unlock(&hid_lock);
+	if (pending) {
+		/* schedule(), unlike reschedule(), does not keep postponing a report
+		 * as the 8 ms input samples arrive. The display thread is uninvolved.
+		 */
+		(void)k_work_schedule(&mouse_work, K_MSEC(16));
+	}
+}
+
 int papermono_hid_clear_bonds(void)
 {
 	struct bt_conn *connection;
@@ -513,7 +682,7 @@ int papermono_hid_clear_bonds(void)
 		hid_state.suspended = false;
 		hid_state.passkey_visible = false;
 		k_mutex_unlock(&hid_lock);
-		(void)start_advertising();
+		(void)k_work_submit(&advertising_work);
 		papermono_ui_request_background_refresh();
 	}
 	return ret;

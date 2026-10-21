@@ -9,11 +9,17 @@ project(papermono_lvgl)
 
 include(cmake/esp32_ble_compat.cmake)
 
+if(CONFIG_WIFI_ESP32 AND CONFIG_SOC_SERIES_ESP32S3)
+  target_sources(app PRIVATE src/papermono_esp_wifi_compat.c)
+  target_link_options(app PUBLIC -Wl,--wrap=ap_try_sa_query_process)
+endif()
+
 target_sources(app PRIVATE
   src/main.c
   src/papermono_app.c
   src/papermono_interaction.c
   src/papermono_touch_gesture.c
+  src/papermono_touchpad.c
   src/papermono_frontlight.c
   src/papermono_status_led.c
   src/papermono_content_store.c

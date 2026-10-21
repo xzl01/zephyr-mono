@@ -76,6 +76,11 @@ const uint8_t *papermono_hid_report_map(size_t *length);
 int papermono_hid_encode_action(const struct papermono_hid_action *action,
 	struct papermono_hid_report *report);
 int papermono_hid_send_action(const struct papermono_hid_action *action);
+/* Coalesce relative movement without blocking the touch polling thread.
+ * Disabling the stream drops pending movement before leaving the mouse page.
+ */
+void papermono_hid_mouse_enable(bool enabled);
+void papermono_hid_mouse_move(int16_t x, int16_t y, int16_t wheel);
 int papermono_hid_clear_bonds(void);
 int papermono_hid_set_battery_level(uint8_t percent);
 void papermono_hid_get_state(struct papermono_hid_state *state);

@@ -53,6 +53,7 @@
 #include <papermono/status_led.h>
 #include <papermono/sync.h>
 #include <papermono/touch_gesture.h>
+#include <papermono/touchpad.h>
 #include <papermono/ui.h>
 #include <papermono/ui_layout.h>
 #include <papermono/weread.h>
@@ -142,6 +143,14 @@ struct remote_ui_state {
 };
 
 static struct remote_ui_state remote_state;
+#if defined(CONFIG_PAPERMONO_INTERACTIVE_UI) && defined(CONFIG_PAPERMONO_BLE_HID)
+/* Bit zero publishes availability; each transition advances the gesture epoch. */
+static atomic_t remote_touchpad_epoch;
+static atomic_t remote_touchpad_activity;
+static uint32_t touchpad_contact_epoch;
+static bool touchpad_captured;
+static struct papermono_touchpad touchpad_contact;
+#endif
 
 struct organizer_ui_state {
 	size_t calendar_first;
@@ -1873,6 +1882,33 @@ static bool remote_ready(const struct papermono_hid_state *state)
 		!state->suspended && !state->passkey_visible;
 }
 
+static void remote_touchpad_enable(bool enabled)
+{
+#if defined(CONFIG_PAPERMONO_INTERACTIVE_UI) && defined(CONFIG_PAPERMONO_BLE_HID)
+	const atomic_val_t epoch = atomic_get(&remote_touchpad_epoch);
+
+	if ((epoch & 1) != (int)enabled) {
+		papermono_hid_mouse_enable(enabled);
+		atomic_set(&remote_touchpad_epoch, epoch + 1);
+	}
+#else
+	ARG_UNUSED(enabled);
+#endif
+}
+
+static void __maybe_unused update_touchpad_activity(int64_t now)
+{
+#if defined(CONFIG_PAPERMONO_INTERACTIVE_UI) && defined(CONFIG_PAPERMONO_BLE_HID)
+	const uint32_t last = (uint32_t)atomic_get(&remote_touchpad_activity);
+	if (last != 0U && (atomic_get(&remote_touchpad_epoch) & 1) != 0) {
+		last_activity_ms = MAX(last_activity_ms,
+			now - (uint32_t)((uint32_t)now - last));
+	}
+#else
+	ARG_UNUSED(now);
+#endif
+}
+
 static int render_remote(void *context, lv_obj_t *screen)
 {
 	struct remote_ui_state *remote = context;
@@ -2003,6 +2039,7 @@ static int remote_event(void *context,
 	}
 	if (papermono_interaction_spaced_grid_index(event,
 		PAPERMONO_INTERACTION_TAP, &remote_tab_grid, &grid_index) == 0) {
+		remote_touchpad_enable(false);
 		remote->mode = (enum remote_mode)grid_index;
 		request_redraw(command);
 		return 0;
@@ -2070,38 +2107,6 @@ static int remote_event(void *context,
 		} else if (papermono_interaction_contains(event,
 			PAPERMONO_INTERACTION_LONG_PRESS, &remote_mouse_pad)) {
 			ret = remote_send(remote, PAPERMONO_HID_MOUSE, 0, 0, 0, BIT(1));
-		} else if (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
-			   papermono_app_event_is_touch(event) &&
-			   event->x >= remote_mouse_pad.x &&
-			   event->x < remote_mouse_pad.x + remote_mouse_pad.width &&
-			   event->y >= remote_mouse_pad.y &&
-			   event->y < remote_mouse_pad.y + remote_mouse_pad.height) {
-			ret = remote_send(remote, PAPERMONO_HID_MOUSE, 40, 0, 0, 0);
-		} else if (event->type == PAPERMONO_APP_EVENT_NEXT &&
-			   papermono_app_event_is_touch(event) &&
-			   event->x >= remote_mouse_pad.x &&
-			   event->x < remote_mouse_pad.x + remote_mouse_pad.width &&
-			   event->y >= remote_mouse_pad.y &&
-			   event->y < remote_mouse_pad.y + remote_mouse_pad.height) {
-			ret = remote_send(remote, PAPERMONO_HID_MOUSE, -40, 0, 0, 0);
-		} else if (event->type == PAPERMONO_APP_EVENT_UP &&
-			   papermono_app_event_is_touch(event) &&
-			   event->x >= remote_mouse_pad.x &&
-			   event->x < remote_mouse_pad.x + remote_mouse_pad.width &&
-			   event->y >= remote_mouse_pad.y &&
-			   event->y < remote_mouse_pad.y + remote_mouse_pad.height) {
-			ret = remote_send(remote, PAPERMONO_HID_MOUSE, 0,
-				event->x >= 360 ? 0 : -40,
-				event->x >= 360 ? 1 : 0, 0);
-		} else if (event->type == PAPERMONO_APP_EVENT_DOWN &&
-			   papermono_app_event_is_touch(event) &&
-			   event->x >= remote_mouse_pad.x &&
-			   event->x < remote_mouse_pad.x + remote_mouse_pad.width &&
-			   event->y >= remote_mouse_pad.y &&
-			   event->y < remote_mouse_pad.y + remote_mouse_pad.height) {
-			ret = remote_send(remote, PAPERMONO_HID_MOUSE, 0,
-				event->x >= 360 ? 0 : 40,
-				event->x >= 360 ? -1 : 0, 0);
 		}
 	}
 	if (ret < 0) {
@@ -3621,6 +3626,23 @@ static void papermono_ui_input_event(struct input_event *event,
 		touch_x = CLAMP(event->value, 0, UI_WIDTH - 1);
 	} else if (event->type == INPUT_EV_ABS && event->code == INPUT_ABS_Y) {
 		touch_y = CLAMP(event->value, 0, UI_HEIGHT - 1);
+#if defined(CONFIG_PAPERMONO_BLE_HID)
+		if (touch_pressed && touchpad_captured) {
+			if ((uint32_t)atomic_get(&remote_touchpad_epoch) !=
+			    touchpad_contact_epoch) {
+				touchpad_captured = false;
+				touch_navigation_sent = true;
+				return;
+			}
+			int16_t dx, dy, wheel;
+			if (papermono_touchpad_update(&touchpad_contact,
+				touch_x, touch_y, &dx, &dy, &wheel)) {
+				papermono_hid_mouse_move(dx, dy, wheel);
+				atomic_set(&remote_touchpad_activity, k_uptime_get_32());
+			}
+			return;
+		}
+#endif
 		/* FT6336 reports X then Y for each complete controller sample. Only
 		 * inspect the pair here, never an X value with the previous frame's Y.
 		 */
@@ -3645,6 +3667,22 @@ static void papermono_ui_input_event(struct input_event *event,
 			touch_start_x = touch_x;
 			touch_start_y = touch_y;
 			touch_start_ms = k_uptime_get_32();
+#if defined(CONFIG_PAPERMONO_BLE_HID)
+			touchpad_contact_epoch = (uint32_t)atomic_get(&remote_touchpad_epoch);
+			/* This epoch is published only after the mouse page is visible,
+			 * and revoked before leaving it. A same-page EPD refresh must not
+			 * suppress new touchpad contacts through the generic input guard.
+			 */
+			touchpad_captured = (touchpad_contact_epoch & 1U) != 0U &&
+				touch_x >= MAX(remote_mouse_pad.x, UI_WIDTH / 10) &&
+				touch_x < remote_mouse_pad.x + remote_mouse_pad.width &&
+				touch_y >= remote_mouse_pad.y &&
+				touch_y < remote_mouse_pad.y + remote_mouse_pad.height;
+			if (touchpad_captured) {
+				papermono_touchpad_begin(&touchpad_contact,
+					touch_x, touch_y, touch_x >= 360);
+			}
+#endif
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 			touch_input_generation = atomic_get(&wifi_layout_transition) ? UINT32_MAX :
 				(uint32_t)atomic_get(&wifi_input_generation);
@@ -3657,6 +3695,16 @@ static void papermono_ui_input_event(struct input_event *event,
 			int ret;
 
 			touch_pressed = false;
+#if defined(CONFIG_PAPERMONO_BLE_HID)
+			if (touchpad_captured) {
+				touchpad_captured = false;
+				if (touchpad_contact.moved || touchpad_contact_epoch !=
+				    (uint32_t)atomic_get(&remote_touchpad_epoch)) {
+					touch_navigation_sent = false;
+					return;
+				}
+			}
+#endif
 			if (touch_navigation_sent) {
 				touch_navigation_sent = false;
 				return;
@@ -3737,6 +3785,10 @@ static int render_current(enum papermono_refresh_quality quality)
 {
 	lv_obj_t *screen = lv_screen_active();
 	int ret;
+	if (app_router.current != PAPERMONO_APP_REMOTE ||
+	    remote_state.mode != REMOTE_MODE_MOUSE) {
+		remote_touchpad_enable(false);
+	}
 
 	/* Page handlers and on_open hooks may have just polled TF/network state.
 	 * Submit the LED snapshot only after those mutations, otherwise the worker
@@ -3753,6 +3805,12 @@ static int render_current(enum papermono_refresh_quality quality)
 		return ret;
 	}
 	ret = papermono_display_refresh(quality);
+#if defined(CONFIG_PAPERMONO_BLE_HID)
+	struct papermono_hid_state hid;
+	papermono_hid_get_state(&hid);
+	remote_touchpad_enable(ret == 0 && app_router.current == PAPERMONO_APP_REMOTE &&
+		remote_state.mode == REMOTE_MODE_MOUSE && remote_ready(&hid));
+#endif
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 	if (ret == 0) atomic_set(&wifi_layout_transition, 0);
 #endif
@@ -3762,6 +3820,7 @@ static int render_current(enum papermono_refresh_quality quality)
 
 static int open_app(enum papermono_app_id target)
 {
+	remote_touchpad_enable(false);
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 	wifi_advance_input();
 #endif
@@ -3783,6 +3842,7 @@ static int enter_power_state(bool shutdown)
 	lv_obj_t *pool;
 	lv_obj_t *label;
 	int ret;
+	remote_touchpad_enable(false);
 
 	confirmation = CONFIRM_NONE;
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
@@ -3873,6 +3933,7 @@ static int __maybe_unused process_event(
 		return enter_power_state(false);
 	}
 	if (event->type == PAPERMONO_APP_EVENT_HOME) {
+		remote_touchpad_enable(false);
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 		wifi_advance_input();
 #endif
@@ -3901,6 +3962,7 @@ static int __maybe_unused process_event(
 	case PAPERMONO_APP_COMMAND_OPEN:
 		return open_app(command.target);
 	case PAPERMONO_APP_COMMAND_BACK:
+		remote_touchpad_enable(false);
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 		wifi_advance_input();
 #endif
@@ -4012,6 +4074,7 @@ int papermono_ui_run(void)
 		const int64_t now = k_uptime_get();
 		int64_t deadline = INT64_MAX;
 		int ret;
+		update_touchpad_activity(now);
 
 #if CONFIG_PAPERMONO_UI_AUTO_REFRESH_MINUTES > 0
 		deadline = last_refresh_ms +
@@ -4057,6 +4120,10 @@ int papermono_ui_run(void)
 			}
 		} else if (ret == -EAGAIN) {
 			const int64_t current = k_uptime_get();
+			/* Raw movement bypasses the UI queue. Recheck its timestamp after
+			 * a timeout instead of sleeping against the old idle deadline.
+			 */
+			update_touchpad_activity(current);
 
 			if (prefs->idle_sleep_minutes > 0U &&
 			    current - last_activity_ms >=
@@ -4068,8 +4135,15 @@ int papermono_ui_run(void)
 				} else {
 					ret = enter_power_state(false);
 				}
-			} else {
+			}
+#if CONFIG_PAPERMONO_UI_AUTO_REFRESH_MINUTES > 0
+			else if (current - last_refresh_ms >=
+				 (int64_t)CONFIG_PAPERMONO_UI_AUTO_REFRESH_MINUTES * 60000) {
 				ret = render_current(PAPERMONO_REFRESH_AUTO);
+			}
+#endif
+			else {
+				ret = 0;
 			}
 		}
 		if (ret < 0) {
