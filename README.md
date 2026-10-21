@@ -194,6 +194,22 @@ profile。NFC、LoRa 等只有完成真实标签/对端验证后才应标记为�
 第三方及上游派生文件继续保留 Apache-2.0、OFL-1.1 或各自的许可证和归属，详见
 `licenses/` 与 [字体许可证](docs/font-licenses.md)。
 
+## 许可证
+
+本项目以 **MIT License** 发布，全文见 [LICENSE](LICENSE)。选择 MIT 的原因：
+它是本仓库文件头使用最广的许可（M5Stack 参考实现同样为 MIT），条款简单、允许
+商用和闭源衍生，且与仓库内其他许可可以共存。
+
+| 内容 | 许可 |
+| --- | --- |
+| `src/`、`include/`、`scripts/`、`tests/` 等原创代码 | MIT（[LICENSE](LICENSE)） |
+| `patches/zephyr/` 中针对 Zephyr 4.4.1 的补丁（上游为 Apache-2.0） | Apache-2.0（[licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)），补丁本身随上游条款 |
+| 字体（思源、Montserrat、Libre Bodoni 等） | SIL OFL-1.1（[字体许可证](docs/font-licenses.md)） |
+| Phosphor 图标 | MIT（[licenses/Phosphor-Icons-MIT.txt](licenses/Phosphor-Icons-MIT.txt)） |
+
+仅在个人设备上刷写本固件不涉及再分发；若你将修改后的固件或源码对外发布，请保留
+`LICENSE`、`licenses/` 与相应文件头中的版权与许可声明。
+
 提交补丁前请阅读 [贡献指南](CONTRIBUTING.md)；安全问题请按
 [安全策略](SECURITY.md) 私下报告，不要在公开 issue 中附带 Wi-Fi 凭据、会话
 令牌、配对码或设备唯一标识。
