@@ -15,6 +15,7 @@ enum preview_wifi_operation {
 };
 int preview_init(void);
 int preview_wifi_fixture(const char *name);
+extern bool preview_sync_active;
 void preview_wifi_probe_reset(void);
 void preview_wifi_result(unsigned operation, int result);
 unsigned preview_wifi_calls(unsigned operation, bool accepted);
@@ -298,6 +299,13 @@ int preview_run_assertions(void)
 	event.input_generation = (uint32_t)atomic_get(&wifi_input_generation);
 	PREVIEW_CHECK(process_event(&event) == 0 && wifi_ui.input.length == 1);
 	PREVIEW_CHECK(wifi_ui.input.text[0] == key.character);
+
+	/* Automatic sleep must also defer while the authenticated BLE sync owns
+	 * an acknowledged transfer; otherwise idle timeout truncates it. */
+	preview_sync_active = true;
+	PREVIEW_CHECK(automatic_sleep_inhibited());
+	preview_sync_active = false;
+	PREVIEW_CHECK(!automatic_sleep_inhibited());
 
 	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
 	PREVIEW_CHECK(preview_draft_erased());

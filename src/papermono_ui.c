@@ -3904,6 +3904,28 @@ static int enter_power_state(bool shutdown)
 	return render_current(PAPERMONO_REFRESH_FULL);
 }
 
+/* Both the HTTP content centre and the authenticated BLE sync can be holding
+ * acknowledged transfer state. Sleeping mid-transfer truncates it, so either
+ * source defers automatic sleep and a power click.
+ */
+static bool transfer_in_progress(void)
+{
+#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
+	if (papermono_content_server_busy()) {
+		return true;
+	}
+#endif
+#if defined(CONFIG_PAPERMONO_BLE_SYNC)
+	struct papermono_sync_state sync;
+
+	papermono_sync_get_state(&sync);
+	if (sync.active) {
+		return true;
+	}
+#endif
+	return false;
+}
+
 static int __maybe_unused process_event(
 	const struct papermono_app_event *event)
 {
@@ -3923,12 +3945,10 @@ static int __maybe_unused process_event(
 
 	if (event->type == PAPERMONO_APP_EVENT_SLEEP &&
 	    event->source == PAPERMONO_APP_EVENT_SOURCE_BUTTON) {
-#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
-		if (papermono_content_server_busy()) {
-			LOG_WRN("Power click sleep cancelled during content transfer");
+		if (transfer_in_progress()) {
+			LOG_WRN("Power click sleep cancelled during an active transfer");
 			return 0;
 		}
-#endif
 		LOG_INF("UI power click entering deep sleep from app=%d",
 			app_router.current);
 		return enter_power_state(false);
@@ -3987,15 +4007,11 @@ static int __maybe_unused process_event(
 
 static bool __maybe_unused automatic_sleep_inhibited(void)
 {
-#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 	/* An idle provisioning AP must still obey the configured sleep timeout.
-	 * Only defer sleep while a bounded request owns mutable upload/configuration
-	 * state; waking the device brings the AP back for later provisioning.
+	 * Only defer sleep while a bounded request or sync owns transfer state;
+	 * waking the device brings the AP back for later provisioning.
 	 */
-	return papermono_content_server_busy();
-#else
-	return false;
-#endif
+	return transfer_in_progress();
 }
 
 int papermono_ui_init(const struct device *display)

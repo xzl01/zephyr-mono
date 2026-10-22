@@ -484,15 +484,16 @@ int papermono_content_server_reset_wifi(void)
 	return preview_wifi_request(PREVIEW_WIFI_RESET);
 }
 
+bool preview_sync_active;
+
 void papermono_sync_get_state(struct papermono_sync_state *state)
 {
 	if (state == NULL) {
 		return;
 	}
 	memset(state, 0, sizeof(*state));
-	/* Demo fixture: idle, ready. */
 	state->initialized = true;
-	state->active = false;
+	state->active = preview_sync_active;
 	state->last_error = 0;
 }
 

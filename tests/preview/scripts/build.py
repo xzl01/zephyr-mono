@@ -78,6 +78,7 @@ def main():
     cc = shlex.split(os.environ.get("CC", "cc"))
     flags = ["-std=gnu17", "-O1", "-g0", "-fno-strict-aliasing",
              "-DCONFIG_PAPERMONO_CONTENT_SERVER=1", "-DCONFIG_PAPERMONO_BLE_HID=1",
+             "-DCONFIG_PAPERMONO_BLE_SYNC=1",
              "-DLV_CONF_INCLUDE_SIMPLE", f"-I{HERE}", f"-I{HERE / 'shims'}",
              f"-I{REPO / 'include'}", f"-I{lvgl}"]
     sources = []
