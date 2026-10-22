@@ -8,6 +8,11 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(papermono_lvgl)
 
 include(cmake/esp32_ble_compat.cmake)
+include(cmake/xtensa_irq_exit_compat.cmake)
+
+if(CONFIG_BT_ESP32 AND (CONFIG_SOC_SERIES_ESP32S3 OR CONFIG_SOC_SERIES_ESP32C3))
+  target_sources(app PRIVATE src/papermono_esp_radio_compat.c)
+endif()
 
 if(CONFIG_WIFI_ESP32 AND CONFIG_SOC_SERIES_ESP32S3)
   target_sources(app PRIVATE src/papermono_esp_wifi_compat.c)

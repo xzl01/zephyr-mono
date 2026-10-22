@@ -180,6 +180,7 @@ python3 tests/host/test_content_web.py
 python3 tests/host/test_usb_reset.py
 python3 tests/host/test_esp_digest.py
 python3 tests/host/test_esp_ble_compat.py
+python3 tests/host/test_xtensa_irq_exit.py
 python3 tests/host/test_hid_lifecycle.py
 cc -std=c17 -Wall -Wextra -Werror -Itests/host/stubs \
 	tests/host/test_esp_wifi_compat.c src/papermono_esp_wifi_compat.c \
