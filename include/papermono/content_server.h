@@ -84,6 +84,14 @@ int papermono_content_server_connect_saved(void);
  */
 int papermono_content_server_forget_wifi(void);
 
+/* Pause the Wi-Fi radio for a BLE voice session: disconnect the station and
+ * disable the provisioning AP, suppress retries, and resume the previous
+ * station/AP policy when the session ends. Both calls are idempotent and must
+ * be made from thread context.
+ */
+int papermono_content_server_pause_wifi(void);
+int papermono_content_server_resume_wifi(void);
+
 int papermono_content_server_init(void);
 void papermono_content_server_get_state(
 	struct papermono_content_server_state *state);

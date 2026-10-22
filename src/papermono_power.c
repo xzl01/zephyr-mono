@@ -26,6 +26,9 @@
 #if defined(CONFIG_PAPERMONO_PDM_MIC)
 #include <papermono/pdm_mic.h>
 #endif
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+#include <papermono/ble_mic.h>
+#endif
 #if defined(CONFIG_PAPERMONO_RX8130_TIMER)
 #include <papermono/rx8130.h>
 #endif
@@ -114,6 +117,13 @@ static int papermono_power_prepare_peripherals(void)
 		/* Power-off is idempotent and also stops any active RF field. */
 		ret = ret ?: papermono_st25r3916_set_power(nfc, false);
 	}
+#endif
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	/* The voice worker owns the PDM stream while a session is active. Stop it
+	 * before the generic microphone power-down so a sleeping device cannot
+	 * leave the host with an open microphone stream.
+	 */
+	papermono_ble_mic_abort();
 #endif
 #if defined(CONFIG_PAPERMONO_PDM_MIC)
 	if (device_is_ready(microphone)) {

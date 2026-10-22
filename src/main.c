@@ -45,6 +45,9 @@
 #include <papermono/hid.h>
 #include <papermono/sync.h>
 #endif
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+#include <papermono/ble_mic.h>
+#endif
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
@@ -495,6 +498,13 @@ int main(void)
 	ret = papermono_sync_init();
 	if (ret < 0) {
 		LOG_WRN("BLE small-data sync unavailable (%d)", ret);
+		papermono_status_led_report_startup_fault(true);
+	}
+	#endif
+	#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	ret = papermono_ble_mic_init();
+	if (ret < 0) {
+		LOG_WRN("BLE voice microphone unavailable (%d)", ret);
 		papermono_status_led_report_startup_fault(true);
 	}
 	#endif

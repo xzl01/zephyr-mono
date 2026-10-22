@@ -211,10 +211,23 @@ BT_GATT_SERVICE_DEFINE(papermono_hid_service,
 		BT_GATT_CHRC_WRITE_WITHOUT_RESP, HID_WRITE_ENCRYPT, NULL,
 		write_control_point, &control_point));
 
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+/* ATVV service UUID used by the voice microphone transport. The UUID is
+ * advertised so ATVV-capable hosts can discover the device without guessing
+ * from its name; the 128-bit UUID still fits in the 31-byte advertising PDU
+ * next to the HID and BAS 16-bit UUIDs.
+ */
+#define BT_UUID_PAPERMONO_MIC_SERVICE_VAL \
+	BT_UUID_128_ENCODE(0xab5e0001, 0x5a21, 0x4f05, 0xbc7d, 0xaf01f617b664)
+#endif
+
 static const struct bt_data advertising_data[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL),
 		BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)),
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_PAPERMONO_MIC_SERVICE_VAL),
+#endif
 };
 static const struct bt_data scan_response[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME,

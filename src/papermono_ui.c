@@ -37,6 +37,9 @@
 #include <lvgl.h>
 
 #include <papermono/app.h>
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+#include <papermono/ble_mic.h>
+#endif
 #include <papermono/content_store.h>
 #include <papermono/content_server.h>
 #include <papermono/display_scheduler.h>
@@ -135,6 +138,9 @@ enum remote_mode {
 	REMOTE_MODE_MEDIA,
 	REMOTE_MODE_PRESENTATION,
 	REMOTE_MODE_MOUSE,
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	REMOTE_MODE_VOICE,
+#endif
 };
 
 struct remote_ui_state {
@@ -150,6 +156,20 @@ static atomic_t remote_touchpad_activity;
 static uint32_t touchpad_contact_epoch;
 static bool touchpad_captured;
 static struct papermono_touchpad touchpad_contact;
+#endif
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+/* Bit zero publishes hold-to-talk availability for the voice page; every
+ * transition advances the epoch, exactly like remote_touchpad_epoch, so a
+ * contact captured on one page can never finish on another.
+ */
+static atomic_t remote_voice_epoch;
+/* Set by the input callback when it starts a hold, cleared by that callback on
+ * release or by the UI when the page, mode or power state owning the hold is
+ * gone. Atomic so both threads can retire one hold exactly once.
+ */
+static atomic_t remote_voice_contact;
+/* Last rejected request_start(), shown by the next voice page render. */
+static atomic_t remote_voice_start_error;
 #endif
 
 struct organizer_ui_state {
@@ -283,6 +303,12 @@ static uint32_t touch_input_generation;
 static uint32_t last_touch_action_ms;
 static bool touch_pressed;
 static bool touch_navigation_sent;
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+/* Input-thread view of the current contact: this press started hold-to-talk,
+ * so its release must stop the stream and skip gesture classification.
+ */
+static bool voice_hold;
+#endif
 static atomic_t input_blocked;
 /* IRQ_STATUS3 can latch the wake click after the PMIC init has cleared it.
  * Accept only clicks captured after the fully started UI owns the event loop.
@@ -1797,14 +1823,31 @@ static int render_library(void *context, lv_obj_t *screen)
 	return render_library_list(state, screen);
 }
 
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+#define REMOTE_TAB_COUNT 4
+#else
+#define REMOTE_TAB_COUNT 3
+#endif
+
 static const struct papermono_interaction_grid_layout remote_tab_grid = {
 	.x = 22,
 	.y = 212,
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	/* Four 103 px cells and three 8 px gaps still span the 436 px content
+	 * column, so the tab row keeps its y, height and right margin.
+	 */
+	.cell_width = 103,
+#else
 	.cell_width = 140,
+#endif
 	.cell_height = 64,
 	.column_gap = 8,
 	.row_gap = 0,
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	.columns = 4,
+#else
 	.columns = 3,
+#endif
 	.rows = 1,
 };
 
@@ -1822,6 +1865,13 @@ static const struct papermono_interaction_grid_layout remote_action_grid = {
 static const struct papermono_rect remote_mouse_pad = {
 	22, 296, 436, 250,
 };
+
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+/* The hold target is drawn and hit tested from this one rectangle. */
+static const struct papermono_rect remote_voice_pad = {
+	22, 296, 436, 250,
+};
+#endif
 
 static void remote_action_card(lv_obj_t *screen, int column, int row,
 	const char *title, const char *meta)
@@ -1910,6 +1960,127 @@ static void __maybe_unused update_touchpad_activity(int64_t now)
 #endif
 }
 
+/* Arm or disarm hold-to-talk and stop whatever session the voice page owned.
+ * Disarming is what stops the stream when the user leaves the page, switches
+ * mode, loses the subscription or sleeps: the release event that would normally
+ * stop it may belong to another page by then. Only the UI thread calls this,
+ * so the epoch write needs no CAS.
+ */
+static void remote_voice_set_armed(bool armed)
+{
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	const atomic_val_t epoch = atomic_get(&remote_voice_epoch);
+
+	if ((epoch & 1) == (int)armed) {
+		return;
+	}
+	atomic_set(&remote_voice_epoch, epoch + 1);
+	if (!armed) {
+		/* The page that could hold a session is gone, so retire the contact
+		 * flag here instead of waiting for a release that may never arrive.
+		 * request_stop() is idempotent and does nothing when idle.
+		 */
+		(void)atomic_cas(&remote_voice_contact, 1, 0);
+		(void)papermono_ble_mic_request_stop();
+	}
+#else
+	ARG_UNUSED(armed);
+#endif
+}
+
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+/* Report only what the microphone worker publishes. There is deliberately no
+ * timer and no level meter: the page changes on start, on stop and on the
+ * background refresh the worker requests when it stops a session itself.
+ */
+static void remote_voice_status(const struct papermono_ble_mic_state *mic,
+	char *text, size_t size)
+{
+	const int request_error = (int)atomic_get(&remote_voice_start_error);
+	const int error = mic->last_error < 0 ? mic->last_error : request_error;
+
+	if (error < 0 || !mic->initialized) {
+		(void)snprintf(text, size,
+			"语音传输失败（%d）\n请确认电脑已连接并订阅",
+			error < 0 ? error : -ENODEV);
+		return;
+	}
+	if (!mic->subscribed) {
+		(void)snprintf(text, size,
+			"等待电脑订阅语音服务\n请在电脑端启动接收器");
+		return;
+	}
+	switch (mic->phase) {
+	case PAPERMONO_BLE_MIC_STARTING:
+		(void)snprintf(text, size, "正在启动麦克风…");
+		break;
+	case PAPERMONO_BLE_MIC_STREAMING:
+		(void)snprintf(text, size, "正在传音\n松开结束");
+		break;
+	case PAPERMONO_BLE_MIC_STOPPING:
+		(void)snprintf(text, size, "正在停止麦克风…");
+		break;
+	case PAPERMONO_BLE_MIC_IDLE:
+	default:
+		if (mic->sessions > 0U) {
+			(void)snprintf(text, size,
+				"按住此区域说话\n上次传输 %u.%u 秒 · %u KB",
+				mic->session_ms / 1000U,
+				(mic->session_ms % 1000U) / 100U,
+				mic->session_bytes / 1024U);
+		} else {
+			(void)snprintf(text, size, "按住此区域说话\n松开结束");
+		}
+		break;
+	}
+}
+
+static void render_remote_voice(lv_obj_t *screen,
+	const struct papermono_hid_state *state)
+{
+	struct papermono_ble_mic_state mic;
+	char status[128];
+	const int32_t center = UI_WIDTH / 2;
+	lv_obj_t *label;
+
+	papermono_ble_mic_get_state(&mic);
+	if (mic.phase != PAPERMONO_BLE_MIC_IDLE) {
+		/* An accepted request owns the page now; drop a stale local error. */
+		atomic_set(&remote_voice_start_error, 0);
+	}
+	/* Publish availability only while this page is the one being drawn: the
+	 * input callback captures the epoch at press time and cannot see a page
+	 * change otherwise. This branch only runs after remote_ready() passed.
+	 */
+	remote_voice_set_armed(remote_ready(state) && mic.subscribed);
+
+	(void)make_outline_shape(screen, remote_voice_pad.x, remote_voice_pad.y,
+		remote_voice_pad.width, remote_voice_pad.height, 1, 0);
+	label = detail_text(screen, "语音输入", remote_voice_pad.x + 16, 320,
+		remote_voice_pad.width - 32, 34, true);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	/* Capsule, cradle, stem and base reuse the media cards' geometric
+	 * vocabulary, so the glyph needs no bitmap asset or extra font.
+	 */
+	(void)make_outline_shape(screen, center - 14, 366, 28, 52, 2, 0);
+	(void)make_fixed_line(screen, center - 28, 392, center - 28, 428, 2, 0, 0, ink);
+	(void)make_fixed_line(screen, center - 28, 428, center + 28, 428, 2, 0, 0, ink);
+	(void)make_fixed_line(screen, center + 28, 392, center + 28, 428, 2, 0, 0, ink);
+	(void)make_fixed_line(screen, center, 428, center, 444, 2, 0, 0, ink);
+	(void)make_fixed_line(screen, center - 18, 444, center + 18, 444, 2, 0, 0, ink);
+	remote_voice_status(&mic, status, sizeof(status));
+	label = detail_text(screen, status, remote_voice_pad.x + 16, 460,
+		remote_voice_pad.width - 32, 70, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	/* The receiver and its virtual microphone run on the computer; the device
+	 * cannot verify either, so the hint states a requirement, not a status.
+	 */
+	label = detail_text(screen, "电脑端需运行接收器，\n并选择虚拟麦克风作为输入。",
+		remote_voice_pad.x, 570, remote_voice_pad.width, 60, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+}
+#endif
+
 static int render_remote(void *context, lv_obj_t *screen)
 {
 	struct remote_ui_state *remote = context;
@@ -1944,8 +2115,13 @@ static int render_remote(void *context, lv_obj_t *screen)
 		(void)papermono_hid_set_battery_level((uint8_t)CLAMP(((int)snapshot.battery_mv - 3300) * 100 / 900, 0, 100));
 	}
 #endif
-	static const char *const tabs[] = {"媒体", "演示", "鼠标"};
-	for (size_t i = 0; i < 3; ++i) {
+	static const char *const tabs[REMOTE_TAB_COUNT] = {
+		"媒体", "演示", "鼠标",
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+		"语音",
+#endif
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(tabs); ++i) {
 		struct papermono_rect rect;
 		(void)papermono_interaction_grid_cell_rect(&remote_tab_grid, i, &rect);
 		lv_obj_t *label = detail_text(screen, tabs[i], rect.x, rect.y+14, rect.width, 34, true);
@@ -1954,6 +2130,8 @@ static int render_remote(void *context, lv_obj_t *screen)
 	}
 	(void)make_ink_shape(screen, 22, 280, 436, 1, ink, 0);
 	if (!remote_ready(&state)) {
+		/* The voice page is not visible, so hold-to-talk must not be armed. */
+		remote_voice_set_armed(false);
 		detail_icon(screen, &papermono_icon_remote, 340);
 		lv_obj_t *label = detail_text(screen, state.suspended ? "等待电脑恢复" : "完成连接后可操作",
 			22, 472, 436, 38, true);
@@ -1970,6 +2148,13 @@ static int render_remote(void *context, lv_obj_t *screen)
 		make_footer(screen, "顶部切换模式 · 连接后可使用");
 		return 0;
 	}
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	if (remote->mode == REMOTE_MODE_VOICE) {
+		render_remote_voice(screen, &state);
+		make_footer(screen, "按住说话 · 顶部切换模式");
+		return 0;
+	}
+#endif
 	if (remote->mode == REMOTE_MODE_MEDIA) {
 		remote_action_card(screen,0,0,"播放 / 暂停","PLAY"); remote_action_card(screen,1,0,"静音","MUTE");
 		remote_action_card(screen,0,1,"上一首","PREVIOUS"); remote_action_card(screen,1,1,"下一首","NEXT");
@@ -2041,6 +2226,11 @@ static int remote_event(void *context,
 	if (papermono_interaction_spaced_grid_index(event,
 		PAPERMONO_INTERACTION_TAP, &remote_tab_grid, &grid_index) == 0) {
 		remote_touchpad_enable(false);
+		/* Switching modes abandons the visible page, so a hold that started
+		 * there must stop instead of waiting for a release that now belongs
+		 * to the next mode.
+		 */
+		remote_voice_set_armed(false);
 		remote->mode = (enum remote_mode)grid_index;
 		request_redraw(command);
 		return 0;
@@ -2051,6 +2241,16 @@ static int remote_event(void *context,
 	papermono_hid_get_state(&state);
 #endif
 	if (!remote_ready(&state)) return 0;
+
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	if (remote->mode == REMOTE_MODE_VOICE) {
+		/* Hold-to-talk is owned by the input callback so the microphone is
+		 * started and stopped without waiting for gesture classification.
+		 * Taps on the page therefore send nothing.
+		 */
+		return 0;
+	}
+#endif
 
 	if (remote->mode == REMOTE_MODE_MEDIA) {
 		if (event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
@@ -2115,6 +2315,17 @@ static int remote_event(void *context,
 		request_redraw(command);
 	}
 	return 0;
+}
+
+/* Leaving the remote page (back, home, footer, app switch) reaches this hook,
+ * so a hold in progress stops here even though its release will be delivered
+ * to whatever page is showing by then.
+ */
+static void remote_close(void *context)
+{
+	ARG_UNUSED(context);
+	remote_touchpad_enable(false);
+	remote_voice_set_armed(false);
 }
 
 #define CALENDAR_ROWS 5U
@@ -3478,7 +3689,7 @@ static const struct papermono_app_descriptor apps[] = {
 	{ PAPERMONO_APP_LIBRARY, "书库", true, library_open, render_library, library_event, library_close, &library_state },
 	{ PAPERMONO_APP_WEREAD, "微信读书", true, weread_open, render_weread, weread_event, NULL, &weread_ui },
 	{ PAPERMONO_APP_CONTENT, "内容中心", true, NULL, render_content_center, common_event, NULL, NULL },
-	{ PAPERMONO_APP_REMOTE, "遥控器", true, NULL, render_remote, remote_event, NULL, &remote_state },
+	{ PAPERMONO_APP_REMOTE, "遥控器", true, NULL, render_remote, remote_event, remote_close, &remote_state },
 	{ PAPERMONO_APP_CALENDAR, "日历", true, organizer_open, render_calendar, calendar_event, NULL, &organizer_ui },
 	{ PAPERMONO_APP_TASKS, "待办", true, organizer_open, render_tasks, tasks_event, NULL, &organizer_ui },
 	{ PAPERMONO_APP_NOTES, "便签", true, organizer_open, render_notes, notes_event, NULL, &organizer_ui },
@@ -3505,6 +3716,22 @@ static int queue_event(enum papermono_app_event_type type,
 
 	return k_msgq_put(&ui_events, &event, K_NO_WAIT);
 }
+
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+/* Ask for a voice page redraw from the input callback or the microphone worker.
+ *
+ * Route both sources through the background-refresh pending flag: a press and
+ * the worker's STARTING/STREAMING transition then coalesce into one render,
+ * and a release plus the worker's stop coalesce into another. It also keeps
+ * the request deferred while a panel refresh is in progress instead of
+ * queueing a back-to-back refresh from the touch thread. The event is
+ * system-sourced, so the Wi-Fi keyboard generation guard does not apply.
+ */
+static void queue_voice_refresh(void)
+{
+	papermono_ui_request_background_refresh();
+}
+#endif
 
 static void queue_pending_system_events(void)
 {
@@ -3627,6 +3854,14 @@ static void papermono_ui_input_event(struct input_event *event,
 		touch_x = CLAMP(event->value, 0, UI_WIDTH - 1);
 	} else if (event->type == INPUT_EV_ABS && event->code == INPUT_ABS_Y) {
 		touch_y = CLAMP(event->value, 0, UI_HEIGHT - 1);
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+		/* A hold-to-talk contact owns the whole gesture: it must not move the
+		 * pointer or commit edge navigation back/home while it is active.
+		 */
+		if (voice_hold) {
+			return;
+		}
+#endif
 #if defined(CONFIG_PAPERMONO_BLE_HID)
 		if (touch_pressed && touchpad_captured) {
 			if ((uint32_t)atomic_get(&remote_touchpad_epoch) !=
@@ -3668,6 +3903,40 @@ static void papermono_ui_input_event(struct input_event *event,
 			touch_start_x = touch_x;
 			touch_start_y = touch_y;
 			touch_start_ms = k_uptime_get_32();
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+			/* Capture the voice epoch the same way a touchpad contact does:
+			 * the page publishes availability only while it is the one being
+			 * drawn, so a press captured here cannot start a stream from
+			 * another page or after the subscription went away. A press that
+			 * lands during a panel refresh must not start a session: the
+			 * refresh guard has not classified it yet and starting here would
+			 * bypass the deferral.
+			 */
+			voice_hold = atomic_get(&input_blocked) == 0 &&
+				((uint32_t)atomic_get(&remote_voice_epoch) & 1U) != 0U &&
+				touch_x >= remote_voice_pad.x &&
+				touch_x < remote_voice_pad.x + remote_voice_pad.width &&
+				touch_y >= remote_voice_pad.y &&
+				touch_y < remote_voice_pad.y + remote_voice_pad.height;
+			if (voice_hold) {
+				const int start_ret = papermono_ble_mic_request_start();
+
+				if (start_ret < 0) {
+					/* Publish the failure for the next render and leave the
+					 * contact unpublished, so a release cannot stop a stream
+					 * that was never requested.
+					 */
+					atomic_set(&remote_voice_start_error, start_ret);
+				} else {
+					atomic_set(&remote_voice_start_error, 0);
+					atomic_set(&remote_voice_contact, 1);
+				}
+				/* Never wait for the worker here; the page redraws from the
+				 * state it publishes.
+				 */
+				queue_voice_refresh();
+			}
+#endif
 #if defined(CONFIG_PAPERMONO_BLE_HID)
 			touchpad_contact_epoch = (uint32_t)atomic_get(&remote_touchpad_epoch);
 			/* This epoch is published only after the mouse page is visible,
@@ -3696,6 +3965,19 @@ static void papermono_ui_input_event(struct input_event *event,
 			int ret;
 
 			touch_pressed = false;
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+			if (voice_hold) {
+				voice_hold = false;
+				if (atomic_cas(&remote_voice_contact, 1, 0)) {
+					(void)papermono_ble_mic_request_stop();
+				}
+				queue_voice_refresh();
+				/* This contact was a hold, not a tap, long press, swipe or
+				 * edge gesture, so classification must not run for it.
+				 */
+				return;
+			}
+#endif
 #if defined(CONFIG_PAPERMONO_BLE_HID)
 			if (touchpad_captured) {
 				touchpad_captured = false;
@@ -3790,6 +4072,15 @@ static int render_current(enum papermono_refresh_quality quality)
 	    remote_state.mode != REMOTE_MODE_MOUSE) {
 		remote_touchpad_enable(false);
 	}
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	if (app_router.current != PAPERMONO_APP_REMOTE ||
+	    remote_state.mode != REMOTE_MODE_VOICE) {
+		/* Every route off the voice page passes through here, including the
+		 * ones that do not run remote_close() first.
+		 */
+		remote_voice_set_armed(false);
+	}
+#endif
 
 	/* Page handlers and on_open hooks may have just polled TF/network state.
 	 * Submit the LED snapshot only after those mutations, otherwise the worker
@@ -3844,6 +4135,14 @@ static int enter_power_state(bool shutdown)
 	lv_obj_t *label;
 	int ret;
 	remote_touchpad_enable(false);
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+	/* Sleep and shutdown reach here from both the power click and the idle
+	 * timeout. Release the hold first, then let the worker power the PDM
+	 * microphone down before the panel and radio stop.
+	 */
+	remote_voice_set_armed(false);
+	papermono_ble_mic_abort();
+#endif
 
 	confirmation = CONFIRM_NONE;
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)

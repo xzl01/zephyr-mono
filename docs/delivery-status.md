@@ -26,6 +26,7 @@
 | 内容中心 HTTP | **已实机验证（端到端）** | 手机热点 2.4 GHz 下完成：配对→会话→txt 25 B/10 KB 上传→**EPUB 上传**→空 body 411→未授权 401→列表→**DELETE 200 且条目消失**。过程中修复两个缺陷：PSRAM 读缓冲导致 ≥1 KB 上传失败、DELETE 被精确资源遮蔽返回 405（见 [上传缺陷](<docs/upload-psram-20261021.md>)） |
 | 配网与 SoftAP | **回退已修复** | STA 异步断开（含 status=-1）会回退 SoftAP 并按 5→10→20 s 退避重连，实机日志验证；AP 启用后的 STA 重连仍未成功，待排查（见 [上传缺陷](<docs/upload-psram-20261021.md>)） |
 | BLE HID / 同步 | **部分验证** | HID 与 sync 初始化就绪、ACL 缓冲已与控制器对齐；真实主机配对未做 |
+| 遥控器语音 | **部分实机验证** | 2026-10-22 实机通过：启动、按住说话/松开、AUDIO_START/STOP、虚拟麦克风 `MiRemoteV 2ch` 链路、60 秒上限；修复 PDM 实际 8 kHz 与 I2S 阻塞溢出。语音期间自动暂停 Wi-Fi 后 16 kHz 送达率约 88%；目标 App/Windows/Linux 和长时间音质未验证。见 [实机验收记录](remote-mic-hil-20261022.md) |
 | 电源与深睡 | **已实机验证** | 50 次深睡唤醒耐久 **PASS 50/50**（`Power HIL endurance PASS: 50/50 wake/display cycles verified`，约 35 分钟，含逐个唤醒的全刷/局刷与显示恢复）；过程有少量 M5IOE1 I2C 重试告警，恢复机制均成功 |
 | 状态灯 / 蜂鸣器 / 前光 | **已实现** | 策略有主机测试；前光实际观感未验收 |
 | 可靠启动 | **已修复** | 早期双异常根因是内核初始化前中断取到零 IRQ 栈，`__start` 提前屏蔽中断后整芯片冷复位 **10/10** 正常启动（见 [冷复位异常定位](<docs/boot-crash-20261021.md>)）；ROM SHA 警告已修复，构建自动追加镜像摘要（见 [镜像摘要](<docs/firmware-image-digest.md>)）。 |

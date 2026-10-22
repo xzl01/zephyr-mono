@@ -120,6 +120,11 @@ target_sources_ifdef(CONFIG_PAPERMONO_BLE_SYNC app PRIVATE
   src/papermono_sync.c
 )
 
+target_sources_ifdef(CONFIG_PAPERMONO_BLE_MIC app PRIVATE
+  src/papermono_adpcm.c
+  src/papermono_ble_mic.c
+)
+
 if(CONFIG_PAPERMONO_CONTENT_SERVER)
   set(papermono_generated_dir ${ZEPHYR_BINARY_DIR}/include/generated)
   generate_inc_file_for_target(app

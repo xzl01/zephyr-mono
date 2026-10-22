@@ -77,6 +77,8 @@ static struct k_work scan_work;
 static struct k_work_q wifi_work_queue;
 static struct k_work_delayable scan_timeout_work, wifi_command_work, station_retry_work, apply_wifi_work, disable_ap_work, enable_ap_work;
 static int server_lock, lock_depth, refreshes, scheduled, retries, recovery, reset_calls;
+static int wifi_paused;
+static bool wifi_is_paused(void) { return wifi_paused != 0; }
 static int driver_result, nvs_result, writes, disconnects, scan_mode;
 static int64_t now;
 static struct net_if station_iface, ap_iface;

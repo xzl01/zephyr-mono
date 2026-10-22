@@ -175,6 +175,10 @@ cc -std=c17 -Wall -Wextra -Werror \
 	src/papermono_personal_data.c -o "$build_dir/test_organizer"
 "$build_dir/test_organizer"
 cc -std=c17 -Wall -Wextra -Werror \
+	-Iinclude tests/host/test_adpcm.c src/papermono_adpcm.c \
+	-lm -o "$build_dir/test_adpcm"
+"$build_dir/test_adpcm"
+cc -std=c17 -Wall -Wextra -Werror \
 	-Iinclude tests/host/test_refresh_policy.c \
 	src/papermono_refresh_policy.c \
 	-o "$build_dir/test_refresh_policy"
@@ -187,6 +191,8 @@ python3 tests/host/test_esp_digest.py
 python3 tests/host/test_esp_ble_compat.py
 python3 tests/host/test_xtensa_irq_exit.py
 python3 tests/host/test_hid_lifecycle.py
+python3 tests/host/test_remote_mic.py
+python3 tests/host/test_ui_refresh_coalescing.py
 cc -std=c17 -Wall -Wextra -Werror -Itests/host/stubs \
 	tests/host/test_esp_wifi_compat.c src/papermono_esp_wifi_compat.c \
 	-o "$build_dir/test_esp_wifi_compat"

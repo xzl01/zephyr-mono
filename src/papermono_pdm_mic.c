@@ -19,8 +19,19 @@
 
 LOG_MODULE_REGISTER(papermono_pdm_mic, CONFIG_PAPERMONO_PDM_MIC_LOG_LEVEL);
 
-#define PAPERMONO_PDM_CLOCK_RATIO 64U
-#define PAPERMONO_PDM_MCLK_RATIO  128U
+/* ESP-IDF PDM RX clock formula (see i2s_pdm.c):
+ *   bclk = sample_rate * I2S_LL_PDM_BCK_FACTOR * (DSR_16S ? 2 : 1)
+ *   bclk_div >= 8
+ *   mclk = bclk * bclk_div
+ * I2S_LL_PDM_BCK_FACTOR is 64. Use the ESP-IDF default 8S mode:
+ * PDM clock = 16 kHz * 64 = 1.024 MHz, MCLK = 1.024 MHz * 8 = 8.192 MHz.
+ * The previous 2.048 MHz MCLK with bclk_div=2 produced a 1.024 MHz PDM
+ * clock, but DSR_16S expects 2.048 MHz, so the real PCM rate was 8 kHz.
+ */
+#define PAPERMONO_PDM_BCLK_RATIO 64U
+#define PAPERMONO_PDM_BCLK_DIV   8U
+#define PAPERMONO_PDM_MCLK_RATIO \
+	(PAPERMONO_PDM_BCLK_RATIO * PAPERMONO_PDM_BCLK_DIV)
 #define PAPERMONO_PDM_BLOCK_SIZE  512U
 #define PAPERMONO_PDM_BLOCK_COUNT 4U
 
@@ -59,14 +70,13 @@ static void papermono_pdm_mic_set_mode(
 	i2s_hal_clock_info_t clock = {
 		.sclk = 160000000U,
 		.mclk = config->sample_rate_hz * PAPERMONO_PDM_MCLK_RATIO,
-		.bclk = config->sample_rate_hz * PAPERMONO_PDM_CLOCK_RATIO,
-		.bclk_div = PAPERMONO_PDM_MCLK_RATIO /
-			    PAPERMONO_PDM_CLOCK_RATIO,
+		.bclk = config->sample_rate_hz * PAPERMONO_PDM_BCLK_RATIO,
+		.bclk_div = PAPERMONO_PDM_BCLK_DIV,
 	};
 
 	i2s_hal_pdm_set_rx_slot(&hal, false, &slot);
 	i2s_hal_set_rx_clock(&hal, &clock, I2S_CLK_SRC_PLL_160M, NULL);
-	i2s_ll_rx_set_pdm_dsr(hal.dev, I2S_PDM_DSR_16S);
+	i2s_ll_rx_set_pdm_dsr(hal.dev, I2S_PDM_DSR_8S);
 	i2s_hal_pdm_enable_rx_channel(&hal, true);
 	i2s_ll_rx_update(hal.dev);
 }

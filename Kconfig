@@ -333,6 +333,48 @@ module = PAPERMONO_PDM_MIC
 module-str = papermono_pdm_mic
 source "subsys/logging/Kconfig.template.log_config"
 
+config PAPERMONO_BLE_MIC
+	bool "BLE ATVV voice microphone streaming"
+	default y
+	depends on PAPERMONO_BLE_HID && PAPERMONO_PDM_MIC
+	help
+	  Add the ATVV v1.0 voice service used by Bluetooth voice remotes.
+	  The device captures 16 kHz PCM from the PDM microphone, encodes IMA
+	  ADPCM in 120-byte frames and notifies an encrypted, subscribed host
+	  while the user holds the remote page's voice area. The service shares
+	  the existing BLE HID connection and requires no extra pairing.
+
+config PAPERMONO_BLE_MIC_SESSION_LIMIT_MS
+	int "Maximum BLE voice session length in milliseconds"
+	default 60000
+	range 5000 300000
+	depends on PAPERMONO_BLE_MIC
+	help
+	  Stop the microphone and notify the host after this much continuous
+	  capture. This bounds microphone power, memory use and accidental
+	  open-microphone sessions.
+
+config PAPERMONO_BLE_MIC_THREAD_PRIORITY
+	int "BLE voice capture thread priority"
+	default 9
+	range 1 14
+	depends on PAPERMONO_BLE_MIC
+	help
+	  Priority of the PDM capture and ADPCM worker. Keep it numerically
+	  greater than the Bluetooth RX thread so ACL processing is not starved,
+	  and lower than the interactive UI thread so 15 ms audio frames are not
+	  delayed by LVGL layout.
+
+config PAPERMONO_BLE_MIC_THREAD_STACK_SIZE
+	int "BLE voice capture thread stack size"
+	default 2048
+	range 1024 8192
+	depends on PAPERMONO_BLE_MIC
+
+module = PAPERMONO_BLE_MIC
+module-str = papermono_ble_mic
+source "subsys/logging/Kconfig.template.log_config"
+
 config PAPERMONO_RX8130_TIMER
 	bool "RX8130 countdown-timer extension"
 	default y

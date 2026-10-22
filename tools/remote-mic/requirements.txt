@@ -1,0 +1,15 @@
+# Runtime dependencies for the PaperMono C153 BLE voice receiver.
+#
+#   python3 -m venv .venv
+#   . .venv/bin/activate
+#   python3 -m pip install -r tools/remote-mic/requirements.txt
+#
+# Python 3.10 or newer is required. bleak is only imported when Bluetooth is
+# used and sounddevice only when an audio device is opened, so the unit tests
+# and `papermono_mic.py --help/--selftest` work without these packages.
+#
+# sounddevice's non-Raw streams import numpy internally; omitting it fails at
+# device-open time even though `--help` and `--selftest` succeed.
+bleak>=0.22
+numpy>=1.24
+sounddevice>=0.4.6

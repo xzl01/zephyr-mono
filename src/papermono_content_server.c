@@ -128,6 +128,12 @@ static int64_t wifi_started_ms;
 static char session_token[17];
 static bool initialized;
 static bool ap_enabling;
+static atomic_t wifi_paused;
+
+static bool wifi_is_paused(void)
+{
+	return atomic_get(&wifi_paused) != 0;
+}
 static uint8_t ap_retry_shift;
 static uint8_t ap_health_failures;
 static uint8_t station_retry_shift;
@@ -892,6 +898,10 @@ static int connect_station(void);
 static void schedule_station_retry(void)
 {
 	uint8_t shift;
+
+	if (wifi_is_paused()) {
+		return;
+	}
 	uint32_t delay_ms;
 
 	k_mutex_lock(&server_lock, K_FOREVER);
@@ -914,6 +924,9 @@ static void schedule_station_retry(void)
 static void station_retry(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	if (wifi_is_paused()) {
+		return;
+	}
 
 	if (!papermono_settings_get()->wifi_configured) {
 		return;
@@ -1324,6 +1337,10 @@ fail:
 static int connect_station(void)
 {
 	const struct papermono_preferences *prefs = papermono_settings_get();
+
+	if (wifi_is_paused()) {
+		return -EBUSY;
+	}
 	struct net_if *iface = net_if_get_wifi_sta();
 	struct wifi_connect_req_params config = { 0 };
 	/* A private copy remains valid for the entire synchronous driver call;
@@ -1378,6 +1395,10 @@ static int connect_station(void)
 static void schedule_recovery_ap(void)
 {
 	uint8_t shift;
+
+	if (wifi_is_paused()) {
+		return;
+	}
 	uint32_t delay_ms;
 
 	k_mutex_lock(&server_lock, K_FOREVER);
@@ -1472,6 +1493,9 @@ static void finish_scan_locked(int error)
 
 static void scan_wifi_worker(struct k_work *work)
 {
+	if (wifi_is_paused()) {
+		return;
+	}
 	struct net_if *iface = net_if_get_wifi_sta();
 	struct wifi_scan_params params = { .scan_type = WIFI_SCAN_TYPE_ACTIVE };
 	int ret;
@@ -1498,6 +1522,9 @@ static void scan_wifi_worker(struct k_work *work)
 
 static void scan_timeout_worker(struct k_work *work)
 {
+	if (wifi_is_paused()) {
+		return;
+	}
 	bool changed = false;
 
 	ARG_UNUSED(work);
@@ -1537,6 +1564,9 @@ static void wifi_command_complete(int error)
 
 static void wifi_command_worker(struct k_work *work)
 {
+	if (wifi_is_paused()) {
+		return;
+	}
 	struct net_if *iface = net_if_get_wifi_sta();
 	enum wifi_command command;
 	bool linking;
@@ -1682,6 +1712,9 @@ static void wifi_command_worker(struct k_work *work)
 static void apply_wifi(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	if (wifi_is_paused()) {
+		return;
+	}
 	k_mutex_lock(&server_lock, K_FOREVER);
 	const bool defer = scan_inflight;
 	const bool command_busy = wifi_state.request_busy;
@@ -1707,6 +1740,9 @@ static void apply_wifi(struct k_work *work)
 static void enable_ap_worker(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	if (wifi_is_paused()) {
+		return;
+	}
 	const int ret = enable_ap();
 
 	if (ret < 0) {
@@ -1717,6 +1753,9 @@ static void enable_ap_worker(struct k_work *work)
 
 static void verify_ap_worker(struct k_work *work)
 {
+	if (wifi_is_paused()) {
+		return;
+	}
 	struct wifi_iface_status status = { 0 };
 	struct net_if *iface = net_if_get_wifi_sap();
 	char expected_ssid[sizeof(server_state.ap_ssid)];
@@ -1799,6 +1838,9 @@ static void verify_ap_worker(struct k_work *work)
 
 static void disable_ap(struct k_work *work)
 {
+	if (wifi_is_paused()) {
+		return;
+	}
 	struct net_if *iface = net_if_get_wifi_sap();
 
 	ARG_UNUSED(work);
@@ -2256,6 +2298,70 @@ int papermono_content_server_reset_wifi(void)
 	const int ret = submit_wifi_command_locked(WIFI_COMMAND_RESET);
 	k_mutex_unlock(&server_lock);
 	return ret;
+}
+
+int papermono_content_server_pause_wifi(void)
+{
+	if (!initialized) {
+		return 0;
+	}
+	/* Stop every Wi-Fi worker before bringing the radio down, so a retry or
+	 * AP-enable work cannot immediately undo the pause. The BLE voice stream
+	 * shares the same 2.4 GHz radio and needs the full connection interval.
+	 */
+	atomic_set(&wifi_paused, 1);
+	(void)k_work_cancel_delayable(&station_retry_work);
+	(void)k_work_cancel_delayable(&apply_wifi_work);
+	(void)k_work_cancel_delayable(&enable_ap_work);
+	(void)k_work_cancel_delayable(&disable_ap_work);
+	(void)k_work_cancel_delayable(&ap_health_work);
+	(void)k_work_cancel_delayable(&wifi_command_work);
+	(void)k_work_cancel_delayable(&scan_timeout_work);
+	(void)k_work_cancel(&scan_work);
+
+	k_mutex_lock(&server_lock, K_FOREVER);
+	server_state.ap_enabled = false;
+	server_state.ap_verified = false;
+	server_state.station_connected = false;
+	server_state.station_connecting = false;
+	scan_inflight = false;
+	ap_enabling = false;
+	wifi_state.request_busy = false;
+	station_retry_shift = 0U;
+	ap_retry_shift = 0U;
+	k_mutex_unlock(&server_lock);
+
+	struct net_if *sta = net_if_get_wifi_sta();
+	struct net_if *sap = net_if_get_wifi_sap();
+
+	if (sta != NULL) {
+		(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, sta, NULL, 0U);
+	}
+	if (sap != NULL) {
+		(void)net_mgmt(NET_REQUEST_WIFI_AP_DISABLE, sap, NULL, 0U);
+	}
+	/* Let the driver stop beacons/connection events before audio starts. */
+	k_msleep(60);
+	papermono_ui_request_background_refresh();
+	LOG_INF("Wi-Fi paused for BLE voice session");
+	return 0;
+}
+
+int papermono_content_server_resume_wifi(void)
+{
+	if (!initialized) {
+		atomic_clear(&wifi_paused);
+		return 0;
+	}
+	atomic_clear(&wifi_paused);
+	if (papermono_settings_get()->wifi_configured) {
+		(void)wifi_reschedule(&apply_wifi_work, K_NO_WAIT);
+	} else {
+		(void)wifi_reschedule(&enable_ap_work, K_NO_WAIT);
+	}
+	papermono_ui_request_background_refresh();
+	LOG_INF("Wi-Fi resumed after BLE voice session");
+	return 0;
 }
 
 static int reset_wifi_now(void)
