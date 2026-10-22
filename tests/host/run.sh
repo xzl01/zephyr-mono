@@ -174,6 +174,11 @@ cc -std=c17 -Wall -Wextra -Werror \
 	-Itests/host/stubs -Iinclude tests/host/test_organizer.c \
 	src/papermono_personal_data.c -o "$build_dir/test_organizer"
 "$build_dir/test_organizer"
+cc -std=c17 -Wall -Wextra -Werror \
+	-Iinclude tests/host/test_refresh_policy.c \
+	src/papermono_refresh_policy.c \
+	-o "$build_dir/test_refresh_policy"
+"$build_dir/test_refresh_policy"
 python3 tests/host/test_font_coverage.py
 python3 tests/host/test_field_notes_assets.py
 python3 tests/host/test_content_web.py

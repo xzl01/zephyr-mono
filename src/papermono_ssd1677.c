@@ -20,6 +20,7 @@
 #include <zephyr/sys/util.h>
 
 #include <papermono/m5ioe1.h>
+#include <papermono/refresh_policy.h>
 #include <papermono/ssd1677.h>
 
 LOG_MODULE_REGISTER(papermono_ssd1677, CONFIG_DISPLAY_LOG_LEVEL);
@@ -70,6 +71,7 @@ struct papermono_data {
 	bool baseline_ready;
 	bool controller_sleeping;
 	uint8_t consecutive_partials;
+	enum papermono_refresh_quality refresh_hint;
 	uint32_t full_refreshes;
 	uint32_t partial_refreshes;
 	uint32_t partial_fallbacks;
@@ -655,6 +657,7 @@ int papermono_ssd1677_prepare_poweroff(const struct device *dev)
 	k_msleep(20);
 	data->controller_sleeping = false;
 	data->baseline_ready = false;
+	data->consecutive_partials = 0U;
 	k_mutex_unlock(&data->lock);
 
 	if (ret < 0) {
@@ -672,8 +675,10 @@ static int papermono_refresh_full(const struct device *dev)
 {
 	const struct papermono_config *config = dev->config;
 	struct papermono_data *data = dev->data;
+#if !defined(CONFIG_PAPERMONO_FULL_REFRESH_COMPACT)
 	static const uint8_t synchronize_control = 0xF8U;
 	static const uint8_t otp_control = 0x14U;
+#endif
 	const uint32_t started_ms = k_uptime_get_32();
 	int ret;
 
@@ -686,6 +691,29 @@ static int papermono_refresh_full(const struct device *dev)
 		return ret;
 	}
 
+#if defined(CONFIG_PAPERMONO_FULL_REFRESH_COMPACT)
+	/* Single self-contained Mode-1 sequence (0x22 = 0xF4): clock, analog,
+	 * temperature, Mode-1 LUT load and DISPLAY Mode 1 in one activation. The
+	 * legacy 0xF8 phase has no DISPLAY bit (bit 2), so its RAM_1 write is
+	 * overwritten by this phase anyway. Validate on hardware before enabling.
+	 */
+	static const uint8_t compact_control = 0xF4U;
+
+	ret = papermono_begin_write(config);
+	ret = ret ?: papermono_write_frame(dev, SSD1677_CMD_WRITE_RAM_2,
+					   data->frame, true);
+	ret = ret ?: papermono_write_frame(dev, SSD1677_CMD_WRITE_RAM_1,
+					   data->frame, true);
+	ret = ret ?: papermono_register(dev, SSD1677_CMD_UPDATE_CONTROL,
+				 &compact_control, sizeof(compact_control));
+	ret = ret ?: papermono_command(dev, SSD1677_CMD_MASTER_ACTIVATION);
+	ret = papermono_end_write(config, ret);
+	ret = ret ?: papermono_wait_ready(config, "compact full-refresh activation");
+	ret = ret ?: papermono_deep_sleep(dev, true);
+	if (ret < 0) {
+		goto out;
+	}
+#else
 	/* First synchronize the controller drive state with the logical LVGL
 	 * frame, matching the C153 OTP reference implementation byte-for-byte.
 	 */
@@ -715,6 +743,7 @@ static int papermono_refresh_full(const struct device *dev)
 	ret = papermono_end_write(config, ret);
 	ret = ret ?: papermono_wait_ready(config, "full-refresh OTP activation");
 	ret = ret ?: papermono_deep_sleep(dev, true);
+#endif
 
 	out:
 	if (ret == 0) {
@@ -751,6 +780,17 @@ static int papermono_refresh_full_with_recovery(const struct device *dev)
 }
 
 #if defined(CONFIG_PAPERMONO_PARTIAL_REFRESH)
+static struct papermono_refresh_policy papermono_refresh_policy(void)
+{
+	struct papermono_refresh_policy policy = {
+		.limit = CONFIG_PAPERMONO_PARTIAL_REFRESH_LIMIT,
+		.opportunistic = IS_ENABLED(
+			CONFIG_PAPERMONO_MAINTENANCE_OPPORTUNISTIC),
+	};
+
+	return policy;
+}
+
 static int papermono_refresh_partial(const struct device *dev)
 {
 	const struct papermono_config *config = dev->config;
@@ -817,18 +857,35 @@ static int papermono_refresh_changed_frame(const struct device *dev)
 	}
 
 #if defined(CONFIG_PAPERMONO_PARTIAL_REFRESH)
-	if (data->baseline_ready &&
-	    data->consecutive_partials < CONFIG_PAPERMONO_PARTIAL_REFRESH_LIMIT) {
-		ret = papermono_refresh_partial(dev);
-		if (ret < 0) {
-			data->partial_fallbacks++;
-			LOG_WRN("Partial refresh failed (%d); falling back to full refresh", ret);
+	if (data->baseline_ready) {
+		const struct papermono_refresh_policy policy =
+			papermono_refresh_policy();
+		const struct papermono_refresh_policy_state state = {
+			.baseline_ready = true,
+			.partials = data->consecutive_partials,
+			.quality = data->refresh_hint,
+		};
+
+		if (papermono_refresh_policy_decide(&policy, &state) ==
+		    PAPERMONO_REFRESH_ACTION_FULL) {
+			if (data->consecutive_partials >=
+			    CONFIG_PAPERMONO_PARTIAL_REFRESH_LIMIT) {
+				LOG_INF("Partial-refresh limit reached; "
+					"performing maintenance full refresh");
+			} else {
+				LOG_INF("Performing maintenance full refresh at "
+					"a page transition");
+			}
 			ret = papermono_refresh_full_with_recovery(dev);
+		} else {
+			ret = papermono_refresh_partial(dev);
+			if (ret < 0) {
+				data->partial_fallbacks++;
+				LOG_WRN("Partial refresh failed (%d); falling back to full refresh", ret);
+				ret = papermono_refresh_full_with_recovery(dev);
+			}
 		}
 	} else {
-		if (data->baseline_ready) {
-			LOG_INF("Partial-refresh limit reached; performing maintenance full refresh");
-		}
 		ret = papermono_refresh_full_with_recovery(dev);
 	}
 #else
@@ -861,6 +918,8 @@ static int papermono_blanking_off(const struct device *dev)
 		data->blanking = false;
 		ret = papermono_refresh_changed_frame(dev);
 	}
+	/* The hint only applies to the render that just completed. */
+	data->refresh_hint = PAPERMONO_REFRESH_AUTO;
 	k_mutex_unlock(&data->lock);
 	return ret;
 }
@@ -931,6 +990,26 @@ int papermono_ssd1677_force_full_next(const struct device *dev)
 	k_mutex_lock(&data->lock, K_FOREVER);
 	data->baseline_ready = false;
 	data->consecutive_partials = 0U;
+	k_mutex_unlock(&data->lock);
+	return 0;
+}
+
+int papermono_ssd1677_set_refresh_hint(
+	const struct device *dev, enum papermono_refresh_quality quality)
+{
+	struct papermono_data *data;
+
+	if (dev == NULL || dev->data == NULL) {
+		return -EINVAL;
+	}
+	if (quality != PAPERMONO_REFRESH_AUTO &&
+	    quality != PAPERMONO_REFRESH_FAST &&
+	    quality != PAPERMONO_REFRESH_FULL) {
+		return -EINVAL;
+	}
+	data = dev->data;
+	k_mutex_lock(&data->lock, K_FOREVER);
+	data->refresh_hint = quality;
 	k_mutex_unlock(&data->lock);
 	return 0;
 }
@@ -1017,6 +1096,7 @@ static int papermono_init(const struct device *dev)
 	data->baseline_ready = false;
 	data->controller_sleeping = false;
 	data->consecutive_partials = 0U;
+	data->refresh_hint = PAPERMONO_REFRESH_AUTO;
 	data->full_refreshes = 0U;
 	data->partial_refreshes = 0U;
 	data->partial_fallbacks = 0U;

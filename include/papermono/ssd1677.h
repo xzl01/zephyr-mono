@@ -8,6 +8,8 @@
 
 #include <zephyr/device.h>
 
+#include <papermono/refresh.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +51,18 @@ int papermono_ssd1677_prepare_poweroff(const struct device *dev);
 
 /** Invalidate the partial-refresh baseline so the next update is full. */
 int papermono_ssd1677_force_full_next(const struct device *dev);
+
+/**
+ * Record the refresh intent for the next blanking-off update.
+ *
+ * PAPERMONO_REFRESH_FAST keeps page turns on the partial path when the
+ * maintenance budget is one refresh short of its limit; with
+ * CONFIG_PAPERMONO_MAINTENANCE_OPPORTUNISTIC the maintenance full refresh is
+ * deferred to the next AUTO/FULL render instead. PAPERMONO_REFRESH_FULL is
+ * handled through papermono_ssd1677_force_full_next().
+ */
+int papermono_ssd1677_set_refresh_hint(
+	const struct device *dev, enum papermono_refresh_quality quality);
 
 #ifdef __cplusplus
 }

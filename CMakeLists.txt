@@ -32,6 +32,7 @@ target_sources(app PRIVATE
   src/papermono_archive_safety.c
   src/papermono_content_validation.c
   src/papermono_display_scheduler.c
+  src/papermono_refresh_policy.c
   src/papermono_epub.c
   src/papermono_reader.c
   src/papermono_reader_cache.c

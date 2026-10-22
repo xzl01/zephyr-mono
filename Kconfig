@@ -40,7 +40,31 @@ config PAPERMONO_PARTIAL_REFRESH_LIMIT
 	depends on PAPERMONO_PARTIAL_REFRESH
 	help
 	  Maximum number of consecutive partial refreshes. The following update
-	  uses a full refresh to limit ghosting and DC imbalance.
+	  uses a full refresh to limit ghosting and DC imbalance. Keep this at the
+	  panel vendor's recommendation (10) unless a long ghosting soak proves a
+	  different value safe.
+
+config PAPERMONO_MAINTENANCE_OPPORTUNISTIC
+	bool "Perform the maintenance full refresh at a natural page transition"
+	default n
+	depends on PAPERMONO_PARTIAL_REFRESH
+	help
+	  When one partial refresh remains before PAPERMONO_PARTIAL_REFRESH_LIMIT,
+	  perform the maintenance full refresh on the next non-FAST render (page
+	  navigation, menu, page exit, sleep) instead of waiting for the next FAST
+	  page turn. It moves the visible full flash to a transition the user
+	  already expects; it does not raise the refresh limit. Continuous reading
+	  with no page transition still reaches the normal limit.
+
+config PAPERMONO_FULL_REFRESH_COMPACT
+	bool "Use the single-command SSD1677 Mode-1 full refresh"
+	default n
+	depends on PAPERMONO_PARTIAL_REFRESH
+	help
+	  Replace the two-stage 0xF8 synchronize plus 0x14 OTP refresh with one
+	  self-contained 0xF4 Mode-1 sequence. It removes one activation and a
+	  redundant 48 KiB RAM write, but changes the panel command sequence and
+	  must be re-validated on hardware before enabling.
 
 config PAPERMONO_PARTIAL_DEMO
 	bool "Periodically update the dashboard for partial-refresh HIL testing"

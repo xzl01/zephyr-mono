@@ -47,6 +47,14 @@ int papermono_display_refresh(enum papermono_refresh_quality quality)
 		scheduled_guard(true, scheduled_guard_context);
 	}
 
+	/* The driver needs the intent to decide whether an exhausted partial
+	 * budget waits for a page transition or runs the maintenance full now.
+	 */
+	ret = papermono_ssd1677_set_refresh_hint(scheduled_display, quality);
+	if (ret < 0) {
+		LOG_WRN("Unable to record the refresh hint (%d)", ret);
+	}
+
 	if (quality == PAPERMONO_REFRESH_FULL) {
 		ret = papermono_ssd1677_force_full_next(scheduled_display);
 		if (ret < 0) {
