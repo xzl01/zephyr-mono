@@ -16,10 +16,11 @@ struct k_mutex {
 #define K_MUTEX_DEFINE(name) \
 	struct k_mutex name = { .mutex = PTHREAD_MUTEX_INITIALIZER }
 
-static inline void k_mutex_lock(struct k_mutex *mutex, int timeout)
+static inline int k_mutex_lock(struct k_mutex *mutex, int timeout)
 {
 	(void)timeout;
 	pthread_mutex_lock(&mutex->mutex);
+	return 0;
 }
 
 static inline void k_mutex_unlock(struct k_mutex *mutex)

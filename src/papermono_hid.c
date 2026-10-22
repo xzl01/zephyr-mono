@@ -591,7 +591,14 @@ static void mouse_work_handler(struct k_work *work)
 	bool pending;
 	int ret = 0;
 
-	k_mutex_lock(&hid_report_lock, K_FOREVER);
+	/* Never block the system workqueue on a report lock that the UI holds
+	 * across bt_gatt_notify() and the press/release spacing sleep. ATT buffers
+	 * are recycled by this same queue, so waiting here can deadlock both
+	 * threads instead of delaying a mouse report. */
+	if (k_mutex_lock(&hid_report_lock, K_NO_WAIT) != 0) {
+		(void)k_work_schedule(&mouse_work, K_MSEC(16));
+		return;
+	}
 	k_mutex_lock(&hid_lock, K_FOREVER);
 	if (!mouse_enabled || !hid_state.connected || !hid_state.secured ||
 	    hid_state.suspended || hid_state.passkey_visible ||

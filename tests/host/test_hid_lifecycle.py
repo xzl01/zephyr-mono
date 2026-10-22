@@ -32,7 +32,7 @@ static inline void test_log(const char *format, ...) {(void)format;}
 struct device;
 struct k_mutex { int unused; };
 #define K_MUTEX_DEFINE(n) struct k_mutex n
-static inline void k_mutex_lock(struct k_mutex *m, int t) {(void)m;(void)t;}
+static inline int k_mutex_lock(struct k_mutex *m, int t) {(void)m;(void)t;return 0;}
 static inline void k_mutex_unlock(struct k_mutex *m) {(void)m;}
 static inline void k_msleep(int t) {(void)t;}
 struct k_work { void (*handler)(struct k_work *); };
