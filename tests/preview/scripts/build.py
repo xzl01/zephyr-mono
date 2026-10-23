@@ -10,7 +10,7 @@ import sys
 
 HERE = Path(__file__).resolve().parents[1]
 REPO = HERE.parents[1]
-PAGES = ["settings", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-password",
+PAGES = ["settings", "sleep", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-password",
          "wifi-symbols", "wifi-63chars", "wifi-connecting", "wifi-failure",
          "wifi-scan-failure", "wifi-empty", "wifi-forget",
          "home", "launcher-1", "launcher-2", "library", "weread", "calendar",
@@ -22,7 +22,8 @@ PAGES = ["settings", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-password",
 MODULES = ["app", "interaction", "settings", "content_store", "content_validation",
            "organizer", "reader", "personal_data", "text_codec", "text_layout",
            "reader_cache", "epub", "archive_safety", "weread", "weread_view",
-           "info_provider", "touch_gesture", "wifi_input", "fs_read"]
+           "info_provider", "touch_gesture", "wifi_input", "fs_read",
+           "almanac", "quotes"]
 EXCLUDED = {"drivers", "others"}
 EXCLUDED_LIBS = {"freetype", "tiny_ttf", "lodepng", "libpng", "bmp", "tjpgd",
                  "libjpeg_turbo", "libwebp", "gif", "qrcode", "barcode", "rlottie",

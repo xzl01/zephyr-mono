@@ -45,12 +45,13 @@ static const struct papermono_rect wifi_connect_rect = {22, 292, 436, 54};
 
 enum detail_setting_index {
 	DETAIL_SETTING_SLEEP, DETAIL_SETTING_TIME, DETAIL_SETTING_FRONTLIGHT,
-	DETAIL_SETTING_WIFI, DETAIL_SETTING_BLE, DETAIL_SETTING_RESET,
-	DETAIL_SETTING_POWER,
+	DETAIL_SETTING_SUMMARY, DETAIL_SETTING_WIFI, DETAIL_SETTING_BLE,
+	DETAIL_SETTING_RESET, DETAIL_SETTING_POWER,
 };
 static const struct papermono_rect detail_setting_rects[] = {
-	{22,174,436,56}, {22,230,436,56}, {22,286,436,100},
-	{22,424,436,60}, {22,484,436,60}, {22,582,436,60}, {22,642,436,60},
+	{22,162,436,56}, {22,222,436,56}, {22,282,436,56},
+	{22,342,436,56}, {22,434,436,56}, {22,494,436,56},
+	{22,586,436,56}, {22,646,436,56},
 };
 /* The settings page and its event dispatch index this table by
  * enum detail_setting_index, so a missing or extra row silently shifts every

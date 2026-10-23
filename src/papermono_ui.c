@@ -36,6 +36,7 @@
 
 #include <lvgl.h>
 
+#include <papermono/almanac.h>
 #include <papermono/app.h>
 #if defined(CONFIG_PAPERMONO_BLE_MIC)
 #include <papermono/ble_mic.h>
@@ -51,6 +52,7 @@
 #include <papermono/m5pm1.h>
 #include <papermono/organizer.h>
 #include <papermono/power.h>
+#include <papermono/quotes.h>
 #include <papermono/reader.h>
 #include <papermono/settings.h>
 #include <papermono/status_led.h>
@@ -2900,6 +2902,18 @@ static int render_power(void *context, lv_obj_t *screen)
 	return 0;
 }
 
+static const char *sleep_summary_text(enum papermono_sleep_summary summary)
+{
+	switch (summary) {
+	case PAPERMONO_SLEEP_SUMMARY_HOURLY_WEATHER: return "未来 8 小时";
+	case PAPERMONO_SLEEP_SUMMARY_READING: return "阅读进度";
+	case PAPERMONO_SLEEP_SUMMARY_TOMORROW: return "明日预告";
+	case PAPERMONO_SLEEP_SUMMARY_BLANK: return "留白";
+	case PAPERMONO_SLEEP_SUMMARY_QUOTE:
+	default: return "摘抄";
+	}
+}
+
 static int render_settings(void *context, lv_obj_t *screen)
 {
 	ARG_UNUSED(context);
@@ -2907,9 +2921,10 @@ static int render_settings(void *context, lv_obj_t *screen)
 	char value[96];
 	make_header(screen, "设置");
 	detail_section(screen, 134, "日常偏好");
-	detail_section(screen, 390, "连接");
-	detail_section(screen, 548, "设备");
-	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "Wi-Fi 网络", "清除蓝牙配对", "恢复默认设置", "电源选项"};
+	detail_section(screen, 402, "连接");
+	detail_section(screen, 554, "设备");
+	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "休眠屏摘要",
+		"Wi-Fi 网络", "清除蓝牙配对", "恢复默认设置", "电源选项"};
 	/* The loop below walks detail_setting_rects and indexes titles with the
 	 * same counter, so the two tables have to stay the same length.
 	 */
@@ -2918,7 +2933,7 @@ static int render_settings(void *context, lv_obj_t *screen)
 		"settings titles must match detail_setting_rects");
 	for (size_t i = 0; i < ARRAY_SIZE(detail_setting_rects); ++i) {
 		const struct papermono_rect *rect = &detail_setting_rects[i];
-		(void)detail_text(screen, titles[i], rect->x, rect->y + 10, i <= 2 ? 254 : 398, 34, true);
+		(void)detail_text(screen, titles[i], rect->x, rect->y + 10, i <= 3 ? 254 : 398, 34, true);
 		(void)make_ink_shape(screen, rect->x, rect->y + rect->height - 1, rect->width, 1, ink, 0);
 		if (i != DETAIL_SETTING_FRONTLIGHT) make_chevron(screen, 443, rect->y + 20);
 		value[0] = '\0';
@@ -2927,17 +2942,18 @@ static int render_settings(void *context, lv_obj_t *screen)
 			else (void)snprintf(value, sizeof(value), "已关闭");
 		} else if (i == DETAIL_SETTING_TIME) (void)snprintf(value, sizeof(value), "%s", prefs->use_24_hour ? "24 小时制" : "12 小时制");
 		else if (i == DETAIL_SETTING_FRONTLIGHT) (void)snprintf(value, sizeof(value), "%u%%", prefs->frontlight_percent);
+		else if (i == DETAIL_SETTING_SUMMARY) (void)snprintf(value, sizeof(value), "%s", sleep_summary_text(prefs->sleep_summary));
 		if (value[0]) {
 			lv_obj_t *label = detail_text(screen, value, 276, rect->y + 15, 156, 24, false);
 			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 		}
 	}
-	(void)make_ink_shape(screen, 40, 356, 384, 1, ink, 0);
+	(void)make_ink_shape(screen, 40, 316, 384, 1, ink, 0);
 	for (int i = 0; i < 5; ++i) {
-		(void)make_outline_shape(screen, 34 + i * 96, 350, 12, 12, 1, 6);
-		if ((int)prefs->frontlight_percent / 25 == i) (void)make_ink_shape(screen, 34 + i * 96, 350, 12, 12, ink, 6);
+		(void)make_outline_shape(screen, 34 + i * 96, 310, 12, 12, 1, 6);
+		if ((int)prefs->frontlight_percent / 25 == i) (void)make_ink_shape(screen, 34 + i * 96, 310, 12, 12, ink, 6);
 	}
-	(void)detail_text(screen, "长按后确认", 306, 614, 130, 24, false);
+	(void)detail_text(screen, "长按后确认", 306, 620, 130, 24, false);
 	make_footer(screen, settings_last_error < 0 ? "恢复默认设置失败 · 未更改" :
 		frontlight_last_error < 0 ? "前光调整失败 · 未保存" : "轻触修改 · 前光长按关闭");
 	return 0;
@@ -3587,6 +3603,7 @@ static int settings_event(void *context,
 	const struct papermono_rect time_rect = detail_setting_rects[DETAIL_SETTING_TIME];
 	const struct papermono_rect frontlight_rect = detail_setting_rects[DETAIL_SETTING_FRONTLIGHT];
 	const struct papermono_rect wifi_rect = detail_setting_rects[DETAIL_SETTING_WIFI];
+	const struct papermono_rect summary_rect = detail_setting_rects[DETAIL_SETTING_SUMMARY];
 	const struct papermono_rect ble_rect = detail_setting_rects[DETAIL_SETTING_BLE];
 	const struct papermono_rect reset_rect = detail_setting_rects[DETAIL_SETTING_RESET];
 	const struct papermono_rect power_rect = detail_setting_rects[DETAIL_SETTING_POWER];
@@ -3630,6 +3647,13 @@ static int settings_event(void *context,
 			papermono_frontlight_previous(prefs->frontlight_percent);
 
 		(void)set_frontlight(next);
+		request_redraw(command);
+	} else if (papermono_interaction_contains(event,
+		PAPERMONO_INTERACTION_TAP, &summary_rect)) {
+		const enum papermono_sleep_summary next =
+			(prefs->sleep_summary + 1U) % PAPERMONO_SLEEP_SUMMARY_COUNT;
+
+		(void)papermono_settings_set_sleep_summary(next);
 		request_redraw(command);
 	} else if (papermono_interaction_contains(event,
 		PAPERMONO_INTERACTION_TAP, &wifi_rect)) {
@@ -4128,11 +4152,125 @@ static int open_app(enum papermono_app_id target)
 	return render_current(PAPERMONO_REFRESH_AUTO);
 }
 
+
+/* Standby page: a static plate drawn once before deep sleep. It deliberately
+ * shows no clock - the image stays frozen, so a time would go stale instantly.
+ * Every element sits on the 22/458 margin grid used by the rest of the UI.
+ */
+static lv_obj_t *sleep_label(lv_obj_t *parent, const char *text,
+	const lv_font_t *font, int32_t x, int32_t y, int32_t width,
+	bool right_aligned)
+{
+	lv_obj_t *label = make_label(parent, text, font, ink);
+
+	lv_obj_set_pos(label, x, y);
+	lv_obj_set_size(label, width, 24);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	if (right_aligned) {
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+	}
+	return label;
+}
+
+static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
+{
+	struct papermono_ui_snapshot snapshot;
+
+	read_snapshot(&snapshot);
+	(void)sleep_label(screen, "PAPERMONO", &lv_font_montserrat_18, 22, 16,
+		200, false);
+	if (snapshot.rtc_valid) {
+		char date[48];
+
+		(void)snprintf(date, sizeof(date), "休眠于 %02d月%02d日",
+			snapshot.time.tm_mon + 1, snapshot.time.tm_mday);
+		(void)sleep_label(screen, date, &papermono_cjk_16, 258, 16, 200, true);
+	} else {
+		(void)sleep_label(screen, "时钟尚未校准", &papermono_cjk_16, 258, 16,
+			200, true);
+	}
+	(void)make_ink_shape(screen, 22, 116, 436, 1, ink, 0);
+
+	if (snapshot.rtc_valid) {
+		static const char *const weekday[] = {
+			"周日", "周一", "周二", "周三", "周四", "周五", "周六",
+		};
+		char text[32];
+		lv_obj_t *day;
+
+		(void)snprintf(text, sizeof(text), "%02d", snapshot.time.tm_mday);
+		day = make_label(screen, text, &papermono_clock_148, ink);
+		lv_obj_set_pos(day, 14, 126);
+		(void)snprintf(text, sizeof(text), "%d月", snapshot.time.tm_mon + 1);
+		(void)sleep_label(screen, text, &papermono_cjk_16, 196, 138, 130, false);
+		(void)sleep_label(screen, weekday[CLAMP(snapshot.time.tm_wday, 0, 6)],
+			&papermono_reading_24, 196, 168, 150, false);
+
+		struct papermono_almanac_day almanac;
+
+		if (papermono_almanac_lookup(snapshot.time.tm_year + 1900,
+			snapshot.time.tm_mon + 1, snapshot.time.tm_mday,
+			&almanac) == 0 && almanac.term_valid) {
+			(void)sleep_label(screen, almanac.term.name, &papermono_cjk_16,
+				352, 136, 100, false);
+			if (almanac.term.days_away == 0) {
+				(void)sleep_label(screen, "今日", &papermono_cjk_16, 352,
+					158, 100, false);
+			} else {
+				(void)snprintf(text, sizeof(text), "%d 天后",
+					almanac.term.days_away);
+				(void)sleep_label(screen, text, &papermono_cjk_16, 352,
+					158, 100, false);
+			}
+			if (almanac.memorial != NULL) {
+				(void)make_ink_shape(screen, 352, 182, 90, 1, ink, 0);
+				(void)sleep_label(screen, almanac.memorial,
+					&papermono_cjk_16, 352, 192, 104, false);
+			}
+		}
+	} else {
+		(void)sleep_label(screen, "日期未知", &papermono_reading_24, 22, 150,
+			300, false);
+	}
+	(void)make_ink_shape(screen, 22, 316, 436, 1, ink, 0);
+	(void)sleep_label(screen, "天气未同步 · 唤醒后更新", &papermono_cjk_16, 22,
+		330, 400, false);
+
+	if (shutdown) {
+		(void)sleep_label(screen, "已关机 · 按电源键重新启动",
+			&papermono_reading_24, 22, 652, 420, false);
+		return;
+	}
+	const struct papermono_preferences *prefs = papermono_settings_get();
+
+	if (prefs->sleep_summary == PAPERMONO_SLEEP_SUMMARY_QUOTE &&
+	    snapshot.rtc_valid) {
+		const struct papermono_quote *quote = papermono_quote_for_day(
+			snapshot.time.tm_year + 1900, snapshot.time.tm_mon + 1,
+			snapshot.time.tm_mday);
+		char source[64];
+
+		(void)sleep_label(screen, "摘  抄", &papermono_cjk_16, 22, 436, 120,
+			false);
+		(void)sleep_label(screen, quote->text, &papermono_reading_24, 22,
+			462, 436, false);
+		(void)snprintf(source, sizeof(source), "—《%s》", quote->book);
+		(void)sleep_label(screen, source, &papermono_cjk_16, 258, 548, 200,
+			true);
+	}
+	(void)make_ink_shape(screen, 22, 640, 436, 1, ink, 0);
+	(void)sleep_label(screen, "下一日程", &papermono_cjk_16, 24, 652, 100,
+		false);
+	(void)sleep_label(screen, "唤醒后查看", &papermono_reading_24, 152, 648,
+		300, false);
+	(void)make_ink_shape(screen, 22, 700, 436, 1, ink, 0);
+	(void)sleep_label(screen, "轻触屏幕或按电源键唤醒", &papermono_cjk_16, 22,
+		704, 436, false);
+}
+
 static int enter_power_state(bool shutdown)
 {
 	lv_obj_t *screen = lv_screen_active();
-	lv_obj_t *pool;
-	lv_obj_t *label;
 	int ret;
 	remote_touchpad_enable(false);
 #if defined(CONFIG_PAPERMONO_BLE_MIC)
@@ -4168,17 +4306,7 @@ static int enter_power_state(bool shutdown)
 	lv_obj_clean(screen);
 	ui_fixed_line_count = 0U;
 	set_box_style(screen, paper, 0, 0);
-	pool = make_outline_shape(screen, 86, 292, 308, 156, 3, 0);
-	(void)make_ink_shape(pool, 20, 0, 72, 6, ink, 0);
-	label = make_label(pool, shutdown ? "设备已关机" : "设备休眠中",
-		&papermono_cjk_16, ink);
-	lv_obj_align(label, LV_ALIGN_CENTER, 0, -24);
-	label = make_label(pool, shutdown ? "按电源键重新启动" :
-		"触摸屏幕或按电源键唤醒", &papermono_cjk_16, ink);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-	lv_obj_set_width(label, 244);
-	lv_obj_align(label, LV_ALIGN_CENTER, 0, 22);
+	render_sleep_screen(screen, shutdown);
 	ret = papermono_display_refresh(PAPERMONO_REFRESH_FULL);
 	if (ret < 0) {
 		return ret;

@@ -16,6 +16,15 @@ extern "C" {
 #define PAPERMONO_WIFI_SSID_MAX 32U
 #define PAPERMONO_WIFI_PSK_MAX 64U
 
+enum papermono_sleep_summary {
+	PAPERMONO_SLEEP_SUMMARY_QUOTE,
+	PAPERMONO_SLEEP_SUMMARY_HOURLY_WEATHER,
+	PAPERMONO_SLEEP_SUMMARY_READING,
+	PAPERMONO_SLEEP_SUMMARY_TOMORROW,
+	PAPERMONO_SLEEP_SUMMARY_BLANK,
+	PAPERMONO_SLEEP_SUMMARY_COUNT,
+};
+
 enum papermono_reader_density {
 	PAPERMONO_READER_DENSITY_COMPACT,
 	PAPERMONO_READER_DENSITY_STANDARD,
@@ -34,6 +43,7 @@ struct papermono_preferences {
 	uint8_t frontlight_percent;
 	enum papermono_reader_density reader_density;
 	enum papermono_app_id active_app;
+	enum papermono_sleep_summary sleep_summary;
 	bool use_24_hour;
 	bool wifi_configured;
 	bool reader_resume;
@@ -44,6 +54,7 @@ struct papermono_preferences {
 
 int papermono_settings_init(void);
 const struct papermono_preferences *papermono_settings_get(void);
+int papermono_settings_set_sleep_summary(enum papermono_sleep_summary summary);
 int papermono_settings_set_active_app(enum papermono_app_id app);
 int papermono_settings_set_idle_sleep(uint8_t minutes);
 int papermono_settings_set_frontlight(uint8_t percent);

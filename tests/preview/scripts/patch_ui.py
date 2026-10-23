@@ -334,6 +334,14 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 {
 	int ret;
 	preview_wifi_fixture(name);
+	if (strcmp(name, "sleep") == 0) {
+		memset(&wifi_ui, 0, sizeof(wifi_ui));
+		lv_obj_clean(screen);
+		ui_fixed_line_count = 0U;
+		set_box_style(screen, paper, 0, 0);
+		render_sleep_screen(screen, false);
+		return 0;
+	}
 	clock_label = NULL;
 	footer_label = NULL;
 	lv_obj_clean(screen);

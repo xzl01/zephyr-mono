@@ -94,6 +94,8 @@ target_sources(app PRIVATE
   src/papermono_rgb_led.c
   src/papermono_ssd1677.c
   src/papermono_ui.c
+  src/papermono_almanac.c
+  src/papermono_quotes.c
   src/papermono_wifi_input.c
 )
 

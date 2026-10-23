@@ -208,3 +208,11 @@ cc -std=c17 -Wall -Wextra -Werror -pthread \
 	tests/host/test_settings_concurrency.c src/papermono_settings.c \
 	-o "$build_dir/test_settings_concurrency"
 "$build_dir/test_settings_concurrency"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_almanac.c src/papermono_almanac.c \
+	-o "$build_dir/test_almanac"
+"$build_dir/test_almanac"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_quotes.c src/papermono_quotes.c \
+	-o "$build_dir/test_quotes"
+"$build_dir/test_quotes"

@@ -294,6 +294,16 @@ static int papermono_settings_set(const char *name, size_t len,
 		}
 		return ret;
 	}
+	if (settings_name_steq(name, "sleep_summary", &next) && next == NULL) {
+		uint8_t value;
+
+		if (len != sizeof(value) || read_cb(cb_arg, &value, len) != (int)len ||
+		    value >= PAPERMONO_SLEEP_SUMMARY_COUNT) {
+			return 0;
+		}
+		preferences.sleep_summary = (enum papermono_sleep_summary)value;
+		return 0;
+	}
 	if (settings_name_steq(name, "wifi_ssid", &next) && next == NULL) {
 		if (len == 0U || len > sizeof(preferences.wifi_ssid)) {
 			return 0;
@@ -385,6 +395,29 @@ int papermono_settings_init(void)
 const struct papermono_preferences *papermono_settings_get(void)
 {
 	return &preferences;
+}
+
+int papermono_settings_set_sleep_summary(enum papermono_sleep_summary summary)
+{
+	if (summary >= PAPERMONO_SLEEP_SUMMARY_COUNT) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&settings_lock, K_FOREVER);
+	struct papermono_preferences candidate = preferences;
+	candidate.sleep_summary = summary;
+	int ret = 0;
+
+	if (candidate.sleep_summary != preferences.sleep_summary) {
+		const uint8_t value = (uint8_t)summary;
+
+		ret = settings_save_one("papermono/sleep_summary", &value,
+			sizeof(value));
+	}
+	if (ret == 0) {
+		preferences.sleep_summary = summary;
+	}
+	k_mutex_unlock(&settings_lock);
+	return ret;
 }
 
 int papermono_settings_set_active_app(enum papermono_app_id app)
