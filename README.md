@@ -39,7 +39,8 @@
   16 kHz / IMA ADPCM、120 字节帧（15 ms）发送；「遥控器 → 语音」页按住说话、
   松开结束，60 秒上限、断连/休眠自动停止。主机端用 `tools/remote-mic`
   接收并写入 BlackHole 2ch、VB-CABLE 或 null sink，目标应用即可选择该虚拟
-  麦克风。源码、主机测试和固件构建已完成；2026-10-22 实机验证了启动、
+麦克风。macOS 可使用本仓库的 PaperMono 虚拟音频设备，或 BlackHole 2ch /
+MiRemoteV 2ch。源码、主机测试和固件构建已完成；2026-10-22 实机验证了启动、
   按住说话、虚拟设备链路和 60 秒上限，并通过「语音会话期间暂停 Wi-Fi」
   缓解 16 kHz 共存吞吐问题（约 88% 送达）。详见
   [遥控器语音](docs/remote-mic.md)、[语音协议](docs/remote-mic-protocol.md)

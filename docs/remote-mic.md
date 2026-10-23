@@ -13,8 +13,10 @@
 - **实机语音链路尚未验证**：本文不声称已通过硬件验收，也没有实机录音样本。
   第 10 节给出需要人工执行的验收清单。
 - 接收器**不安装、不替换、不捆绑任何内核驱动、HAL 插件或系统扩展**。虚拟
-  麦克风由第三方回环音频设备提供（BlackHole 2ch、VB-CABLE、PulseAudio null
-  sink 等），接收器只是把解码后的 PCM 写入该设备。
+  麦克风由回环音频设备提供：macOS 推荐本仓库构建的 `PaperMono`，
+  Windows 使用 VB-CABLE，Linux 使用 PulseAudio null sink；也可以继续使用
+  BlackHole 2ch / SayAll 的 MiRemoteV 2ch。接收器只是把解码后的 PCM 写入
+  该设备。
 - 设备端音频不落盘；主机端默认也不落盘，只有显式传入 `--wav` 才会写文件。
 - 设备只在用户按住「遥控器 → 语音」页的语音区域时采音，松开、离开页面、
   断连、休眠或超过 60 秒都会停止并关闭麦克风电源。
@@ -30,7 +32,7 @@
               ├─ ADPCM 解码（跨帧共享预测器/步长，AUDIO_SYNC 时重置）
               ├─ 可选 DC 阻断 + 增益钳位
               ├─ 环形缓冲（默认 400 ms，欠载补静音）
-              └─ sounddevice → BlackHole 2ch / CABLE Input / null sink
+              └─ sounddevice → PaperMono / CABLE Input / null sink
                     └─ 目标应用选择该虚拟设备作为「麦克风」
 ```
 
@@ -100,22 +102,32 @@ macOS 上 `sounddevice` 会自带 PortAudio wheel；若加载失败可
 接收器写入的是**播放（输出）**设备；目标应用读取的是**录音（输入）**设备。
 回环设备把两者连起来，因此两边的名字经常不对称（尤其是 Windows）。
 
-### 5.1 macOS：BlackHole 2ch
+### 5.1 macOS：PaperMono（推荐）或 BlackHole 2ch
+
+**PaperMono** 是本仓库提供的独立回环驱动（AudioServerPlugIn，无内核扩展），
+设备名和麦克风名都是 `PaperMono`，不依赖 SayAll / BlackHole：
 
 ```sh
-brew install blackhole-2ch
+./tools/remote-mic/virtual-audio/build-papermono-driver.sh
+./tools/remote-mic/virtual-audio/install-papermono-driver.sh   # 需要管理员密码
 ```
 
-1. 安装后确认「音频 MIDI 设置」中出现 `BlackHole 2ch`；
-2. 接收器：`--device "BlackHole 2ch"`；
-3. 目标应用（Zoom、Teams、QuickTime、OBS、浏览器等）的麦克风选择
-   `BlackHole 2ch`；
-4. 如果同时想听到声音，在「音频 MIDI 设置」中创建**多输出设备**，勾选
-   扬声器和 `BlackHole 2ch`，并把系统输出指向该多输出设备。本接收器本身
-   只写入一个输出设备。
+安装后确认「音频 MIDI 设置」或设备列表中出现 `PaperMono`，然后：
 
-> 首次运行时 macOS 会要求给终端（或 Python）授予「蓝牙」权限；拒绝后扫描
-> 结果为空。授权路径：系统设置 → 隐私与安全性 → 蓝牙。
+```sh
+python3 tools/remote-mic/papermono_mic.py --device "PaperMono"
+```
+
+目标应用（Zoom、Teams、微信输入法、听写等）把麦克风选为 `PaperMono`。
+
+- 构建/卸载、许可与来源见
+  [virtual-audio/README](../tools/remote-mic/virtual-audio/README.md)。
+- 当前是 ad-hoc 本地开发签名；正式分发需要 Developer ID 与公证。
+- 已安装 BlackHole 2ch 时，可把上面的 `PaperMono` 换成 `BlackHole 2ch`，
+  行为相同；`brew install blackhole-2ch`。
+- 同时想听到声音时，在「音频 MIDI 设置」中创建多输出设备，勾选扬声器和
+  `PaperMono`（或 BlackHole），并把系统输出指向该多输出设备。接收器本身
+  只写入一个输出设备。
 
 ### 5.2 Windows：VB-CABLE
 
@@ -163,7 +175,7 @@ python3 tools/remote-mic/papermono_mic.py --list-devices
 
 ```
 *  0  MacBook Pro Speakers  [out]  out=2ch  api=0
-   1  BlackHole 2ch  [out]  out=2ch  api=0
+   1  PaperMono  [out+in]  out=2ch  api=0
    2  Built-in Microphone  [in]  out=0ch  api=0
 ```
 
@@ -175,14 +187,14 @@ python3 tools/remote-mic/papermono_mic.py --list-devices
 ### 6.1 基本用法
 
 ```sh
-# 扫描名称 "PaperMono C153" 并写入 BlackHole 2ch
-python3 tools/remote-mic/papermono_mic.py --device "BlackHole 2ch"
+# 扫描名称 "PaperMono C153" 并写入 PaperMono
+python3 tools/remote-mic/papermono_mic.py --device "PaperMono"
 
 # 指定地址（跳过扫描）
 python3 tools/remote-mic/papermono_mic.py --address AA:BB:CC:DD:EE:FF --device 3
 
 # 录制 30 秒用于检查解码质量
-python3 tools/remote-mic/papermono_mic.py --device "BlackHole 2ch" \
+python3 tools/remote-mic/papermono_mic.py --device "PaperMono" \
   --wav /tmp/papermono-voice.wav
 
 # 只连接一次，会话结束或断链后退出（便于脚本化验证）
@@ -244,7 +256,7 @@ python3 tools/remote-mic/papermono_mic.py --selftest
 有设备时，建议先用 `--send-mic-open` 验证链路与订阅，再验证按住说话：
 
 ```sh
-python3 tools/remote-mic/papermono_mic.py --device "BlackHole 2ch" \
+python3 tools/remote-mic/papermono_mic.py --device "PaperMono" \
   --send-mic-open --mic-open-seconds 5 --once --verbose
 ```
 
@@ -352,6 +364,7 @@ python3 tools/remote-mic/papermono_mic.py --selftest
 - 参考主机实现：[SayAll / remote-mic-app](https://github.com/HD838A/remote-mic-app)
 - 本仓库协议规范：[遥控器语音协议](remote-mic-protocol.md)
 - IMA/DVI ADPCM 步长表：IMA/DVI 公开规范（见 `remote_mic/protocol.py` 中的表与注释）
+- [PaperMono 虚拟音频设备](virtual-audio/README.md)（基于 BlackHole 构建）
 - [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole)
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)
 - [bleak](https://github.com/hbldh/bleak)、[python-sounddevice](https://python-sounddevice.readthedocs.io/)

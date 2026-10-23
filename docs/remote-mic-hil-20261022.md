@@ -8,7 +8,8 @@
 - 设备：M5Stack PaperMono C153（ESP32-S3R8，16 MB Flash，8 MB PSRAM）
 - USB：`/dev/cu.usbmodem21201`（USB Serial/JTAG）
 - 主机：macOS，系统蓝牙已与 C153 完成 HID 绑定（security level 4）
-- 虚拟麦克风：系统已安装 `MiRemoteV 2ch`（SayAll 的 BlackHole 派生驱动）
+- 虚拟麦克风：本仓库构建的 `PaperMono`（BlackHole v0.7.1 派生，ad-hoc 本地签名）；
+  也验证过 `MiRemoteV 2ch`（SayAll 的驱动）
 - 接收器：`tools/remote-mic`，Python 3.14 venv，bleak 3.0.2 / sounddevice 0.5.6 / numpy 2.5.4
 
 烧录/日志命令（workspace 外需要 full-access，且必须指定 Espressif OpenOCD）：
@@ -148,16 +149,32 @@ session 0: 159 frames, 2.38 s, peak 2087, gaps 3 (device stopped)
 
 ### 3.3 虚拟麦克风端到端
 
-接收器写入 `MiRemoteV 2ch`，同时用 sounddevice 从同一设备的录音侧抓取
-8 秒：
+已安装并加载本仓库的 `PaperMono` 驱动（设备名精确为 `PaperMono`，输入/输出
+两侧均可用）。先用 1 kHz 测试音验证驱动回环：
+
+```
+out 8 in 8
+shape (32000, 2) peak 8154 rms 5475
+peak freq 1000.0
+```
+
+随后接收器写入 `MiRemoteV 2ch`，同时用 sounddevice 从同一设备的录音侧抓取
+8 秒（早期验证）：
 
 ```
 MiRemoteV 2ch: peak 2100, rms 39.2, 8.0 s
 ```
 
-录音包含与接收器 WAV 对应的语音能量，说明
-「BLE → 接收器 → 虚拟设备输出 → 虚拟设备输入」链路已打通。目标应用选择
-`MiRemoteV 2ch` 作为麦克风即可（与 BlackHole 用法相同）。
+安装 `PaperMono` 后用同样方式复测：接收器写入 `PaperMono`，录音侧抓取 15 秒
+（覆盖 8 秒扫描 + 5 秒会话）：
+
+```
+PaperMono: 15.0 s, peak 2059, rms 25.2
+9-14 s 窗口内出现与接收器 285 帧/4.28 s 对应的语音能量
+```
+
+说明「BLE → 接收器 → `PaperMono` 输出 → `PaperMono` 输入」链路已打通。
+目标应用把麦克风选为 `PaperMono` 即可。
 
 ### 3.4 60 秒上限
 
@@ -176,6 +193,9 @@ MiRemoteV 2ch: peak 2100, rms 39.2, 8.0 s
 
 ## 5. 当前设备状态与复现
 
+- 已安装 `PaperMono.driver`（`/Library/Audio/Plug-Ins/HAL/`），设备列表出现
+  `PaperMono [out+in]`；构建/安装脚本见
+  [virtual-audio](../tools/remote-mic/virtual-audio/README.md)。
 - 已烧回完整功能镜像 `build-hil2/zephyr/zephyr.bin`（Wi-Fi 内容中心启用、
   16 kHz、PDM 修复、TX 队列、15 ms 请求、BLE 共存偏向）。该目录同时包含
   工作区中并行的 SSD1677 刷新策略改动，不是本功能的代码。

@@ -42,7 +42,7 @@ LOGGER = logging.getLogger("papermono_mic")
 _EPILOG = """\
 examples:
   %(prog)s --list-devices
-  %(prog)s --device "BlackHole 2ch"          # macOS virtual microphone
+  %(prog)s --device "PaperMono"               # macOS virtual microphone
   %(prog)s --device "CABLE Input"            # Windows VB-CABLE
   %(prog)s --device papermono_mic            # Linux PulseAudio null sink
   %(prog)s --address AA:BB:CC:DD:EE:FF --device 3 --gain-db 6 --wav voice.wav
@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "audio output device: index or name substring "
-            '(for example "BlackHole 2ch", "CABLE Input"); default: system '
+            '(for example "PaperMono", "CABLE Input"); default: system '
             "default output"
         ),
     )

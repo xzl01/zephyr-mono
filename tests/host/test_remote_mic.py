@@ -172,7 +172,7 @@ def check_cli_help(result: Result) -> None:
     )
     result.check(
         "--help documents the virtual microphone workflow",
-        "BlackHole" in text and "CABLE Input" in text,
+        "PaperMono" in text and "CABLE Input" in text,
     )
 
 

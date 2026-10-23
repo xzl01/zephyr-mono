@@ -1,9 +1,9 @@
 # remote-mic：PaperMono C153 BLE 语音接收器
 
 把 PaperMono C153「遥控器 → 语音」的 ATVV v1.0 音频流（16 kHz 单声道
-IMA/DVI ADPCM）解码后写入任意音频输出设备。选择 BlackHole 2ch（macOS）、
-VB-CABLE（Windows）或 PulseAudio null sink（Linux）作为输出设备，即可让其他
-应用把该虚拟回环设备当作麦克风使用。
+IMA/DVI ADPCM）解码后写入任意音频输出设备。macOS 推荐本仓库构建的
+`PaperMono` 虚拟设备，Windows 使用 VB-CABLE，Linux 使用 PulseAudio null
+sink；其他应用把该回环设备当作麦克风使用。
 
 - 协议规范：[docs/remote-mic-protocol.md](../../docs/remote-mic-protocol.md)
 - 安装、虚拟设备与故障排查：[docs/remote-mic.md](../../docs/remote-mic.md)
@@ -18,7 +18,7 @@ python3 -m venv .venv
 python3 -m pip install -r tools/remote-mic/requirements.txt
 
 python3 tools/remote-mic/papermono_mic.py --list-devices
-python3 tools/remote-mic/papermono_mic.py --device "BlackHole 2ch"
+python3 tools/remote-mic/papermono_mic.py --device "PaperMono"
 ```
 
 按住设备「遥控器 → 语音」页的语音区域开始说话，松开结束；接收器会持续运行并

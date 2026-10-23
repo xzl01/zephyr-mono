@@ -702,17 +702,11 @@ class VoiceReceiver:
                 f"{self._config.name!r}; pass --address or --name"
             )
 
-        connected = await self._macos_connected_devices()
-        if len(connected) == 1:
-            LOGGER.warning(
-                "no advertising match; using the only macOS-connected "
-                "candidate %s",
-                self._describe_target(connected[0]),
-            )
-            return connected[0]
         raise DeviceNotFoundError(
             f"no device named {self._config.name!r} and no ATVV advertiser found; "
-            "wake the remote, pair it, or pass --address"
+            "wake the remote, pair it, or pass --address "
+            "(on macOS the CoreBluetooth UUID of the already-connected "
+            "PaperMono C153 also works)"
         )
 
     async def _scan(self, scanner_class: Any, timeout: float) -> list[tuple[Any, Any]]:
