@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 
 #include <zephyr/device.h>
@@ -4172,6 +4173,68 @@ static lv_obj_t *sleep_label(lv_obj_t *parent, const char *text,
 	return label;
 }
 
+static bool sleep_weather(char *value, size_t value_size, char *meta,
+	size_t meta_size)
+{
+	const size_t count = papermono_info_count();
+
+	for (size_t index = 0U; index < count; ++index) {
+		struct papermono_info_card card;
+		struct tm updated;
+
+		if (papermono_info_get(index, &card) < 0) {
+			continue;
+		}
+		if (strcmp(card.id, "weather") != 0 &&
+		    strstr(card.title, "天气") == NULL) {
+			continue;
+		}
+		(void)snprintf(value, value_size, "%s%s%.40s", card.value,
+			card.summary[0] ? " · " : "", card.summary);
+		const time_t updated_seconds = (time_t)card.updated_at;
+
+		if (card.updated_at > 0 &&
+		    gmtime_r(&updated_seconds, &updated) != NULL) {
+			(void)snprintf(meta, meta_size, "%s · 截至 %02d:%02d",
+				card.source[0] ? card.source : "信息卡片",
+				updated.tm_hour, updated.tm_min);
+		} else {
+			(void)snprintf(meta, meta_size, "%s",
+				card.source[0] ? card.source : "信息卡片");
+		}
+		return card.status == PAPERMONO_INFO_FRESH ||
+			card.status == PAPERMONO_INFO_STALE;
+	}
+	return false;
+}
+
+static bool sleep_next_event(const struct papermono_ui_snapshot *snapshot,
+	char *out, size_t size)
+{
+	const struct papermono_calendar_time now = {
+		.year = (int16_t)(snapshot->time.tm_year + 1900),
+		.month = (uint8_t)(snapshot->time.tm_mon + 1),
+		.day = (uint8_t)snapshot->time.tm_mday,
+		.hour = (uint8_t)snapshot->time.tm_hour,
+		.minute = (uint8_t)snapshot->time.tm_min,
+	};
+	struct papermono_calendar_event event;
+
+	if (papermono_organizer_get_next_event(&now, &event) < 0) {
+		return false;
+	}
+	if (event.start.year != now.year || event.start.month != now.month ||
+	    event.start.day != now.day) {
+		(void)snprintf(out, size, "%02d/%02d %02d:%02d %s",
+			event.start.month, event.start.day, event.start.hour,
+			event.start.minute, event.title);
+	} else {
+		(void)snprintf(out, size, "%02d:%02d %s", event.start.hour,
+			event.start.minute, event.title);
+	}
+	return true;
+}
+
 static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 {
 	struct papermono_ui_snapshot snapshot;
@@ -4233,8 +4296,20 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 			300, false);
 	}
 	(void)make_ink_shape(screen, 22, 316, 436, 1, ink, 0);
-	(void)sleep_label(screen, "天气未同步 · 唤醒后更新", &papermono_cjk_16, 22,
-		330, 400, false);
+	{
+		char weather[128];
+		char meta[96];
+
+		if (sleep_weather(weather, sizeof(weather), meta, sizeof(meta))) {
+			(void)sleep_label(screen, weather, &papermono_reading_24, 22,
+				324, 436, false);
+			(void)sleep_label(screen, meta, &papermono_cjk_16, 22, 358,
+				436, false);
+		} else {
+			(void)sleep_label(screen, "天气未同步 · 唤醒后更新",
+				&papermono_cjk_16, 22, 330, 400, false);
+		}
+	}
 
 	if (shutdown) {
 		(void)sleep_label(screen, "已关机 · 按电源键重新启动",
@@ -4259,10 +4334,16 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 			true);
 	}
 	(void)make_ink_shape(screen, 22, 640, 436, 1, ink, 0);
-	(void)sleep_label(screen, "下一日程", &papermono_cjk_16, 24, 652, 100,
-		false);
-	(void)sleep_label(screen, "唤醒后查看", &papermono_reading_24, 152, 648,
-		300, false);
+	{
+		char next[192];
+
+		(void)sleep_label(screen, "下一日程", &papermono_cjk_16, 24, 652,
+			100, false);
+		(void)sleep_label(screen,
+			sleep_next_event(&snapshot, next, sizeof(next)) ? next :
+			(snapshot.rtc_valid ? "今日无日程" : "时钟未校准"),
+			&papermono_reading_24, 128, 648, 324, false);
+	}
 	(void)make_ink_shape(screen, 22, 700, 436, 1, ink, 0);
 	(void)sleep_label(screen, "轻触屏幕或按电源键唤醒", &papermono_cjk_16, 22,
 		704, 436, false);
