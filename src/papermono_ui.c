@@ -4430,7 +4430,7 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 			&papermono_reading_24, 128, 672, 324, false);
 	}
 	(void)make_ink_shape(screen, 22, 728, 436, 1, ink, 0);
-	(void)sleep_label(screen, "轻触屏幕或按电源键唤醒", &papermono_reading_24,
+	(void)sleep_label(screen, "按电源键唤醒", &papermono_reading_24,
 		22, 740, 436, false);
 }
 

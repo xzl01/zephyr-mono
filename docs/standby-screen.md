@@ -34,3 +34,8 @@
 - `tests/preview` 新增 `sleep` fixture，用真实 LVGL 渲染 480×800 I1 画面；
   产物见 `docs/design-references/sleep-screen/render-lvgl.png`。
 - 尚未实机验证；天气与"下一日程"仍是占位文案。
+
+## 唤醒方式
+
+触摸唤醒已关闭：屏幕贴着纸张/布料时误触太频繁，一次擦拭就会把设备点亮。现在只有
+侧键和电源键可以唤醒。休眠屏提示同步改为“按电源键唤醒”。

@@ -381,10 +381,10 @@ int papermono_power_enter_touch_deep_sleep(void)
 		return ret;
 	}
 	err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-	if (err == ESP_OK) {
-		err = esp_sleep_enable_ext0_wakeup(
-			(gpio_num_t)touch_irq.pin, 0);
-	}
+	/* Touch wake is deliberately not armed: the panel sits against paper and
+	 * fabrics, so an accidental brush woke the device far too often. Only the
+	 * side keys and the power-button IRQ wake it now.
+	 */
 	if (err == ESP_OK) {
 		err = esp_sleep_enable_ext1_wakeup_io(
 			BUTTON_WAKE_MASK | PMIC_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
@@ -396,8 +396,8 @@ int papermono_power_enter_touch_deep_sleep(void)
 	if (ret < 0) {
 		return ret;
 	}
-	LOG_INF("Entering ESP32-S3 deep sleep; touch GPIO%u, side keys GPIO%u/%u, "
-		"power-button IRQ GPIO%u armed", touch_irq.pin,
+	LOG_INF("Entering ESP32-S3 deep sleep; side keys GPIO%u/%u, "
+		"power-button IRQ GPIO%u armed",
 		button_left.pin, button_right.pin, pmic_irq.pin);
 	k_msleep(20);
 	sys_poweroff();
