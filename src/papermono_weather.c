@@ -69,7 +69,7 @@ static void ensure_default_router(void)
 	}
 }
 
-static int http_get(char *response, size_t response_size)
+static int http_get(char *response, size_t response_size, bool attempt_uses_fallback)
 {
 	struct zsock_addrinfo hints = {
 		.ai_family = AF_INET,
@@ -80,9 +80,20 @@ static int http_get(char *response, size_t response_size)
 	int sock;
 	int ret;
 
+	/* The domestic CDN answers on several addresses and one of them can be
+	 * slow from a given Wi-Fi client. DNS result first, then both known IPs.
+	 */
+	static const uint32_t fallback_ips[] = {
+		htonl(0x3DA0ED02UL), htonl(0x3DA0ED04UL),
+	};
+	static uint8_t next_ip;
 	int dns_ret = zsock_getaddrinfo(WEATHER_HOST, "80", &hints, &result);
 
-	if (dns_ret == 0 && result != NULL) {
+	if (attempt_uses_fallback) {
+		addr.sin_addr.s_addr = fallback_ips[next_ip %
+			ARRAY_SIZE(fallback_ips)];
+		++next_ip;
+	} else if (dns_ret == 0 && result != NULL) {
 		memcpy(&addr, result->ai_addr, sizeof(addr));
 		zsock_freeaddrinfo(result);
 	} else {
@@ -213,8 +224,10 @@ static void weather_thread(void *a, void *b, void *c)
 #endif
 
 	LOG_INF("Weather thread started");
+	uint32_t retry_ms = WEATHER_POLL_MS;
+
 	for (;;) {
-		(void)k_sem_take(&weather_request, K_MSEC(WEATHER_POLL_MS));
+		(void)k_sem_take(&weather_request, K_MSEC(retry_ms));
 		if (!atomic_cas(&busy, 0, 1)) {
 			continue;
 		}
@@ -226,20 +239,33 @@ static void weather_thread(void *a, void *b, void *c)
 		k_msleep(45000);
 		ensure_default_router();
 		LOG_INF("sojson fetch start (ipv4 ready=%d)", weather_network_ready());
-		for (uint8_t attempt = 0U; attempt < 4U; ++attempt) {
-			ret = http_get(response, sizeof(response));
+		for (uint8_t attempt = 0U; attempt < 10U; ++attempt) {
+			ensure_default_router();
+			ret = http_get(response, sizeof(response), attempt > 0U);
 			if (ret >= 0) {
 				break;
 			}
 			LOG_INF("sojson attempt %u failed (%d)", attempt + 1U, ret);
-			k_msleep(10000);
+			k_msleep(20000);
 		}
 		if (ret < 0) {
 			LOG_WRN("sojson fetch failed (%d)", ret);
 		} else {
 			LOG_INF("sojson response %d bytes", ret);
-			(void)parse_response(response);
+			const int parsed = parse_response(response);
+
+			if (parsed < 0) {
+				LOG_WRN("weather JSON parse failed (%d)", parsed);
+			}
 		}
+		if (ret >= 0) {
+			struct papermono_weather check;
+
+			papermono_weather_get(&check);
+			LOG_INF("weather snapshot valid=%d temp=%d text=%s",
+				check.valid, check.current_temp, check.text);
+		}
+		retry_ms = ret < 0 ? 120000U : WEATHER_POLL_MS;
 		atomic_set(&busy, 0);
 		papermono_ui_request_background_refresh();
 	}
