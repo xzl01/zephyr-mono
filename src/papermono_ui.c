@@ -4165,7 +4165,10 @@ static lv_obj_t *sleep_label(lv_obj_t *parent, const char *text,
 	lv_obj_t *label = make_label(parent, text, font, ink);
 
 	lv_obj_set_pos(label, x, y);
-	lv_obj_set_size(label, width, 24);
+	/* Height follows the font: a 48 px label clipped to 24 px overlapped the
+	 * next line when the weekday and solar-term names were enlarged.
+	 */
+	lv_obj_set_size(label, width, font->line_height + 2);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 	if (right_aligned) {
 		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
@@ -4267,28 +4270,28 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 		(void)snprintf(text, sizeof(text), "%d月", snapshot.time.tm_mon + 1);
 		(void)sleep_label(screen, text, &papermono_cjk_16, 196, 138, 130, false);
 		(void)sleep_label(screen, weekday[CLAMP(snapshot.time.tm_wday, 0, 6)],
-			&papermono_reading_24, 196, 168, 150, false);
+			&papermono_heading_48, 196, 166, 200, false);
 
 		struct papermono_almanac_day almanac;
 
 		if (papermono_almanac_lookup(snapshot.time.tm_year + 1900,
 			snapshot.time.tm_mon + 1, snapshot.time.tm_mday,
 			&almanac) == 0 && almanac.term_valid) {
-			(void)sleep_label(screen, almanac.term.name, &papermono_cjk_16,
-				352, 136, 100, false);
+			(void)sleep_label(screen, almanac.term.name, &papermono_heading_48,
+				336, 132, 122, false);
 			if (almanac.term.days_away == 0) {
-				(void)sleep_label(screen, "今日", &papermono_cjk_16, 352,
-					158, 100, false);
+				(void)sleep_label(screen, "今日", &papermono_cjk_16, 336,
+					182, 120, false);
 			} else {
 				(void)snprintf(text, sizeof(text), "%d 天后",
 					almanac.term.days_away);
-				(void)sleep_label(screen, text, &papermono_cjk_16, 352,
-					158, 100, false);
+				(void)sleep_label(screen, text, &papermono_cjk_16, 336,
+					182, 120, false);
 			}
 			if (almanac.memorial != NULL) {
-				(void)make_ink_shape(screen, 352, 182, 90, 1, ink, 0);
+				(void)make_ink_shape(screen, 336, 206, 118, 1, ink, 0);
 				(void)sleep_label(screen, almanac.memorial,
-					&papermono_cjk_16, 352, 192, 104, false);
+					&papermono_reading_24, 330, 214, 128, false);
 			}
 		}
 	} else {
@@ -4313,7 +4316,7 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 
 	if (shutdown) {
 		(void)sleep_label(screen, "已关机 · 按电源键重新启动",
-			&papermono_reading_24, 22, 652, 420, false);
+			&papermono_reading_24, 22, 672, 420, false);
 		return;
 	}
 	const struct papermono_preferences *prefs = papermono_settings_get();
@@ -4333,20 +4336,20 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 		(void)sleep_label(screen, source, &papermono_cjk_16, 258, 548, 200,
 			true);
 	}
-	(void)make_ink_shape(screen, 22, 640, 436, 1, ink, 0);
+	(void)make_ink_shape(screen, 22, 664, 436, 1, ink, 0);
 	{
 		char next[192];
 
-		(void)sleep_label(screen, "下一日程", &papermono_cjk_16, 24, 652,
+		(void)sleep_label(screen, "下一日程", &papermono_cjk_16, 24, 676,
 			100, false);
 		(void)sleep_label(screen,
 			sleep_next_event(&snapshot, next, sizeof(next)) ? next :
 			(snapshot.rtc_valid ? "今日无日程" : "时钟未校准"),
-			&papermono_reading_24, 128, 648, 324, false);
+			&papermono_reading_24, 128, 672, 324, false);
 	}
-	(void)make_ink_shape(screen, 22, 700, 436, 1, ink, 0);
-	(void)sleep_label(screen, "轻触屏幕或按电源键唤醒", &papermono_cjk_16, 22,
-		704, 436, false);
+	(void)make_ink_shape(screen, 22, 728, 436, 1, ink, 0);
+	(void)sleep_label(screen, "轻触屏幕或按电源键唤醒", &papermono_reading_24,
+		22, 740, 436, false);
 }
 
 static int enter_power_state(bool shutdown)
