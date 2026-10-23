@@ -37,6 +37,7 @@
 #include <papermono/power.h>
 #endif
 #include <papermono/ui.h>
+#include <papermono/weather.h>
 #include <papermono/status_led.h>
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 #include <papermono/content_server.h>
@@ -475,6 +476,9 @@ int main(void)
 		LOG_WRN("Local content center unavailable (%d)", ret);
 		papermono_status_led_report_startup_fault(true);
 	} else {
+#if defined(CONFIG_PAPERMONO_WEATHER)
+		(void)papermono_weather_init();
+#endif
 		struct papermono_content_server_state state;
 
 		for (uint8_t attempt = 0U; attempt < 40U; ++attempt) {

@@ -118,6 +118,10 @@ target_sources_ifdef(CONFIG_PAPERMONO_BLE_HID app PRIVATE
   src/papermono_hid_reports.c
 )
 
+target_sources_ifdef(CONFIG_PAPERMONO_WEATHER app PRIVATE
+  src/papermono_weather.c
+)
+
 target_sources_ifdef(CONFIG_PAPERMONO_BLE_SYNC app PRIVATE
   src/papermono_sync.c
 )
@@ -160,4 +164,5 @@ target_sources_ifdef(CONFIG_PAPERMONO_POWER_CONTROL app PRIVATE
   src/papermono_power.c
 )
 
+zephyr_include_directories(include)
 target_include_directories(app PRIVATE include)

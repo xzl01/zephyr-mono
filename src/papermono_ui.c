@@ -62,6 +62,7 @@
 #include <papermono/touchpad.h>
 #include <papermono/ui.h>
 #include <papermono/ui_layout.h>
+#include <papermono/weather.h>
 #include <papermono/weread.h>
 #include <papermono/wifi_input.h>
 
@@ -2915,6 +2916,43 @@ static const char *sleep_summary_text(enum papermono_sleep_summary summary)
 	}
 }
 
+static const char *weather_text_from_code(uint8_t code)
+{
+	if (code == 113U) return "晴";
+	if (code == 116U || code == 119U) return "多云";
+	if (code == 122U) return "阴";
+	if (code == 143U || code == 248U || code == 260U) return "雾";
+	if (code == 200U || code == 386U || code == 389U || code == 392U) return "雷雨";
+	if (code == 227U || code == 230U || code == 323U || code == 326U ||
+	    code == 329U || code == 332U || code == 335U || code == 338U ||
+	    code == 368U || code == 371U || code == 374U || code == 377U) return "雪";
+	if (code >= 176U) return "雨";
+	return "多云";
+}
+
+static bool sleep_weather_snapshot(char *value, size_t value_size, char *meta,
+	size_t meta_size)
+{
+	struct papermono_weather weather;
+	struct tm updated;
+
+	papermono_weather_get(&weather);
+	if (!weather.valid) {
+		return false;
+	}
+	(void)snprintf(value, value_size, "%s %d 度",
+		weather_text_from_code(weather.weather_code), weather.current_temp);
+	const time_t seconds = (time_t)weather.updated_at;
+
+	if (weather.updated_at > 0 && gmtime_r(&seconds, &updated) != NULL) {
+		(void)snprintf(meta, meta_size, "截至 %02d:%02d", updated.tm_hour,
+			updated.tm_min);
+	} else {
+		(void)snprintf(meta, meta_size, "已同步");
+	}
+	return true;
+}
+
 static int render_settings(void *context, lv_obj_t *screen)
 {
 	ARG_UNUSED(context);
@@ -4303,7 +4341,9 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 		char weather[128];
 		char meta[96];
 
-		if (sleep_weather(weather, sizeof(weather), meta, sizeof(meta))) {
+		if (sleep_weather_snapshot(weather, sizeof(weather), meta,
+			sizeof(meta)) ||
+		    sleep_weather(weather, sizeof(weather), meta, sizeof(meta))) {
 			(void)sleep_label(screen, weather, &papermono_reading_24, 22,
 				324, 436, false);
 			(void)sleep_label(screen, meta, &papermono_cjk_16, 22, 358,
@@ -4335,6 +4375,44 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 		(void)snprintf(source, sizeof(source), "—《%s》", quote->book);
 		(void)sleep_label(screen, source, &papermono_cjk_16, 258, 548, 200,
 			true);
+	}
+	if (prefs->sleep_summary == PAPERMONO_SLEEP_SUMMARY_HOURLY_WEATHER) {
+		struct papermono_weather weather;
+
+		papermono_weather_get(&weather);
+		(void)sleep_label(screen, "未来 8 段", &papermono_cjk_16, 22, 432,
+			200, false);
+		if (weather.valid && weather.hourly_count > 1U) {
+			char label[32];
+			const int base = 560;
+			int previous_x = -1;
+			int previous_y = base;
+
+			for (uint8_t index = 0U; index < weather.hourly_count;
+			     ++index) {
+				const int x = 26 + (int)index *
+					(412 / (weather.hourly_count - 1U));
+				const int y = base - weather.hourly_temp[index] * 3;
+
+				if (index > 0U) {
+					(void)make_fixed_line(screen, previous_x,
+						previous_y, x, y, 2, 0, 0, ink);
+				}
+				previous_x = x;
+				previous_y = y;
+			}
+			(void)snprintf(label, sizeof(label), "%d 度",
+				weather.hourly_temp[0]);
+			(void)sleep_label(screen, label, &papermono_cjk_16, 22, 576,
+				80, false);
+			(void)snprintf(label, sizeof(label), "%d 度",
+				weather.hourly_temp[weather.hourly_count - 1U]);
+			(void)sleep_label(screen, label, &papermono_cjk_16, 380, 576,
+				80, true);
+		} else {
+			(void)sleep_label(screen, "天气数据尚未同步", &papermono_cjk_16,
+				22, 470, 400, false);
+		}
 	}
 	(void)make_ink_shape(screen, 22, 664, 436, 1, ink, 0);
 	{

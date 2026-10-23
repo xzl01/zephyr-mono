@@ -11,24 +11,34 @@
 - 数据源任选（和风、彩云、Open-Meteo）。
 - 缺点：依赖外部定时推送。
 
-## 路线 B：设备直连 Open-Meteo（暂缓）
+## 路线 B：设备直连 wttr.in（已实现）
 
-Open-Meteo 免费、无需 key，提供当前天气与逐小时预报，正好覆盖“未来 8 小时”。
+wttr.in 提供无需 key 的 JSON（`/Shanghai?format=j1`），当前已接入：
 
-实际尝试（已回滚，未入库）：
+- 明文 HTTP（`wttr.in:80`），DNS 失败时回退到固定 IP `5.9.243.187`；
+- 解析 `current_condition[0].temp_C` / `weatherCode` 与 `hourly[].tempC`；
+- 每 30 分钟刷新一次，失败保留上一次快照并在 UI 标注“截至”；
+- 休眠屏天气行优先使用该快照，无数据时回退到信息卡片。
 
-1. 打开 `NET_SOCKETS_SOCKOPT_TLS` 后，Zephyr 的 `sockets_tls.c` 无条件调用
-   `mbedtls_ssl_get_session()` / `mbedtls_ssl_set_session()`，因此必须启用
-   `MBEDTLS_SSL_SESSION_TICKETS`。
-2. 该符号依赖 `MBEDTLS_SSL_PROTO_TLS1_3`，而 TLS 1.3 又要求 `MBEDTLS_SSL_TICKET_C`
-   的完整密码套件前置条件；当前为 BLE 裁剪过的 mbedTLS 配置不满足，直接编译失败。
-3. 绕过 sockets TLS、改用 mbedTLS 原生 API 时，`MBEDTLS_SSL_CLI_C` 等符号在该
-   Zephyr 版本未暴露为 Kconfig，需要自定义 `MBEDTLS_CONFIG_FILE`，属于独立工程。
+### 一个必须记住的 Zephyr 坑
 
-结论：B 可行，但不是“开几个开关”的量级，需要单独一轮做 mbedTLS 配置与真机压测
-（预计额外 30–50 KB RAM，且必须在 SNTP 校时后启用证书校验）。
+设备能拿到 DHCP 地址、能连网关，但**公网直接 `ENOENT`**。根因是这棵 Zephyr 树的
+DHCP 客户端只调用 `net_if_ipv4_set_gw()` 保存网关，**没有把它安装为默认路由器**，
+于是路由表为空、跨网段流量无路由。修复是在拿到地址后显式调用
+`net_if_ipv4_router_add(iface, &gw, true, 0)`（见 `papermono_weather.c` 的
+`ensure_default_router()`）。
 
-## 建议
+验证日志：
 
-先做 A 打通数据与展示（含“截至”时间与 stale 标记），B 作为后续独立任务；
-A 的实现也能在 B 上线后作为断网兜底。
+```text
+Installed default router 192.168.8.1
+wttr.in connected to 5.9.243.187
+wttr.in response 6143 bytes
+```
+
+### 代价与限制
+
+- 明文 HTTP：天气数据可被中间人篡改，只用于展示，不参与任何决策；后续若需要完整性，
+  应改为自定义 PSA/mbedTLS 的 HTTPS 客户端（普通 TLS socket 在本树不可用，见上）。
+- wttr.in 的 hourly 是 3 小时间隔，因此中间带文案是“未来 8 段”而不是“未来 8 小时”。
+- 固定回退 IP 可能随服务迁移失效；DNS 正常时不使用它。

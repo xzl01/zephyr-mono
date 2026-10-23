@@ -10,6 +10,7 @@
  */
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,6 +18,8 @@
 #include <zephyr/drivers/display.h>
 #include <zephyr/drivers/rtc.h>
 #include <zephyr/drivers/sensor.h>
+
+#include <papermono/weather.h>
 
 #include <papermono/content_server.h>
 #include <papermono/display_scheduler.h>
@@ -648,4 +651,23 @@ int papermono_power_acknowledge_wakeup(enum papermono_wakeup_cause cause)
 {
 	(void)cause;
 	return 0;
+}
+
+/* Synthetic weather for the standby fixture: no network on the host. */
+int papermono_weather_init(void) { return 0; }
+int papermono_weather_request(void) { return 0; }
+void papermono_weather_get(struct papermono_weather *state)
+{
+	if (state == NULL) {
+		return;
+	}
+	memset(state, 0, sizeof(*state));
+	state->valid = true;
+	state->current_temp = 18;
+	state->weather_code = 116;
+	state->hourly_count = 8;
+	for (uint8_t index = 0U; index < 8U; ++index) {
+		state->hourly_temp[index] = (int8_t)(18 + (index % 3));
+	}
+	state->updated_at = 1789000000;
 }

@@ -468,4 +468,12 @@ config PAPERMONO_POWER_HIL_USB_RECONNECT_DELAY_MS
 	  console before wake and display-refresh milestones are logged. This does
 	  not affect the normal firmware.
 
+config PAPERMONO_WEATHER
+	bool "Open-Meteo weather fetch"
+	depends on DNS_RESOLVER
+	default y
+	help
+	  Fetch current weather and the next eight hourly temperatures from
+	  Open-Meteo over HTTPS using the pinned Let's Encrypt root.
+
 endmenu
