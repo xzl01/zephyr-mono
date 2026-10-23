@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,8 +20,8 @@
 
 LOG_MODULE_REGISTER(papermono_weather, LOG_LEVEL_INF);
 
-#define WEATHER_HOST "wttr.in"
-#define WEATHER_PATH "/Shanghai?format=j1"
+#define WEATHER_HOST "t.weather.sojson.com"
+#define WEATHER_PATH "/api/weather/city/101280601"
 #define WEATHER_POLL_MS (30 * 60 * 1000)
 
 extern const uint8_t papermono_ca_isrg_root_x1[];
@@ -85,15 +86,15 @@ static int http_get(char *response, size_t response_size)
 		memcpy(&addr, result->ai_addr, sizeof(addr));
 		zsock_freeaddrinfo(result);
 	} else {
-		LOG_WRN("wttr.in DNS failed (%d), using fallback", dns_ret);
+		LOG_WRN("sojson DNS failed (%d), using fallback", dns_ret);
 		/* Router DHCP did not yield a usable resolver on every network.
 		 * Keep a last-resort address so weather still refreshes; the Host
 		 * header keeps the virtual host correct.
 		 */
-		/* 188.40.99.226 in network byte order; inet_pton is not linked in
+		/* 61.160.237.4 in network byte order; inet_pton is not linked in
 		 * every socket configuration.
 		 */
-		addr.sin_addr.s_addr = htonl(0x05F9F3BBUL);
+		addr.sin_addr.s_addr = htonl(0x3DA0ED04UL);
 	}
 	sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock < 0) {
@@ -101,12 +102,12 @@ static int http_get(char *response, size_t response_size)
 	}
 	if (zsock_connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		ret = -errno;
-		LOG_WRN("wttr.in connect failed (%d) to %s", ret,
+		LOG_WRN("sojson connect failed (%d) to %s", ret,
 			net_addr_ntop(AF_INET, &addr.sin_addr, (char[16]){0}, 16));
 		zsock_close(sock);
 		return ret;
 	}
-	LOG_INF("wttr.in connected to %s", net_addr_ntop(AF_INET,
+	LOG_INF("sojson connected to %s", net_addr_ntop(AF_INET,
 		&addr.sin_addr, (char[16]){0}, 16));
 	char request[320];
 	int length = snprintf(request, sizeof(request),
@@ -116,7 +117,7 @@ static int http_get(char *response, size_t response_size)
 	ssize_t sent = zsock_send(sock, request, (size_t)length, 0);
 
 	if (sent != length) {
-		LOG_WRN("wttr.in send failed (%d of %d, errno %d)",
+		LOG_WRN("sojson send failed (%d of %d, errno %d)",
 			(int)sent, length, errno);
 		zsock_close(sock);
 		return -EIO;
@@ -141,62 +142,60 @@ static int http_get(char *response, size_t response_size)
 	return (int)used;
 }
 
-static int parse_int_field(const char *base, const char *field, int *out)
+static bool json_string_field(const char *base, const char *field, char *out,
+	size_t out_size)
 {
 	const char *key = strstr(base, field);
-	char *end;
 
 	if (key == NULL) {
-		return -EBADMSG;
+		return false;
 	}
 	key = strchr(key, ':');
 	if (key == NULL) {
-		return -EBADMSG;
+		return false;
+	}
+	key = strchr(key, '"');
+	if (key == NULL) {
+		return false;
 	}
 	++key;
-	while (*key == ' ' || *key == '"') {
-		++key;
+	const char *end = strchr(key, '"');
+
+	if (end == NULL) {
+		return false;
 	}
-	*out = (int)strtol(key, &end, 10);
-	return end == key ? -EBADMSG : 0;
+	size_t length = (size_t)(end - key);
+
+	if (length >= out_size) {
+		length = out_size - 1U;
+	}
+	memcpy(out, key, length);
+	out[length] = '\0';
+	return true;
 }
 
 static int parse_response(const char *json)
 {
-	const char *current = strstr(json, "\"current_condition\"");
-	const char *hourly = strstr(json, "\"hourly\"");
+	char text[16];
+	char wendu[8];
 	int value;
 
-	if (current == NULL || parse_int_field(current, "\"temp_C\"", &value) < 0) {
+	if (!json_string_field(json, "\"wendu\"", wendu, sizeof(wendu))) {
 		return -EBADMSG;
 	}
+	value = (int)strtol(wendu, NULL, 10);
 	k_mutex_lock(&weather_lock, K_FOREVER);
 	snapshot.current_temp = (int8_t)value;
 	snapshot.weather_code = 0U;
-	if (parse_int_field(current, "\"weatherCode\"", &value) == 0) {
-		snapshot.weather_code = (uint8_t)value;
+	if (json_string_field(json, "\"type\"", text, sizeof(text))) {
+		(void)snprintf(snapshot.text, sizeof(snapshot.text), "%s", text);
+	} else {
+		snapshot.text[0] = '\0';
 	}
 	snapshot.hourly_count = 0U;
-	if (hourly != NULL) {
-		const char *cursor = hourly;
+	const time_t now = time(NULL);
 
-		for (uint8_t index = 0U; index < 8U; ++index) {
-			if (parse_int_field(cursor, "\"tempC\"", &value) < 0) {
-				break;
-			}
-			snapshot.hourly_temp[index] = (int8_t)value;
-			snapshot.hourly_count = index + 1U;
-			cursor = strstr(cursor, "\"time\"");
-			if (cursor == NULL) {
-				break;
-			}
-			cursor = strstr(cursor, "\"tempC\"");
-			if (cursor == NULL) {
-				break;
-			}
-		}
-	}
-	snapshot.updated_at = k_uptime_get() / 1000;
+	snapshot.updated_at = now > 1600000000 ? (int64_t)now : 0;
 	snapshot.valid = true;
 	k_mutex_unlock(&weather_lock);
 	return 0;
@@ -226,19 +225,19 @@ static void weather_thread(void *a, void *b, void *c)
 		 */
 		k_msleep(45000);
 		ensure_default_router();
-		LOG_INF("wttr.in fetch start (ipv4 ready=%d)", weather_network_ready());
+		LOG_INF("sojson fetch start (ipv4 ready=%d)", weather_network_ready());
 		for (uint8_t attempt = 0U; attempt < 4U; ++attempt) {
 			ret = http_get(response, sizeof(response));
 			if (ret >= 0) {
 				break;
 			}
-			LOG_INF("wttr.in attempt %u failed (%d)", attempt + 1U, ret);
+			LOG_INF("sojson attempt %u failed (%d)", attempt + 1U, ret);
 			k_msleep(10000);
 		}
 		if (ret < 0) {
-			LOG_WRN("wttr.in fetch failed (%d)", ret);
+			LOG_WRN("sojson fetch failed (%d)", ret);
 		} else {
-			LOG_INF("wttr.in response %d bytes", ret);
+			LOG_INF("sojson response %d bytes", ret);
 			(void)parse_response(response);
 		}
 		atomic_set(&busy, 0);

@@ -2941,10 +2941,14 @@ static bool sleep_weather_snapshot(char *value, size_t value_size, char *meta,
 		return false;
 	}
 	(void)snprintf(value, value_size, "%s %d 度",
-		weather_text_from_code(weather.weather_code), weather.current_temp);
-	const time_t seconds = (time_t)weather.updated_at;
+		weather.text[0] ? weather.text :
+		weather_text_from_code(weather.weather_code),
+		weather.current_temp);
+	/* updated_at is UTC epoch; the panel shows local time. */
+	const time_t seconds = (time_t)weather.updated_at +
+		(time_t)papermono_settings_get()->timezone_offset_minutes * 60;
 
-	if (weather.updated_at > 0 && gmtime_r(&seconds, &updated) != NULL) {
+	if (weather.updated_at > 1600000000 && gmtime_r(&seconds, &updated) != NULL) {
 		(void)snprintf(meta, meta_size, "截至 %02d:%02d", updated.tm_hour,
 			updated.tm_min);
 	} else {

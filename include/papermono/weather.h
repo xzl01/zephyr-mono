@@ -13,6 +13,7 @@ struct papermono_weather {
 	bool valid;
 	int8_t current_temp;
 	uint8_t weather_code;
+	char text[16];
 	int8_t hourly_temp[8];
 	uint8_t hourly_count;
 	int64_t updated_at;

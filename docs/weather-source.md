@@ -11,13 +11,14 @@
 - 数据源任选（和风、彩云、Open-Meteo）。
 - 缺点：依赖外部定时推送。
 
-## 路线 B：设备直连 wttr.in（已实现）
+## 路线 B：设备直连天气接口（已实现）
 
-wttr.in 提供无需 key 的 JSON（`/Shanghai?format=j1`），当前已接入：
+当前使用国内可达的 sojson 深圳接口（城市代码 101280601，中文天气）：
 
-- 明文 HTTP（`wttr.in:80`），DNS 失败时回退到固定 IP `5.9.243.187`；
-- 解析 `current_condition[0].temp_C` / `weatherCode` 与 `hourly[].tempC`；
-- 每 30 分钟刷新一次，失败保留上一次快照并在 UI 标注“截至”；
+- 明文 HTTP（`t.weather.sojson.com`），DNS 失败时回退到 `61.160.237.4`；
+- 解析 `data.wendu` 与 `data.forecast[0].type`，按设置时区显示“截至 HH:MM”；
+- 每 30 分钟刷新一次，失败保留上一次快照；
+- 早期试过 wttr.in，但在本网络下时通时断，已放弃。
 - 休眠屏天气行优先使用该快照，无数据时回退到信息卡片。
 
 ### 一个必须记住的 Zephyr 坑
@@ -40,5 +41,6 @@ wttr.in response 6143 bytes
 
 - 明文 HTTP：天气数据可被中间人篡改，只用于展示，不参与任何决策；后续若需要完整性，
   应改为自定义 PSA/mbedTLS 的 HTTPS 客户端（普通 TLS socket 在本树不可用，见上）。
-- wttr.in 的 hourly 是 3 小时间隔，因此中间带文案是“未来 8 段”而不是“未来 8 小时”。
+- sojson 不提供逐小时数据，因此“未来 8 小时”目前显示“天气数据尚未同步”；
+  需要该视图时再接入支持 hourly 的数据源。
 - 固定回退 IP 可能随服务迁移失效；DNS 正常时不使用它。
