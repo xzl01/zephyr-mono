@@ -62,10 +62,25 @@ static void ensure_default_router(void)
 	if (gw.s4_addr[0] == 0U) {
 		return;
 	}
-	if (net_if_ipv4_router_find_default(iface, NULL) == NULL) {
-		(void)net_if_ipv4_router_add(iface, &gw, true, 0);
-		LOG_INF("Installed default router %u.%u.%u.%u",
+	/* Anything installed for the current gateway means we are done. */
+	if (net_if_ipv4_router_lookup(iface, &gw) != NULL) {
+		return;
+	}
+	/* A default router left over from a previous network has lifetime 0 and
+	 * never expires, so drop it before installing the gateway we just got
+	 * from DHCP. Otherwise moving between networks keeps routing to the old
+	 * gateway.
+	 */
+	struct net_if_router *stale = net_if_ipv4_router_find_default(iface, NULL);
+
+	if (stale != NULL) {
+		(void)net_if_ipv4_router_rm(stale);
+	}
+	if (net_if_ipv4_router_add(iface, &gw, true, 0) != NULL) {
+		LOG_INF("Using DHCP default router %u.%u.%u.%u",
 			gw.s4_addr[0], gw.s4_addr[1], gw.s4_addr[2], gw.s4_addr[3]);
+	} else {
+		LOG_WRN("Could not install DHCP default router");
 	}
 }
 
