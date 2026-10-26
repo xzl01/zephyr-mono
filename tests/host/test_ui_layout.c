@@ -74,6 +74,17 @@ int main(void)
 		assert(r->height >= 56 && r->y + r->height < UI_DETAIL_FOOTER_TOP);
 		if (i) assert(detail_setting_rects[i - 1].y + detail_setting_rects[i - 1].height <= r->y);
 	}
+	/* This control regressed when a new settings row was added: its track
+	 * stayed at an absolute y and cut through the title. Both lanes must fit
+	 * inside the actual touch row, with a clear gap after the text line.
+	 */
+	const struct papermono_rect *frontlight =
+		&detail_setting_rects[DETAIL_SETTING_FRONTLIGHT];
+	const struct papermono_rect track = papermono_ui_frontlight_track();
+	assert(track.y - 6 >= frontlight->y + 10 + 34 + 8);
+	assert(track.y + 6 < frontlight->y + frontlight->height);
+	assert(track.x - 6 >= frontlight->x);
+	assert(track.x + track.width + 6 < frontlight->x + frontlight->width);
 	e = tap(420, 30);
 	assert(papermono_interaction_route(&e, reader_regions, 6, &action, NULL) == 0);
 	assert(action == LIBRARY_TOUCH_OPEN_TOC);
