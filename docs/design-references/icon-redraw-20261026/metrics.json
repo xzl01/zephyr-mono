@@ -1,0 +1,147 @@
+{
+  "base_revision": "20dd48cb5fc7c53c926f692803199f46846c84ee",
+  "redrawn": [
+    "library",
+    "weread",
+    "tasks",
+    "notes",
+    "content",
+    "info",
+    "tools"
+  ],
+  "retained_launcher": [
+    "calendar",
+    "remote",
+    "settings",
+    "power"
+  ],
+  "changed_assets": [
+    "papermono_icon_content.c",
+    "papermono_icon_info.c",
+    "papermono_icon_info_small.c",
+    "papermono_icon_library.c",
+    "papermono_icon_library_focal.c",
+    "papermono_icon_library_small.c",
+    "papermono_icon_notes.c",
+    "papermono_icon_tasks.c",
+    "papermono_icon_tasks_focal.c",
+    "papermono_icon_tools.c",
+    "papermono_icon_weread.c",
+    "papermono_icon_weread_focal.c"
+  ],
+  "unchanged_assets": [
+    "papermono_icon_bluetooth.c",
+    "papermono_icon_book_small.c",
+    "papermono_icon_bookmark.c",
+    "papermono_icon_bookmark_focal.c",
+    "papermono_icon_bookmark_small.c",
+    "papermono_icon_calendar.c",
+    "papermono_icon_calendar_focal.c",
+    "papermono_icon_document.c",
+    "papermono_icon_document_focal.c",
+    "papermono_icon_document_small.c",
+    "papermono_icon_headphones_small.c",
+    "papermono_icon_power.c",
+    "papermono_icon_remote.c",
+    "papermono_icon_restore.c",
+    "papermono_icon_return_small.c",
+    "papermono_icon_settings.c",
+    "papermono_icon_settings_small.c",
+    "papermono_icon_sleep.c",
+    "papermono_icon_sun_small.c",
+    "papermono_icon_toc_small.c",
+    "papermono_icon_wifi.c",
+    "papermono_icon_wifi_focal.c"
+  ],
+  "internal_dram_bytes": 338520,
+  "internal_dram_capacity_bytes": 399108,
+  "firmware_sha256": "b1a8638640ec534a5a78175596ae8216b229aed047ef0ed2c9a42c23e08de401",
+  "preview_count": 12,
+  "flashed": false,
+  "native_fixture_memory": {
+    "launcher-1": {
+      "budget": 65536,
+      "allocatable": 61696,
+      "used": 13400,
+      "peak": 44360,
+      "free": 48296
+    },
+    "launcher-2": {
+      "budget": 65536,
+      "allocatable": 62368,
+      "used": 8776,
+      "peak": 44360,
+      "free": 53592
+    },
+    "library": {
+      "budget": 65536,
+      "allocatable": 62208,
+      "used": 9856,
+      "peak": 44360,
+      "free": 52352
+    },
+    "library-populated": {
+      "budget": 65536,
+      "allocatable": 61248,
+      "used": 16696,
+      "peak": 44360,
+      "free": 44552
+    },
+    "weread": {
+      "budget": 65536,
+      "allocatable": 62048,
+      "used": 10912,
+      "peak": 44360,
+      "free": 51136
+    },
+    "tasks": {
+      "budget": 65536,
+      "allocatable": 62352,
+      "used": 8880,
+      "peak": 44360,
+      "free": 53472
+    },
+    "tasks-populated": {
+      "budget": 65536,
+      "allocatable": 61520,
+      "used": 14528,
+      "peak": 44360,
+      "free": 46992
+    },
+    "notes": {
+      "budget": 65536,
+      "allocatable": 62352,
+      "used": 8920,
+      "peak": 44360,
+      "free": 53432
+    },
+    "notes-populated": {
+      "budget": 65536,
+      "allocatable": 61720,
+      "used": 13184,
+      "peak": 44360,
+      "free": 48536
+    },
+    "info": {
+      "budget": 65536,
+      "allocatable": 62208,
+      "used": 9880,
+      "peak": 44360,
+      "free": 52328
+    },
+    "content-center": {
+      "budget": 65536,
+      "allocatable": 61736,
+      "used": 13000,
+      "peak": 44360,
+      "free": 48736
+    },
+    "tools": {
+      "budget": 65536,
+      "allocatable": 61072,
+      "used": 17576,
+      "peak": 44360,
+      "free": 43496
+    }
+  }
+}
