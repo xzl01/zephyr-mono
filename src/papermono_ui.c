@@ -202,9 +202,9 @@ static size_t launcher_page;
 #define PAPERMONO_LARGE_BSS
 #endif
 
-/* RSS feed snapshot: about 8 KiB, kept out of the UI thread stack. The copy
- * comes from papermono_rss_get(), which may be called from this thread while
- * the fetch worker owns the source snapshot.
+/* RSS feed snapshot: the SD-backed index only (titles, dates, lengths). The
+ * article text is read on demand by papermono_rss_body_load(), so the UI never
+ * holds a second copy of every body.
  */
 #define NEWS_VISIBLE_ITEMS 6U
 struct news_ui_state {
@@ -215,8 +215,19 @@ struct news_ui_state {
 	uint16_t body_pages;
 	bool detail;
 	int last_error;
+	/* Which article currently occupies the shared body buffer, and how its
+	 * on-demand load ended. A negative body_length is shown as an error.
+	 */
+	size_t body_index;
+	int body_length;
+	bool body_loaded;
 };
 static struct news_ui_state news_ui PAPERMONO_LARGE_BSS;
+/* One article at a time, up to PAPERMONO_RSS_BODY_MAX. Static text keeps LVGL
+ * from duplicating the whole body in its 64 KiB heap; see
+ * lv_label_set_text_static() in render_news_detail().
+ */
+static char news_body_text[PAPERMONO_RSS_BODY_MAX + 1U] PAPERMONO_LARGE_BSS;
 
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 enum wifi_ui_mode { WIFI_UI_LIST, WIFI_UI_PASSWORD, WIFI_UI_FORGET };
@@ -2809,6 +2820,35 @@ static void news_updated_text(char *output, size_t size, int64_t updated_at)
 	format_info_time(output, size, updated_at);
 }
 
+static void news_body_clear(void)
+{
+	news_ui.body_index = SIZE_MAX;
+	news_ui.body_length = -ENOENT;
+	news_ui.body_loaded = false;
+	news_body_text[0] = '\0';
+}
+
+/* Copies one article from the SD index cache. Returns the byte count or a
+ * negative errno from the data layer; the UI keeps both outcomes.
+ */
+static int news_body_load(size_t index)
+{
+	news_ui.body_index = index;
+	news_ui.body_loaded = true;
+	news_body_text[sizeof(news_body_text) - 1U] = '\0';
+	news_ui.body_length = papermono_rss_body_load(index, news_body_text,
+		sizeof(news_body_text));
+	if (news_ui.body_length < 0) {
+		news_body_text[0] = '\0';
+	} else {
+		if ((size_t)news_ui.body_length >= sizeof(news_body_text)) {
+			news_ui.body_length = (int)sizeof(news_body_text) - 1;
+		}
+		news_body_text[news_ui.body_length] = '\0';
+	}
+	return news_ui.body_length;
+}
+
 static int news_open(void *context)
 {
 	ARG_UNUSED(context);
@@ -2817,6 +2857,7 @@ static int news_open(void *context)
 	news_ui.body_page = 0U;
 	news_ui.body_pages = 1U;
 	news_ui.detail = false;
+	news_body_clear();
 	news_ui.last_error = papermono_rss_request();
 	if (news_ui.last_error == -EBUSY) {
 		news_ui.last_error = 0;
@@ -2897,24 +2938,45 @@ static int render_news_detail(lv_obj_t *screen)
 	const struct papermono_rss_feed *feed = &news_ui.feed;
 	const size_t index = news_ui.selected < feed->count ?
 		news_ui.selected : 0U;
-	const struct papermono_rss_item *item = &feed->items[index];
+	const struct papermono_rss_item_meta *item = &feed->items[index];
 	lv_obj_t *label;
 
+	if (!news_ui.body_loaded || news_ui.body_index != index) {
+		(void)news_body_load(index);
+	}
 	make_header(screen, "阅读");
 	label = detail_text(screen, item->title, 22, 128, 436, 58, true);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 	if (item->published[0]) {
 		(void)detail_text(screen, item->published, 22, 190, 436, 24, false);
 	}
+	if (news_ui.body_length < 0) {
+		/* A missing or unreadable SD cache is a page state, not a crash:
+		 * the index stays usable and the reader can go back and retry.
+		 */
+		label = detail_text(screen, "正文读取失败", 22, 320, 436, 40, true);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		char error[64];
+		(void)snprintf(error, sizeof(error), "无法从缓存读取正文（%d）",
+			news_ui.body_length);
+		label = detail_text(screen, error, 22, 372, 436, 30, false);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		make_footer(screen, "点按返回列表");
+		return 0;
+	}
 	lv_obj_t *viewport = lv_obj_create(screen);
 	lv_obj_set_pos(viewport, news_body_rect.x, news_body_rect.y);
 	lv_obj_set_size(viewport, news_body_rect.width, news_body_rect.height);
 	set_box_style(viewport, paper, 0, 0);
-	label = make_label(viewport, item->body[0] ? item->body : "此条目暂无正文。",
-		&papermono_reading_24, ink);
+	label = make_label(viewport, "", &papermono_reading_24, ink);
 	lv_obj_set_width(label, news_body_rect.width);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_line_space(label, 4, LV_PART_MAIN);
+	/* Static text: LVGL points at the PSRAM buffer instead of duplicating a
+	 * body that may be as large as its whole 64 KiB heap.
+	 */
+	lv_label_set_text_static(label, news_ui.body_length > 0 ? news_body_text :
+		"此条目暂无正文。");
 	/* Layout once to learn the wrapped height; the viewport height is the
 	 * page stride, so a page turn never cuts a line in half.
 	 */
@@ -2992,6 +3054,14 @@ static int news_event(void *context, const struct papermono_app_event *event,
 				--news_ui.body_page;
 				request_redraw(command);
 			}
+		} else if (event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED) {
+			/* A completed fetch replaces the cached body; reload the open
+			 * article instead of showing the previous copy.
+			 */
+			(void)news_body_load(news_ui.selected);
+			request_redraw(command);
+		} else if (event->type == PAPERMONO_APP_EVENT_REFRESH) {
+			request_redraw(command);
 		}
 		return 0;
 	}
@@ -3037,11 +3107,17 @@ static int news_event(void *context, const struct papermono_app_event *event,
 				news_ui.selected = selected;
 				news_ui.body_page = 0U;
 				news_ui.detail = true;
+				/* Read the article now so the page opens with its
+				 * text already in the shared PSRAM buffer.
+				 */
+				(void)news_body_load(selected);
 				request_redraw(command);
 			}
 		}
-	} else if (event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED ||
-		   event->type == PAPERMONO_APP_EVENT_REFRESH) {
+	} else if (event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED) {
+		news_body_clear();
+		request_redraw(command);
+	} else if (event->type == PAPERMONO_APP_EVENT_REFRESH) {
 		request_redraw(command);
 	}
 	return 0;
@@ -3050,7 +3126,9 @@ static int news_event(void *context, const struct papermono_app_event *event,
 static const char *ready_text(const struct device *device)
 {
 	return device_is_ready(device) ? "驱动就绪" : "不可用";
-}static const char *status_led_text(enum papermono_status_led_state state)
+}
+
+static const char *status_led_text(enum papermono_status_led_state state)
 {
 	return state == PAPERMONO_STATUS_LED_OFF ? "熄灭 · 休眠/关机" :
 		state == PAPERMONO_STATUS_LED_BOOTING ? "白色 · 启动中" :

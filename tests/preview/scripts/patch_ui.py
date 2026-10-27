@@ -26,6 +26,10 @@ void preview_wifi_set_state(const struct papermono_wifi_state *state);
 void preview_display_result(int result);
 void preview_fs_mount_result(int result);
 void preview_hid_set_state(const struct papermono_hid_state *state);
+void preview_rss_set_index(const struct papermono_rss_feed *feed);
+void preview_rss_request_result_set(int result);
+void preview_rss_body_fail_set(bool fail);
+unsigned preview_rss_requests(void);
 
 #define PREVIEW_CHECK(condition) do { \
 	if (!(condition)) { \
@@ -307,6 +311,93 @@ int preview_run_assertions(void)
 	preview_sync_active = false;
 	PREVIEW_CHECK(!automatic_sleep_inhibited());
 
+	/* RSS: index-only feed, on-demand SD body, list/detail paging and the
+	 * unreadable-body error page. Bodies come from the preview SD stub. */
+	struct papermono_rss_feed news_feed = {0};
+	news_feed.valid = true;
+	snprintf(news_feed.title, sizeof(news_feed.title), "纸面资讯");
+	news_feed.count = 2U;
+	snprintf(news_feed.items[0].title, sizeof(news_feed.items[0].title),
+		"第一篇文章：纸上的慢新闻");
+	snprintf(news_feed.items[0].published,
+		sizeof(news_feed.items[0].published), "2026-10-27");
+	news_feed.items[0].body_length = 4000U;
+	snprintf(news_feed.items[1].title, sizeof(news_feed.items[1].title),
+		"第二篇文章：设备上的阅读");
+	snprintf(news_feed.items[1].published,
+		sizeof(news_feed.items[1].published), "2026-10-26");
+	news_feed.items[1].body_length = 14U;
+	news_feed.updated_at = 1793000000;
+	preview_rss_set_index(&news_feed);
+	preview_rss_body_fail_set(false);
+	preview_rss_request_result_set(0);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(news_ui.feed.count == 2U && !news_ui.detail);
+	struct papermono_rect news_row;
+	PREVIEW_CHECK(papermono_interaction_grid_cell_rect(&news_list_grid, 0,
+		&news_row) == 0);
+	event = preview_tap(&news_row);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.detail && news_ui.selected == 0U);
+	PREVIEW_CHECK(news_ui.body_loaded && news_ui.body_length > 0);
+	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_REDRAW);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(news_ui.body_pages >= 2U);
+	event = (struct papermono_app_event) {
+		.type = PAPERMONO_APP_EVENT_NEXT,
+		.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON, .x = -1, .y = -1,
+	};
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.body_page == 1U);
+	event.type = PAPERMONO_APP_EVENT_PREVIOUS;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.body_page == 0U);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	/* Tap leaves the article; a missing SD body must render the error page,
+	 * not crash or keep a stale buffer. */
+	event = preview_tap(&news_body_rect);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(!news_ui.detail);
+	preview_rss_body_fail_set(true);
+	event = preview_tap(&news_row);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.detail && news_ui.body_length < 0);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	/* Reopening after the cache recovers loads the body again. */
+	event = preview_tap(&news_body_rect);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	preview_rss_body_fail_set(false);
+	event = preview_tap(&news_row);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.body_length > 0);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	event = preview_tap(&news_body_rect);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	event = (struct papermono_app_event) {
+		.type = PAPERMONO_APP_EVENT_LONG_PRESS,
+		.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON, .x = -1, .y = -1,
+	};
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_BACK);
+	/* No cached index and a failing request renders the error state. */
+	preview_rss_set_index(NULL);
+	preview_rss_request_result_set(-ENETUNREACH);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+	PREVIEW_CHECK(news_ui.last_error == -ENETUNREACH);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	preview_rss_request_result_set(0);
+
 	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
 	PREVIEW_CHECK(preview_draft_erased());
 	preview_wifi_probe_reset();
@@ -364,6 +455,38 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 			REMOTE_MODE_MOUSE : REMOTE_MODE_MEDIA;
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_REMOTE);
 		return ret < 0 ? ret : papermono_app_router_render(&app_router, screen);
+	}
+	if (strncmp(name, "news", 4) == 0) {
+		struct papermono_rss_feed feed = {0};
+
+		if (strcmp(name, "news-error") != 0) {
+			feed.valid = true;
+			snprintf(feed.title, sizeof(feed.title), "纸面资讯");
+			snprintf(feed.items[0].title, sizeof(feed.items[0].title),
+				"第一篇文章：纸上的慢新闻");
+			snprintf(feed.items[0].published,
+				sizeof(feed.items[0].published), "2026-10-27");
+			feed.items[0].body_length = 4000U;
+			snprintf(feed.items[1].title, sizeof(feed.items[1].title),
+				"第二篇文章：设备上的阅读");
+			snprintf(feed.items[1].published,
+				sizeof(feed.items[1].published), "2026-10-26");
+			feed.items[1].body_length = 14U;
+			feed.count = strcmp(name, "news-empty") == 0 ? 0U : 2U;
+			feed.updated_at = 1793000000;
+		}
+		preview_rss_set_index(&feed);
+		preview_rss_body_fail_set(false);
+		preview_rss_request_result_set(strcmp(name, "news-error") == 0 ?
+			-ENETUNREACH : 0);
+		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS);
+		if (ret < 0) return ret;
+		if (strcmp(name, "news-detail") == 0) {
+			news_ui.selected = 0U;
+			news_ui.detail = true;
+			news_ui.body_page = 0U;
+		}
+		return papermono_app_router_render(&app_router, screen);
 	}
 	const struct {
 		const char *name;
@@ -461,7 +584,9 @@ def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: patch_ui.py <snapshot.c> <preview.c>")
     source = Path(sys.argv[1]).read_text()
-    for symbol in ("static int render_wifi(", "wifi_ui", "PAPERMONO_APP_WIFI"):
+    for symbol in ("static int render_wifi(", "wifi_ui", "PAPERMONO_APP_WIFI",
+                   "static int render_news(", "PAPERMONO_APP_NEWS", "news_ui",
+                   "news_body_text"):
         if symbol not in source:
             raise SystemExit(f"UI interface changed or incomplete: missing {symbol}")
     Path(sys.argv[2]).write_text(source + GLUE)

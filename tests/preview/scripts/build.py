@@ -14,6 +14,7 @@ PAGES = ["settings", "sleep", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-pas
          "wifi-symbols", "wifi-63chars", "wifi-connecting", "wifi-failure",
          "wifi-scan-failure", "wifi-empty", "wifi-forget",
          "home", "launcher-1", "launcher-2", "library", "weread", "calendar",
+         "news", "news-detail", "news-empty", "news-error",
          "tasks", "notes", "info", "content-center", "remote", "remote-pairing",
          "remote-passkey", "remote-media", "remote-presentation", "remote-mouse",
          "tools", "system",

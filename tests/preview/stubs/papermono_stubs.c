@@ -20,6 +20,7 @@
 #include <zephyr/drivers/sensor.h>
 
 #include <papermono/weather.h>
+#include <papermono/rss.h>
 
 #include <papermono/content_server.h>
 #include <papermono/display_scheduler.h>
@@ -670,4 +671,64 @@ void papermono_weather_get(struct papermono_weather *state)
 		state->hourly_temp[index] = (int8_t)(18 + (index % 3));
 	}
 	state->updated_at = 1789000000;
+}
+
+/* Synthetic RSS index and SD body cache. The index mirrors the production
+ * struct; bodies are generated on demand, so no host file is read. */
+static struct papermono_rss_feed preview_rss;
+static int preview_rss_request_result;
+static bool preview_rss_body_fail;
+static unsigned preview_rss_request_count;
+
+void preview_rss_set_index(const struct papermono_rss_feed *feed)
+{
+	if (feed == NULL) {
+		memset(&preview_rss, 0, sizeof(preview_rss));
+	} else {
+		preview_rss = *feed;
+	}
+}
+
+void preview_rss_request_result_set(int result)
+{
+	preview_rss_request_result = result;
+}
+
+void preview_rss_body_fail_set(bool fail) { preview_rss_body_fail = fail; }
+
+unsigned preview_rss_requests(void) { return preview_rss_request_count; }
+
+int papermono_rss_init(void) { return 0; }
+
+int papermono_rss_request(void)
+{
+	++preview_rss_request_count;
+	return preview_rss_request_result;
+}
+
+void papermono_rss_get(struct papermono_rss_feed *state)
+{
+	if (state != NULL) *state = preview_rss;
+}
+
+int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
+{
+	static const char sentence[] = "纸页资讯正文用于验证分页行为。";
+	size_t used = 0U;
+
+	if (preview_rss_body_fail || buffer == NULL || capacity == 0U ||
+	    index >= preview_rss.count) {
+		return -ENOENT;
+	}
+	if (index != 0U) {
+		(void)snprintf(buffer, capacity, "短文只有一页。");
+		return (int)strlen(buffer);
+	}
+	/* Roughly six viewports of text, enough to exercise page turns. */
+	while (used + sizeof(sentence) - 1U < capacity - 1U && used < 4000U) {
+		memcpy(buffer + used, sentence, sizeof(sentence) - 1U);
+		used += sizeof(sentence) - 1U;
+	}
+	buffer[used] = '\0';
+	return (int)used;
 }
