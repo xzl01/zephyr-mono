@@ -76,7 +76,7 @@ LOG_MODULE_REGISTER(papermono_rss, LOG_LEVEL_INF);
 #define RSS_BODIES_BAK_FILE "bodies.bak"
 
 #define RSS_INDEX_MAGIC 0x52535343UL /* "RSSC" */
-#define RSS_INDEX_VERSION 1U
+#define RSS_INDEX_VERSION 2U
 
 #if defined(__ZEPHYR__) && defined(CONFIG_ESP_SPIRAM)
 #define RSS_PSRAM __attribute__((section(".ext_ram.bss")))
@@ -122,12 +122,6 @@ static bool rss_is_space(char ch)
 {
 	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' ||
 	       ch == '\f' || ch == '\v';
-}
-
-static bool rss_is_tag_start(char ch)
-{
-	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-	       ch == '/' || ch == '!' || ch == '?';
 }
 
 static const char *rss_mem_find(const char *start, const char *end,
@@ -419,184 +413,30 @@ static bool rss_sink_put(struct rss_sink *sink, const char *data, size_t length)
 }
 
 /*
- * Second entity-decoding stage. Feeds XML-escape their HTML, so after the XML
- * entities are decoded the text may still contain HTML entities such as
- * "&amp;". The pending buffer keeps a possible entity prefix until it is known
- * to be a real entity (emitted once) or plain text (emitted verbatim).
+ * Plain-text rendering for titles and publication dates: XML entities are
+ * decoded, whitespace is folded to single spaces and the output is truncated
+ * on a UTF-8 boundary. Article bodies go through the HTML-aware converter
+ * below, which keeps block structure.
  */
-struct rss_entity_decoder {
+struct rss_plain_writer {
 	struct rss_sink *sink;
-	char pending[16];
-	size_t length;
-	bool active;
-};
-
-static void rss_entity_decoder_feed(struct rss_entity_decoder *decoder,
-				    char ch);
-
-static void rss_entity_decoder_flush_first(struct rss_entity_decoder *decoder)
-{
-	char remainder[16];
-	char first = decoder->pending[0];
-	size_t count = decoder->length - 1U;
-
-	memcpy(remainder, decoder->pending + 1U, count);
-	decoder->length = 0U;
-	decoder->active = false;
-	(void)rss_sink_put(decoder->sink, &first, 1U);
-	for (size_t i = 0U; i < count; ++i) {
-		rss_entity_decoder_feed(decoder, remainder[i]);
-	}
-}
-
-static void rss_entity_decoder_feed(struct rss_entity_decoder *decoder,
-				    char ch)
-{
-	char decoded[4];
-	size_t consumed = 0U;
-	size_t written;
-
-	if (!decoder->active) {
-		if (ch == '&') {
-			decoder->pending[0] = '&';
-			decoder->length = 1U;
-			decoder->active = true;
-			return;
-		}
-		(void)rss_sink_put(decoder->sink, &ch, 1U);
-		return;
-	}
-	if (decoder->length < sizeof(decoder->pending)) {
-		decoder->pending[decoder->length++] = ch;
-	} else {
-		rss_entity_decoder_flush_first(decoder);
-		rss_entity_decoder_feed(decoder, ch);
-		return;
-	}
-	if (ch == ';') {
-		written = rss_decode_entity(decoder->pending, decoder->length,
-					    decoded, &consumed);
-		if (written > 0U && consumed == decoder->length) {
-			decoder->length = 0U;
-			decoder->active = false;
-			(void)rss_sink_put(decoder->sink, decoded, written);
-		} else {
-			rss_entity_decoder_flush_first(decoder);
-		}
-		return;
-	}
-	if (ch != '#' && !((ch >= '0' && ch <= '9') ||
-			   (ch >= 'a' && ch <= 'z') ||
-			   (ch >= 'A' && ch <= 'Z'))) {
-		rss_entity_decoder_flush_first(decoder);
-	}
-}
-
-static void rss_entity_decoder_flush(struct rss_entity_decoder *decoder)
-{
-	if (!decoder->active) {
-		return;
-	}
-	(void)rss_sink_put(decoder->sink, decoder->pending, decoder->length);
-	decoder->length = 0U;
-	decoder->active = false;
-}
-
-enum rss_render_mode {
-	RSS_RENDER_TITLE, /* plain text: entities decoded, whitespace folded */
-	RSS_RENDER_BODY,  /* HTML stripped, HTML entities decoded twice */
-};
-
-struct rss_render {
-	struct rss_sink *sink;
-	bool strip_html;
-	bool double_decode;
-	bool in_tag;
-	bool pending_lt;
 	bool pending_space;
-	char tag_quote;
-	struct rss_entity_decoder decoder;
+	bool started;
 };
 
-static void rss_render_emit_final(struct rss_render *render, char ch)
+static void rss_plain_put(struct rss_plain_writer *writer, const char *data,
+			  size_t length)
 {
-	if (render->double_decode) {
-		rss_entity_decoder_feed(&render->decoder, ch);
-	} else {
-		(void)rss_sink_put(render->sink, &ch, 1U);
-	}
-}
-
-static void rss_render_flush_space(struct rss_render *render)
-{
-	if (render->pending_space) {
-		render->pending_space = false;
-		rss_render_emit_final(render, ' ');
-	}
-}
-
-static void rss_render_ascii(struct rss_render *render, char ch)
-{
-	rss_render_flush_space(render);
-	rss_render_emit_final(render, ch);
-}
-
-/* Emit a complete non-ASCII character without splitting it. */
-static void rss_render_sequence(struct rss_render *render, const char *data,
-				size_t length)
-{
-	rss_render_flush_space(render);
-	if (render->double_decode) {
-		rss_entity_decoder_flush(&render->decoder);
-	}
-	(void)rss_sink_put(render->sink, data, length);
-}
-
-static void rss_render_char(struct rss_render *render, char ch)
-{
-	if (render->in_tag) {
-		if (render->tag_quote != '\0') {
-			if (ch == render->tag_quote) {
-				render->tag_quote = '\0';
-			}
-			return;
+	if (writer->pending_space) {
+		if (writer->started) {
+			(void)rss_sink_put(writer->sink, " ", 1U);
 		}
-		if (ch == '"' || ch == '\'') {
-			render->tag_quote = ch;
-			return;
-		}
-		if (ch == '>') {
-			render->in_tag = false;
-			if (render->sink->stored > 0U) {
-				/* Tags separate words; the whitespace fold
-				 * removes the duplicates.
-				 */
-				render->pending_space = true;
-			}
-		}
-		return;
+		writer->pending_space = false;
 	}
-	if (render->pending_lt) {
-		if (rss_is_tag_start(ch)) {
-			render->pending_lt = false;
-			render->in_tag = true;
-			render->tag_quote = '\0';
-			return;
-		}
-		rss_render_ascii(render, '<');
-		render->pending_lt = false;
+	(void)rss_sink_put(writer->sink, data, length);
+	if (length > 0U) {
+		writer->started = true;
 	}
-	if (render->strip_html && ch == '<') {
-		render->pending_lt = true;
-		return;
-	}
-	if (rss_is_space(ch)) {
-		if (render->sink->stored > 0U) {
-			render->pending_space = true;
-		}
-		return;
-	}
-	rss_render_ascii(render, ch);
 }
 
 static size_t rss_utf8_sequence_length(unsigned char lead)
@@ -613,32 +453,13 @@ static size_t rss_utf8_sequence_length(unsigned char lead)
 	return 1U;
 }
 
-/*
- * Convert one XML payload into display text:
- *  - XML entities are decoded unless the payload came from a CDATA section;
- *  - optional HTML tag stripping with tags replaced by word separators;
- *  - whitespace folding and leading/trailing trimming;
- *  - a second entity pass for description bodies (HTML entities that were
- *    hidden behind the XML escaping);
- *  - UTF-8 sequences are copied whole, so a small output limit never splits a
- *    character.
- */
-static void rss_render_text(const char *text, size_t length, bool literal,
-			    enum rss_render_mode mode, struct rss_sink *sink)
+static void rss_render_title_text(const char *text, size_t length,
+				  bool literal, struct rss_sink *sink)
 {
-	struct rss_render render = {
+	struct rss_plain_writer writer = {
 		.sink = sink,
-		.strip_html = mode == RSS_RENDER_BODY,
-		.double_decode = mode == RSS_RENDER_BODY,
-		.in_tag = false,
-		.pending_lt = false,
 		.pending_space = false,
-		.tag_quote = '\0',
-		.decoder = {
-			.sink = sink,
-			.length = 0U,
-			.active = false,
-		},
+		.started = false,
 	};
 	size_t index = 0U;
 
@@ -652,7 +473,12 @@ static void rss_render_text(const char *text, size_t length, bool literal,
 
 			if (written > 0U) {
 				for (size_t i = 0U; i < written; ++i) {
-					rss_render_char(&render, decoded[i]);
+					if (rss_is_space(decoded[i])) {
+						writer.pending_space = true;
+					} else {
+						rss_plain_put(&writer,
+							      &decoded[i], 1U);
+					}
 				}
 				index += consumed;
 				continue;
@@ -661,7 +487,11 @@ static void rss_render_text(const char *text, size_t length, bool literal,
 		const unsigned char lead = (unsigned char)text[index];
 
 		if (lead < 0x80U) {
-			rss_render_char(&render, (char)lead);
+			if (rss_is_space((char)lead)) {
+				writer.pending_space = true;
+			} else {
+				rss_plain_put(&writer, text + index, 1U);
+			}
 			++index;
 			continue;
 		}
@@ -670,14 +500,8 @@ static void rss_render_text(const char *text, size_t length, bool literal,
 		if (sequence > length - index) {
 			sequence = length - index;
 		}
-		rss_render_sequence(&render, text + index, sequence);
+		rss_plain_put(&writer, text + index, sequence);
 		index += sequence;
-	}
-	if (render.pending_lt) {
-		rss_render_ascii(&render, '<');
-	}
-	if (render.double_decode) {
-		rss_entity_decoder_flush(&render.decoder);
 	}
 }
 
@@ -695,9 +519,9 @@ static int rss_buffer_emit(void *context, const char *data, size_t length)
 	return 0;
 }
 
-static size_t rss_render_to_buffer(const char *text, size_t length,
-				   bool literal, enum rss_render_mode mode,
-				   char *out, size_t capacity)
+static size_t rss_render_title_to_buffer(const char *text, size_t length,
+					 bool literal, char *out,
+					 size_t capacity)
 {
 	struct rss_buffer_sink buffer = { .out = out, .written = 0U };
 	struct rss_sink sink;
@@ -712,9 +536,951 @@ static size_t rss_render_to_buffer(const char *text, size_t length,
 	sink.limit = capacity - 1U;
 	sink.overflow = false;
 	sink.failed = false;
-	rss_render_text(text, length, literal, mode, &sink);
+	rss_render_title_text(text, length, literal, &sink);
 	out[buffer.written] = '\0';
 	return buffer.written;
+}
+
+/* ------------------------------------------------------------------------- */
+/* HTML-aware body conversion                                                */
+/* ------------------------------------------------------------------------- */
+
+/* The device has no rich-text font, so the structure is encoded in plain text:
+ * blank lines between paragraphs, headings on their own line, two spaces per
+ * blockquote level, "· " bullets and shortened URLs.
+ */
+
+#define RSS_HTML_TAG_MAX 16U
+#define RSS_HTML_ENTITY_MAX 16U
+#define RSS_HTML_URL_MAX 320U
+#define RSS_HTML_HEADING_MAX 192U
+#define RSS_HTML_DISPLAY_MAX 48U
+#define RSS_HTML_INDENT_MAX 3U
+#define RSS_HTML_RAW_TAG_MAX 8U
+
+struct rss_line_writer {
+	struct rss_sink *sink;
+	unsigned int indent;
+	unsigned int pending_breaks; /* 0, 1 or 2 newlines before next text */
+	bool line_open;
+	bool has_content;
+	bool pending_space;
+	bool last_cjk;
+	size_t line_text;
+};
+
+static bool rss_unit_is_cjk(const char *data, size_t length)
+{
+	const unsigned char lead = (unsigned char)data[0];
+
+	/* CJK Unified Ideographs (U+4E00..U+9FFF) start with E4..E9. The device
+	 * only renders the README's CJK subset, so a lead-byte check is enough.
+	 */
+	return length >= 3U && lead >= 0xE4U && lead <= 0xE9U;
+}
+
+static char rss_lower_ascii(char ch)
+{
+	if (ch >= 'A' && ch <= 'Z') {
+		return (char)(ch - 'A' + 'a');
+	}
+	return ch;
+}
+
+static bool rss_is_word_char(char ch)
+{
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+	       (ch >= '0' && ch <= '9');
+}
+
+static bool rss_is_alpha(char ch)
+{
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+}
+
+static bool rss_memcmp_ci(const char *left, const char *right, size_t length)
+{
+	for (size_t i = 0U; i < length; ++i) {
+		if (rss_lower_ascii(left[i]) != rss_lower_ascii(right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void rss_lw_flush(struct rss_line_writer *writer)
+{
+	const unsigned int breaks = writer->pending_breaks;
+
+	writer->pending_breaks = 0U;
+	if (breaks == 0U || !writer->has_content) {
+		return;
+	}
+	for (unsigned int i = 0U; i < breaks; ++i) {
+		(void)rss_sink_put(writer->sink, "\n", 1U);
+	}
+	writer->line_open = false;
+	writer->line_text = 0U;
+	writer->pending_space = false;
+	writer->last_cjk = false;
+}
+
+static void rss_lw_begin(struct rss_line_writer *writer)
+{
+	if (writer->line_open) {
+		return;
+	}
+	for (unsigned int i = 0U; i < writer->indent; ++i) {
+		(void)rss_sink_put(writer->sink, "  ", 2U);
+	}
+	writer->line_open = true;
+}
+
+/* 1 = line break, 2 = paragraph break (one empty line). */
+static void rss_lw_break(struct rss_line_writer *writer, unsigned int count)
+{
+	unsigned int wanted = count > 2U ? 2U : count;
+
+	if (!writer->has_content || wanted == 0U) {
+		return;
+	}
+	if (wanted > writer->pending_breaks) {
+		writer->pending_breaks = wanted;
+	}
+}
+
+static void rss_lw_space(struct rss_line_writer *writer)
+{
+	if (writer->line_open && writer->line_text > 0U) {
+		writer->pending_space = true;
+	}
+}
+
+static void rss_lw_text(struct rss_line_writer *writer, const char *data,
+			size_t length)
+{
+	if (length == 0U) {
+		return;
+	}
+	rss_lw_flush(writer);
+	rss_lw_begin(writer);
+	if (writer->pending_space && writer->line_text > 0U &&
+	    !(writer->last_cjk && rss_unit_is_cjk(data, length))) {
+		(void)rss_sink_put(writer->sink, " ", 1U);
+	}
+	writer->pending_space = false;
+	(void)rss_sink_put(writer->sink, data, length);
+	writer->line_text += length;
+	writer->last_cjk = rss_unit_is_cjk(data, length);
+	writer->has_content = true;
+}
+
+static void rss_lw_bullet(struct rss_line_writer *writer)
+{
+	rss_lw_flush(writer);
+	rss_lw_begin(writer);
+	(void)rss_sink_put(writer->sink, "\xC2\xB7", 2U); /* middle dot */
+	/* The word separator is added when the item text arrives, so an empty
+	 * list item does not leave a trailing space.
+	 */
+	writer->line_text = 2U;
+	writer->pending_space = true;
+	writer->last_cjk = false;
+	writer->has_content = true;
+}
+
+enum rss_html_state {
+	RSS_HTML_TEXT,
+	RSS_HTML_LT,
+	RSS_HTML_TAG_NAME,
+	RSS_HTML_TAG_SKIP,
+	RSS_HTML_DECL_START,
+	RSS_HTML_DECL,
+	RSS_HTML_COMMENT,
+	RSS_HTML_RAW_TEXT,
+	RSS_HTML_RAW_LT,
+	RSS_HTML_RAW_NAME,
+};
+
+struct rss_html_render {
+	struct rss_sink *sink;
+	struct rss_line_writer line;
+	const char *item_title;
+	enum rss_html_state state;
+	char name[RSS_HTML_TAG_MAX];
+	size_t name_len;
+	bool name_overflow;
+	bool closing;
+	bool self_closing;
+	bool last_slash;
+	char quote;
+	unsigned int comment_dashes;
+	char raw_tag[RSS_HTML_RAW_TAG_MAX];
+	size_t raw_tag_len;
+	size_t raw_pos;
+	char entity[RSS_HTML_ENTITY_MAX];
+	size_t entity_len;
+	bool entity_active;
+	char url[RSS_HTML_URL_MAX];
+	size_t url_len;
+	bool url_active;
+	bool url_prefix_ok;
+	bool url_discard;
+	bool heading_candidate;
+	bool heading_done;
+	bool heading_live;
+	char heading[RSS_HTML_HEADING_MAX];
+	size_t heading_len;
+	bool heading_pending_space;
+	bool heading_overflow;
+	bool prev_word_char;
+};
+
+static void rss_html_feed_ascii(struct rss_html_render *render, char ch);
+
+static bool rss_tag_is(const char *name, size_t length, const char *literal)
+{
+	const size_t literal_len = strlen(literal);
+
+	return length == literal_len && memcmp(name, literal, length) == 0;
+}
+
+static void rss_html_heading_collect(struct rss_html_render *render,
+				     const char *data, size_t length)
+{
+	size_t needed;
+
+	if (render->heading_overflow) {
+		return;
+	}
+	if (length == 1U && rss_is_space(data[0])) {
+		render->heading_pending_space = render->heading_len > 0U;
+		return;
+	}
+	needed = length + (render->heading_pending_space ? 1U : 0U);
+	if (render->heading_len + needed >= sizeof(render->heading)) {
+		/* Not a usable candidate any more: emit it as a normal heading
+		 * and continue streaming its text.
+		 */
+		render->heading_overflow = true;
+		render->heading_candidate = false;
+		render->heading_live = true;
+		rss_lw_break(&render->line, 2U);
+		rss_lw_text(&render->line, render->heading, render->heading_len);
+		rss_lw_text(&render->line, data, length);
+		return;
+	}
+	if (render->heading_pending_space) {
+		render->heading[render->heading_len++] = ' ';
+		render->heading_pending_space = false;
+	}
+	memcpy(render->heading + render->heading_len, data, length);
+	render->heading_len += length;
+}
+
+static void rss_html_heading_finish(struct rss_html_render *render)
+{
+	if (!render->heading_candidate) {
+		if (render->heading_live) {
+			render->heading_live = false;
+			rss_lw_break(&render->line, 2U);
+		}
+		return;
+	}
+	render->heading_candidate = false;
+	render->heading_pending_space = false;
+	if (render->item_title != NULL && render->item_title[0] != '\0' &&
+	    strlen(render->item_title) == render->heading_len &&
+	    memcmp(render->heading, render->item_title,
+		   render->heading_len) == 0) {
+		/* The feed repeats the item title as the first <h1>; drop it. */
+		return;
+	}
+	if (render->heading_len > 0U) {
+		rss_lw_break(&render->line, 2U);
+		rss_lw_text(&render->line, render->heading, render->heading_len);
+		rss_lw_break(&render->line, 2U);
+	}
+}
+
+static void rss_html_text_units(struct rss_html_render *render,
+				const char *data, size_t length)
+{
+	if (length == 0U) {
+		return;
+	}
+	if (render->heading_candidate) {
+		rss_html_heading_collect(render, data, length);
+		return;
+	}
+	if (render->url_active) {
+		goto append_url;
+	}
+	rss_lw_text(&render->line, data, length);
+	render->prev_word_char = false;
+	return;
+append_url:
+	{
+		/* URL collection is handled by the caller through the byte
+		 * interface; multibyte URL content simply gets appended.
+		 */
+		for (size_t i = 0U; i < length; ++i) {
+			rss_html_feed_ascii(render, data[i]);
+			if (!render->url_active) {
+				break;
+			}
+		}
+	}
+}
+
+static bool rss_url_prefix_possible(struct rss_html_render *render)
+{
+	static const char *schemes[] = { "http://", "https://" };
+	bool possible = false;
+
+	for (size_t i = 0U; i < sizeof(schemes) / sizeof(schemes[0]); ++i) {
+		const size_t scheme_len = strlen(schemes[i]);
+
+		if (render->url_len <= scheme_len &&
+		    rss_memcmp_ci(render->url, schemes[i],
+				  render->url_len)) {
+			if (render->url_len == scheme_len) {
+				render->url_prefix_ok = true;
+				return true;
+			}
+			possible = true;
+		}
+	}
+	return possible;
+}
+
+static void rss_url_reset(struct rss_html_render *render)
+{
+	render->url_active = false;
+	render->url_prefix_ok = false;
+	render->url_discard = false;
+	render->url_len = 0U;
+}
+
+static void rss_url_emit_plain(struct rss_html_render *render)
+{
+	for (size_t i = 0U; i < render->url_len; ++i) {
+		rss_lw_text(&render->line, &render->url[i], 1U);
+	}
+	render->prev_word_char =
+		render->url_len > 0U &&
+		rss_is_word_char(render->url[render->url_len - 1U]);
+	rss_url_reset(render);
+}
+
+static bool rss_url_trailing_punct(const char *data, size_t length)
+{
+	static const char *cjk[] = {
+		"\xE3\x80\x82", /* 。 */
+		"\xE3\x80\x81", /* 、 */
+		"\xEF\xBC\x8C", /* ， */
+		"\xEF\xBC\x9B", /* ； */
+		"\xEF\xBC\x9A", /* ： */
+		"\xEF\xBC\x81", /* ！ */
+		"\xEF\xBC\x9F", /* ？ */
+		"\xEF\xBC\x89", /* ） */
+		"\xE3\x80\x8D", /* 」 */
+		"\xE3\x80\x8F", /* 』 */
+		"\xE3\x80\x91", /* 】 */
+	};
+
+	if (length == 1U) {
+		switch (data[0]) {
+		case '.':
+		case ',':
+		case ';':
+		case ':':
+		case '!':
+		case '?':
+		case ')':
+		case ']':
+		case '}':
+		case '>':
+		case '"':
+		case '\'':
+			return true;
+		default:
+			return false;
+		}
+	}
+	for (size_t i = 0U; i < sizeof(cjk) / sizeof(cjk[0]); ++i) {
+		if (length == 3U && memcmp(data, cjk[i], 3U) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static size_t rss_utf8_clamp(const char *data, size_t length, size_t limit)
+{
+	size_t cut = limit;
+
+	while (cut > 0U && ((unsigned char)data[cut] & 0xC0U) == 0x80U) {
+		--cut;
+	}
+	(void)length;
+	return cut;
+}
+
+static void rss_url_terminate(struct rss_html_render *render)
+{
+	char display[RSS_HTML_DISPLAY_MAX + 4U];
+	size_t url_end;
+	size_t dlen = 0U;
+	size_t scheme = 0U;
+	size_t host_end;
+
+	if (!render->url_active) {
+		return;
+	}
+	if (!render->url_prefix_ok) {
+		rss_url_emit_plain(render);
+		return;
+	}
+	url_end = render->url_len;
+	while (url_end > 0U) {
+		size_t start = url_end - 1U;
+
+		while (start > 0U &&
+		       ((unsigned char)render->url[start] & 0xC0U) == 0x80U) {
+			--start;
+		}
+		if (!rss_url_trailing_punct(render->url + start,
+					    url_end - start)) {
+			break;
+		}
+		url_end = start;
+	}
+	if (url_end >= 8U && rss_memcmp_ci(render->url, "https://", 8U)) {
+		scheme = 8U;
+	} else if (url_end >= 7U &&
+		   rss_memcmp_ci(render->url, "http://", 7U)) {
+		scheme = 7U;
+	}
+	host_end = scheme;
+	while (host_end < url_end && render->url[host_end] != '/' &&
+	       render->url[host_end] != '?' && render->url[host_end] != '#') {
+		++host_end;
+	}
+	for (size_t i = scheme; i < host_end; ++i) {
+		if (dlen < sizeof(display)) {
+			display[dlen++] = render->url[i];
+		}
+	}
+	if (host_end < url_end && render->url[host_end] == '/') {
+		size_t segment_start = host_end + 1U;
+		size_t segment_end = segment_start;
+
+		while (segment_end < url_end && render->url[segment_end] != '/' &&
+		       render->url[segment_end] != '?' &&
+		       render->url[segment_end] != '#') {
+			++segment_end;
+		}
+		if (segment_end > segment_start) {
+			if (dlen < sizeof(display)) {
+				display[dlen++] = '/';
+			}
+			for (size_t i = segment_start;
+			     i < segment_end && dlen < sizeof(display); ++i) {
+				display[dlen++] = render->url[i];
+			}
+		}
+	}
+	if (dlen == 0U) {
+		rss_url_emit_plain(render);
+		return;
+	}
+	if (dlen > RSS_HTML_DISPLAY_MAX) {
+		const size_t room = RSS_HTML_DISPLAY_MAX - 3U;
+		const size_t cut = rss_utf8_clamp(display, dlen, room);
+
+		dlen = cut;
+		memcpy(display + dlen, "\xE2\x80\xA6", 3U); /* … */
+		dlen += 3U;
+	}
+	rss_lw_text(&render->line, display, dlen);
+	/* Punctuation that had been collected as part of the URL stays as text
+	 * right after the shortened link.
+	 */
+	for (size_t i = url_end; i < render->url_len; i +=
+	     rss_utf8_sequence_length((unsigned char)render->url[i])) {
+		size_t sequence =
+			rss_utf8_sequence_length((unsigned char)render->url[i]);
+
+		if (sequence > render->url_len - i) {
+			sequence = render->url_len - i;
+		}
+		rss_lw_text(&render->line, render->url + i, sequence);
+	}
+	rss_url_reset(render);
+	render->prev_word_char = false;
+}
+
+static void rss_url_append(struct rss_html_render *render, const char *data,
+			   size_t length)
+{
+	for (size_t i = 0U; i < length; ++i) {
+		const char ch = data[i];
+
+		if (render->url_discard) {
+			continue;
+		}
+		if (render->url_len >= sizeof(render->url) - 1U) {
+			if (!render->url_prefix_ok) {
+				rss_url_emit_plain(render);
+				return;
+			}
+			render->url_discard = true;
+			continue;
+		}
+		render->url[render->url_len++] = ch;
+		if (!render->url_prefix_ok) {
+			if ((unsigned char)ch >= 0x80U) {
+				rss_url_emit_plain(render);
+				return;
+			}
+			if (!rss_url_prefix_possible(render)) {
+				rss_url_emit_plain(render);
+				return;
+			}
+		}
+	}
+}
+
+static void rss_html_text_ascii(struct rss_html_render *render, char ch)
+{
+	if (render->heading_candidate) {
+		rss_html_heading_collect(render, &ch, 1U);
+		return;
+	}
+	if (rss_is_space(ch)) {
+		if (render->url_active) {
+			rss_url_terminate(render);
+		}
+		rss_lw_space(&render->line);
+		render->prev_word_char = false;
+		return;
+	}
+	if (render->url_active) {
+		rss_url_append(render, &ch, 1U);
+		return;
+	}
+	if ((ch == 'h' || ch == 'H') && !render->prev_word_char) {
+		rss_url_reset(render);
+		render->url_active = true;
+		rss_url_append(render, &ch, 1U);
+		return;
+	}
+	rss_lw_text(&render->line, &ch, 1U);
+	render->prev_word_char = rss_is_word_char(ch);
+}
+
+static void rss_html_emit_entity(struct rss_html_render *render,
+				 const char *data, size_t length)
+{
+	if (length == 1U && (unsigned char)data[0] < 0x80U) {
+		rss_html_text_ascii(render, data[0]);
+		return;
+	}
+	rss_html_text_units(render, data, length);
+}
+
+static void rss_html_entity_flush(struct rss_html_render *render)
+{
+	for (size_t i = 0U; i < render->entity_len; ++i) {
+		rss_html_text_ascii(render, render->entity[i]);
+	}
+	render->entity_len = 0U;
+	render->entity_active = false;
+}
+
+static void rss_html_entity_char(struct rss_html_render *render, char ch)
+{
+	char decoded[4];
+	size_t consumed = 0U;
+	size_t written;
+
+	if (render->entity_len >= sizeof(render->entity) - 1U) {
+		rss_html_entity_flush(render);
+		rss_html_feed_ascii(render, ch);
+		return;
+	}
+	render->entity[render->entity_len++] = ch;
+	if (ch == ';') {
+		written = rss_decode_entity(render->entity, render->entity_len,
+					    decoded, &consumed);
+		if (written > 0U && consumed == render->entity_len) {
+			render->entity_len = 0U;
+			render->entity_active = false;
+			rss_html_emit_entity(render, decoded, written);
+		} else {
+			rss_html_entity_flush(render);
+		}
+		return;
+	}
+	if (ch != '#' && !rss_is_alpha(ch) && !(ch >= '0' && ch <= '9')) {
+		rss_html_entity_flush(render);
+		rss_html_feed_ascii(render, ch);
+	}
+}
+
+static void rss_html_start_raw_text(struct rss_html_render *render,
+				    const char *name, size_t length)
+{
+	if (length >= sizeof(render->raw_tag)) {
+		return;
+	}
+	memcpy(render->raw_tag, name, length);
+	render->raw_tag_len = length;
+	render->raw_pos = 0U;
+	render->state = RSS_HTML_RAW_TEXT;
+}
+
+static void rss_html_dispatch(struct rss_html_render *render)
+{
+	const char *name = render->name;
+	const size_t length = render->name_len;
+	const bool closing = render->closing;
+
+	render->closing = false;
+	render->self_closing = false;
+	if (render->name_overflow) {
+		return;
+	}
+	if (render->heading_candidate) {
+		if (closing && rss_tag_is(name, length, "h1")) {
+			rss_html_heading_finish(render);
+		}
+		return;
+	}
+	if ((rss_tag_is(name, length, "script") ||
+	     rss_tag_is(name, length, "style")) && !closing) {
+		rss_html_start_raw_text(render, name, length);
+		return;
+	}
+	if (rss_tag_is(name, length, "br")) {
+		rss_lw_break(&render->line, 1U);
+		return;
+	}
+	if (!closing) {
+		if (rss_tag_is(name, length, "p")) {
+			rss_lw_break(&render->line, 2U);
+		} else if (rss_tag_is(name, length, "h1")) {
+			/* The first <h1> usually repeats the item title, sometimes
+			 * after a short preamble paragraph, so deduplicate it even
+			 * when a paragraph precedes it.
+			 */
+			if (!render->heading_done && render->item_title != NULL &&
+			    render->item_title[0] != '\0') {
+				render->heading_candidate = true;
+				render->heading_done = true;
+				render->heading_len = 0U;
+				render->heading_pending_space = false;
+				render->heading_overflow = false;
+			} else {
+				render->heading_done = true;
+				render->heading_live = true;
+				rss_lw_break(&render->line, 2U);
+			}
+		} else if (rss_tag_is(name, length, "h2") ||
+			   rss_tag_is(name, length, "h3") ||
+			   rss_tag_is(name, length, "h4") ||
+			   rss_tag_is(name, length, "h5") ||
+			   rss_tag_is(name, length, "h6")) {
+			render->heading_live = true;
+			rss_lw_break(&render->line, 2U);
+		} else if (rss_tag_is(name, length, "blockquote")) {
+			rss_lw_break(&render->line, 2U);
+			if (render->line.indent < RSS_HTML_INDENT_MAX) {
+				++render->line.indent;
+			}
+		} else if (rss_tag_is(name, length, "ul") ||
+			   rss_tag_is(name, length, "ol")) {
+			rss_lw_break(&render->line, 2U);
+		} else if (rss_tag_is(name, length, "li")) {
+			rss_lw_break(&render->line, 1U);
+			rss_lw_bullet(&render->line);
+		}
+		return;
+	}
+	if (rss_tag_is(name, length, "p")) {
+		rss_lw_break(&render->line, 2U);
+	} else if (rss_tag_is(name, length, "h1") ||
+		   rss_tag_is(name, length, "h2") ||
+		   rss_tag_is(name, length, "h3") ||
+		   rss_tag_is(name, length, "h4") ||
+		   rss_tag_is(name, length, "h5") ||
+		   rss_tag_is(name, length, "h6")) {
+		render->heading_live = false;
+		rss_lw_break(&render->line, 2U);
+	} else if (rss_tag_is(name, length, "blockquote")) {
+		if (render->line.indent > 0U) {
+			--render->line.indent;
+		}
+		rss_lw_break(&render->line, 2U);
+	} else if (rss_tag_is(name, length, "ul") ||
+		   rss_tag_is(name, length, "ol")) {
+		rss_lw_break(&render->line, 2U);
+	} else if (rss_tag_is(name, length, "li")) {
+		rss_lw_break(&render->line, 1U);
+	} else if (rss_tag_is(name, length, "div") ||
+		   rss_tag_is(name, length, "tr") ||
+		   rss_tag_is(name, length, "table") ||
+		   rss_tag_is(name, length, "thead") ||
+		   rss_tag_is(name, length, "tbody") ||
+		   rss_tag_is(name, length, "section") ||
+		   rss_tag_is(name, length, "article") ||
+		   rss_tag_is(name, length, "header") ||
+		   rss_tag_is(name, length, "footer") ||
+		   rss_tag_is(name, length, "figure") ||
+		   rss_tag_is(name, length, "figcaption") ||
+		   rss_tag_is(name, length, "pre")) {
+		rss_lw_break(&render->line, 1U);
+	}
+}
+
+static void rss_html_feed_ascii(struct rss_html_render *render, char ch)
+{
+	for (unsigned int guard = 0U; guard < 8U; ++guard) {
+		switch (render->state) {
+		case RSS_HTML_TEXT:
+			if (render->entity_active) {
+				rss_html_entity_char(render, ch);
+				return;
+			}
+			if (ch == '<') {
+				if (render->url_active) {
+					rss_url_terminate(render);
+				}
+				render->state = RSS_HTML_LT;
+				return;
+			}
+			if (ch == '&') {
+				render->entity_active = true;
+				render->entity_len = 1U;
+				render->entity[0] = '&';
+				return;
+			}
+			rss_html_text_ascii(render, ch);
+			return;
+		case RSS_HTML_LT:
+			if (ch == '/') {
+				render->closing = true;
+				render->name_len = 0U;
+				render->name_overflow = false;
+				render->state = RSS_HTML_TAG_NAME;
+				return;
+			}
+			if (ch == '!') {
+				render->state = RSS_HTML_DECL_START;
+				return;
+			}
+			if (ch == '?') {
+				render->state = RSS_HTML_DECL;
+				return;
+			}
+			if (rss_is_alpha(ch)) {
+				render->closing = false;
+				render->self_closing = false;
+				render->last_slash = false;
+				render->name_len = 0U;
+				render->name_overflow = false;
+				render->name[render->name_len++] =
+					rss_lower_ascii(ch);
+				render->state = RSS_HTML_TAG_NAME;
+				return;
+			}
+			rss_html_text_ascii(render, '<');
+			render->state = RSS_HTML_TEXT;
+			continue;
+		case RSS_HTML_TAG_NAME:
+			if (render->name_len == 0U && render->closing &&
+			    !rss_is_alpha(ch)) {
+				rss_html_text_ascii(render, '<');
+				rss_html_text_ascii(render, '/');
+				render->closing = false;
+				render->state = RSS_HTML_TEXT;
+				continue;
+			}
+			if (rss_is_space(ch)) {
+				render->state = RSS_HTML_TAG_SKIP;
+				return;
+			}
+			if (ch == '/') {
+				render->self_closing = true;
+				render->state = RSS_HTML_TAG_SKIP;
+				return;
+			}
+			if (ch == '>') {
+				rss_html_dispatch(render);
+				if (render->state != RSS_HTML_RAW_TEXT) {
+					render->state = RSS_HTML_TEXT;
+				}
+				return;
+			}
+			if (!render->name_overflow) {
+				if (render->name_len < sizeof(render->name) - 1U) {
+					render->name[render->name_len++] =
+						rss_lower_ascii(ch);
+				} else {
+					render->name_overflow = true;
+				}
+			}
+			return;
+		case RSS_HTML_TAG_SKIP:
+			if (render->quote != '\0') {
+				if (ch == render->quote) {
+					render->quote = '\0';
+				}
+				return;
+			}
+			if (ch == '"' || ch == '\'') {
+				render->quote = ch;
+				return;
+			}
+			if (ch == '>') {
+				if (render->last_slash) {
+					render->self_closing = true;
+				}
+				rss_html_dispatch(render);
+				if (render->state != RSS_HTML_RAW_TEXT) {
+					render->state = RSS_HTML_TEXT;
+				}
+				return;
+			}
+			render->last_slash = ch == '/';
+			return;
+		case RSS_HTML_DECL_START:
+			if (ch == '-') {
+				render->comment_dashes = 1U;
+				render->state = RSS_HTML_COMMENT;
+				return;
+			}
+			if (ch == '>') {
+				render->state = RSS_HTML_TEXT;
+				return;
+			}
+			render->state = RSS_HTML_DECL;
+			return;
+		case RSS_HTML_DECL:
+			if (ch == '>') {
+				render->state = RSS_HTML_TEXT;
+			}
+			return;
+		case RSS_HTML_COMMENT:
+			if (ch == '>' && render->comment_dashes >= 2U) {
+				render->comment_dashes = 0U;
+				render->state = RSS_HTML_TEXT;
+				return;
+			}
+			if (ch == '-') {
+				++render->comment_dashes;
+			} else {
+				render->comment_dashes = 0U;
+			}
+			return;
+		case RSS_HTML_RAW_TEXT:
+			if (ch == '<') {
+				render->state = RSS_HTML_RAW_LT;
+			}
+			return;
+		case RSS_HTML_RAW_LT:
+			if (ch == '/') {
+				render->raw_pos = 0U;
+				render->state = RSS_HTML_RAW_NAME;
+				return;
+			}
+			render->state = RSS_HTML_RAW_TEXT;
+			return;
+		case RSS_HTML_RAW_NAME:
+			if (render->raw_pos < render->raw_tag_len &&
+			    rss_lower_ascii(ch) ==
+				    render->raw_tag[render->raw_pos]) {
+				++render->raw_pos;
+				return;
+			}
+			if (render->raw_pos == render->raw_tag_len &&
+			    (ch == '>' || rss_is_space(ch))) {
+				if (ch == '>') {
+					render->state = RSS_HTML_TEXT;
+				}
+				return;
+			}
+			render->state = RSS_HTML_RAW_TEXT;
+			return;
+		}
+		return;
+	}
+}
+
+static void rss_html_finish(struct rss_html_render *render)
+{
+	if (render->entity_active) {
+		rss_html_entity_flush(render);
+	}
+	if (render->url_active) {
+		rss_url_terminate(render);
+	}
+	if (render->heading_candidate) {
+		rss_html_heading_finish(render);
+	}
+}
+
+static void rss_render_body(const char *text, size_t length, bool literal,
+			    const char *item_title, struct rss_sink *sink)
+{
+	struct rss_html_render render;
+
+	memset(&render, 0, sizeof(render));
+	render.sink = sink;
+	render.line.sink = sink;
+	render.item_title = item_title;
+	render.state = RSS_HTML_TEXT;
+	for (size_t index = 0U; index < length;) {
+		if (!literal && text[index] == '&') {
+			char decoded[4];
+			size_t consumed = 0U;
+			const size_t written =
+				rss_decode_entity(text + index, length - index,
+						  decoded, &consumed);
+
+			if (written > 0U) {
+				for (size_t i = 0U; i < written; ++i) {
+					if ((unsigned char)decoded[i] < 0x80U) {
+						rss_html_feed_ascii(&render,
+								    decoded[i]);
+					} else {
+						rss_html_text_units(&render,
+								    decoded + i,
+								    written - i);
+						break;
+					}
+				}
+				index += consumed;
+				continue;
+			}
+		}
+		const unsigned char lead = (unsigned char)text[index];
+
+		if (lead < 0x80U) {
+			rss_html_feed_ascii(&render, (char)lead);
+			++index;
+			continue;
+		}
+		size_t sequence = rss_utf8_sequence_length(lead);
+
+		if (sequence > length - index) {
+			sequence = length - index;
+		}
+		rss_html_text_units(&render, text + index, sequence);
+		index += sequence;
+	}
+	rss_html_finish(&render);
 }
 
 /* Extract the raw payload of the first <name> element in [start, end). */
@@ -762,7 +1528,8 @@ static bool rss_find_raw_field(const char *start, const char *end,
 
 /* Count the stored plain-text length of an item body, with truncation logged. */
 static size_t rss_count_body(const struct rss_raw_field *field,
-			     unsigned int item_index)
+			     unsigned int item_index,
+			     const char *item_title)
 {
 	struct rss_sink count_sink = {
 		.emit = NULL,
@@ -775,8 +1542,8 @@ static size_t rss_count_body(const struct rss_raw_field *field,
 	};
 
 	(void)item_index;
-	rss_render_text(field->text, field->length, field->literal,
-			RSS_RENDER_BODY, &count_sink);
+	rss_render_body(field->text, field->length, field->literal,
+			item_title, &count_sink);
 	if (count_sink.total > count_sink.stored) {
 		RSS_LOG_WRN("RSS item %u body truncated to %u of %u bytes",
 			    item_index, (unsigned int)count_sink.stored,
@@ -788,7 +1555,8 @@ static size_t rss_count_body(const struct rss_raw_field *field,
 /* Receives one plain-text body; supplied by the caller. */
 struct rss_body_consumer {
 	int (*append)(void *context, const char *raw, size_t raw_length,
-		      bool literal, size_t plain_length);
+		      bool literal, const char *item_title,
+		      size_t plain_length);
 	void *context;
 };
 
@@ -838,10 +1606,9 @@ static int rss_parse_feed(const char *xml, size_t length,
 				       first_item != NULL ? first_item :
 							    channel_end,
 				       "title", &field)) {
-			(void)rss_render_to_buffer(field.text, field.length,
-						   field.literal,
-						   RSS_RENDER_TITLE, out->title,
-						   sizeof(out->title));
+			(void)rss_render_title_to_buffer(
+				field.text, field.length, field.literal,
+				out->title, sizeof(out->title));
 		}
 	}
 
@@ -872,24 +1639,21 @@ static int rss_parse_feed(const char *xml, size_t length,
 		}
 		memset(&entry, 0, sizeof(entry));
 		if (rss_find_raw_field(item, item_end, "title", &field)) {
-			(void)rss_render_to_buffer(field.text, field.length,
-						   field.literal,
-						   RSS_RENDER_TITLE, entry.title,
-						   sizeof(entry.title));
+			(void)rss_render_title_to_buffer(
+				field.text, field.length, field.literal,
+				entry.title, sizeof(entry.title));
 		}
 		if (rss_find_raw_field(item, item_end, "pubDate", &field)) {
-			(void)rss_render_to_buffer(field.text, field.length,
-						   field.literal,
-						   RSS_RENDER_TITLE,
-						   entry.published,
-						   sizeof(entry.published));
+			(void)rss_render_title_to_buffer(
+				field.text, field.length, field.literal,
+				entry.published, sizeof(entry.published));
 		}
 		field.text = NULL;
 		field.length = 0U;
 		field.literal = false;
 		if (rss_find_raw_field(item, item_end, "description", &field)) {
-			body_length = rss_count_body(&field,
-						     (unsigned int)out->count);
+			body_length = rss_count_body(
+				&field, (unsigned int)out->count, entry.title);
 		}
 		/* Some feeds ship an empty <description> and put the article in
 		 * <content:encoded>; fall back only when the description had no
@@ -898,8 +1662,8 @@ static int rss_parse_feed(const char *xml, size_t length,
 		if (body_length == 0U &&
 		    rss_find_raw_field(item, item_end, "content:encoded",
 				       &field)) {
-			body_length = rss_count_body(&field,
-						     (unsigned int)out->count);
+			body_length = rss_count_body(
+				&field, (unsigned int)out->count, entry.title);
 		}
 		if (body_length > 0U) {
 			if (bodies_total + body_length >
@@ -914,7 +1678,7 @@ static int rss_parse_feed(const char *xml, size_t length,
 				const int ret = consumer->append(
 					consumer->context, field.text,
 					field.length, field.literal,
-					body_length);
+					entry.title, body_length);
 
 				if (ret < 0) {
 					return ret;
@@ -1620,7 +2384,8 @@ static void rss_body_writer_abort(struct rss_body_writer *writer)
 }
 
 static int rss_body_append(void *context, const char *raw, size_t raw_length,
-			   bool literal, size_t plain_length)
+			   bool literal, const char *item_title,
+			   size_t plain_length)
 {
 	struct rss_body_writer *writer = context;
 	struct rss_sink sink = {
@@ -1636,7 +2401,7 @@ static int rss_body_append(void *context, const char *raw, size_t raw_length,
 	if (!writer->open) {
 		return -EBADF;
 	}
-	rss_render_text(raw, raw_length, literal, RSS_RENDER_BODY, &sink);
+	rss_render_body(raw, raw_length, literal, item_title, &sink);
 	if (sink.failed) {
 		return -EIO;
 	}
