@@ -118,6 +118,10 @@ target_sources_ifdef(CONFIG_PAPERMONO_BLE_HID app PRIVATE
   src/papermono_hid_reports.c
 )
 
+target_sources_ifdef(CONFIG_PAPERMONO_RSS app PRIVATE
+  src/papermono_rss.c
+)
+
 target_sources_ifdef(CONFIG_PAPERMONO_WEATHER app PRIVATE
   src/papermono_weather.c
 )

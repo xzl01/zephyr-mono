@@ -42,6 +42,15 @@ static const struct papermono_interaction_grid_layout wifi_network_grid = {
 static const struct papermono_rect wifi_previous_rect = {22, 646, 206, 54};
 static const struct papermono_rect wifi_next_rect = {252, 646, 206, 54};
 static const struct papermono_rect wifi_connect_rect = {22, 292, 436, 54};
+/* News: six ruled rows per page between the metadata line and the footer.
+ * The body viewport height is also the side-key/touch paging stride, so a
+ * rendered page can never disagree with what the next page turn reveals.
+ */
+static const struct papermono_interaction_grid_layout news_list_grid = {
+	.x = 22, .y = 196, .cell_width = 436, .cell_height = 78,
+	.column_gap = 0, .row_gap = 4, .columns = 1, .rows = 6,
+};
+static const struct papermono_rect news_body_rect = {22, 222, 436, 480};
 
 enum detail_setting_index {
 	DETAIL_SETTING_SLEEP, DETAIL_SETTING_TIME, DETAIL_SETTING_FRONTLIGHT,

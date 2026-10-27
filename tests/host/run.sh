@@ -216,3 +216,7 @@ cc -std=c17 -Wall -Wextra -Werror -Iinclude \
 	tests/host/test_quotes.c src/papermono_quotes.c \
 	-o "$build_dir/test_quotes"
 "$build_dir/test_quotes"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_rss.c src/papermono_rss.c \
+	-o "$build_dir/test_rss"
+"$build_dir/test_rss"
