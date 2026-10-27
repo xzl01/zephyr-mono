@@ -175,8 +175,11 @@ static void test_item_limit(void)
 
 static void test_truncation_ascii(void)
 {
-	char feed_xml[2048];
-	char long_text[PAPERMONO_RSS_BODY_MAX * 2U + 1U];
+	/* BODY_MAX is large enough for a full digest, so keep these buffers off
+	 * the stack and size them for the doubled input.
+	 */
+	static char feed_xml[PAPERMONO_RSS_BODY_MAX * 2U + 512U];
+	static char long_text[PAPERMONO_RSS_BODY_MAX * 2U + 1U];
 	struct papermono_rss_feed feed;
 	size_t used;
 
