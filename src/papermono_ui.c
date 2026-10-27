@@ -2877,7 +2877,26 @@ static void news_updated_text(char *output, size_t size, int64_t updated_at)
 		(void)snprintf(output, size, "尚未同步");
 		return;
 	}
-	format_info_time(output, size, updated_at);
+	/* Cache timestamps are UTC epoch; the panel shows local time and drops
+	 * the "UTC" suffix that only made sense on the information cards.
+	 */
+	int64_t local = updated_at +
+		(int64_t)papermono_settings_get()->timezone_offset_minutes * 60;
+
+	if (local < 0 || local > 253402300799LL) {
+		local = updated_at;
+	}
+	const int64_t days = local / 86400 + 719468;
+	const int64_t era = days / 146097;
+	const unsigned doe = (unsigned)(days - era * 146097);
+	const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	const unsigned mp = (5 * doy + 2) / 153;
+	const unsigned day = doy - (153 * mp + 2) / 5 + 1;
+	const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+
+	(void)snprintf(output, size, "%02u-%02u %02u:%02u", month, day,
+		(unsigned)(local % 86400 / 3600), (unsigned)(local % 3600 / 60));
 }
 
 /* One text line occupies line_height + line_space. Rounding the viewport down
@@ -2999,15 +3018,8 @@ static int render_news_list(lv_obj_t *screen)
 	label = make_label(screen, feed->title[0] ? feed->title : "本地资讯",
 		&papermono_reading_24, ink);
 	lv_obj_set_pos(label, NEWS_MARGIN_X, NEWS_TITLE_Y);
-	lv_obj_set_size(label, 320, 30);
+	lv_obj_set_size(label, NEWS_TEXT_WIDTH, 30);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	(void)snprintf(pager, sizeof(pager), "%u / %u",
-		(unsigned)(news_ui.list_first / NEWS_VISIBLE_ITEMS + 1U),
-		(unsigned)page_count);
-	label = make_chinese_label(screen, pager);
-	lv_obj_set_pos(label, 366, NEWS_TITLE_Y + 4);
-	lv_obj_set_size(label, 92, 24);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 	news_updated_text(meta, sizeof(meta), feed->updated_at);
 	(void)detail_text(screen, meta, NEWS_MARGIN_X, 56, NEWS_TEXT_WIDTH, 22, false);
 	for (size_t row = 0; row < NEWS_VISIBLE_ITEMS; ++row) {
