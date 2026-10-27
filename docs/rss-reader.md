@@ -57,3 +57,5 @@ papermono_rss: RSS feed "AI新闻": 4 items (58651 bytes)
 ```
 
 - 预览：`docs/design-references/news/`（news / news-detail / news-empty / news-error）。
+- 预览 fixture 代码目前在并行分支 `auto/paper-index-refresh`（主线 preview 文件正被
+  另一任务改动）；拍照产物已随本提交入库，合并该分支后 fixture 会回到主线。
