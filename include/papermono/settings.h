@@ -12,6 +12,7 @@
 extern "C" {
 #endif
 
+#define PAPERMONO_RSS_URL_MAX 191U
 #define PAPERMONO_TIMEZONE_NAME_MAX 32U
 #define PAPERMONO_WIFI_SSID_MAX 32U
 #define PAPERMONO_WIFI_PSK_MAX 64U
@@ -35,6 +36,7 @@ struct papermono_preferences {
 	char timezone[PAPERMONO_TIMEZONE_NAME_MAX];
 	char wifi_ssid[PAPERMONO_WIFI_SSID_MAX + 1U];
 	char wifi_psk[PAPERMONO_WIFI_PSK_MAX + 1U];
+	char rss_url[PAPERMONO_RSS_URL_MAX + 1U];
 	int16_t timezone_offset_minutes;
 	uint8_t idle_sleep_minutes;
 	/* Frontlight duty cycle in percent. The panel is unreadable in a dark
@@ -63,6 +65,7 @@ int papermono_settings_set_reader_density(
 	enum papermono_reader_density density);
 int papermono_settings_set_reader_resume(bool resume);
 int papermono_settings_set_timezone(const char *name, int16_t offset_minutes);
+int papermono_settings_set_rss_url(const char *url);
 int papermono_settings_set_wifi(const char *ssid, const char *psk);
 int papermono_settings_clear_wifi(void);
 int papermono_settings_reset(void);

@@ -20,6 +20,7 @@
 #include <zephyr/drivers/sensor.h>
 
 #include <papermono/weather.h>
+#include <papermono/rss.h>
 #if defined(CONFIG_PAPERMONO_BLE_MIC)
 #include <papermono/ble_mic.h>
 #endif
@@ -718,4 +719,39 @@ int papermono_weather_request(void) { return 0; }
 void papermono_weather_get(struct papermono_weather *state)
 {
 	if (state != NULL) *state = preview_weather;
+}
+
+/* Synthetic RSS snapshot: plain-text fields exactly as the fetch worker would
+ * publish them. No host network and no XML parsing are exercised here. */
+static struct papermono_rss_feed preview_rss;
+static int preview_rss_request_result;
+static unsigned preview_rss_request_count;
+
+void preview_rss_set_feed(const struct papermono_rss_feed *feed)
+{
+	if (feed == NULL) {
+		memset(&preview_rss, 0, sizeof(preview_rss));
+	} else {
+		preview_rss = *feed;
+	}
+}
+
+void preview_rss_request_result_set(int result)
+{
+	preview_rss_request_result = result;
+}
+
+unsigned preview_rss_requests(void) { return preview_rss_request_count; }
+
+int papermono_rss_init(void) { return 0; }
+
+int papermono_rss_request(void)
+{
+	++preview_rss_request_count;
+	return preview_rss_request_result;
+}
+
+void papermono_rss_get(struct papermono_rss_feed *state)
+{
+	if (state != NULL) *state = preview_rss;
 }

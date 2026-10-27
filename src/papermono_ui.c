@@ -55,6 +55,7 @@
 #include <papermono/power.h>
 #include <papermono/quotes.h>
 #include <papermono/reader.h>
+#include <papermono/rss.h>
 #include <papermono/settings.h>
 #include <papermono/status_led.h>
 #include <papermono/standby_date.h>
@@ -202,6 +203,22 @@ static size_t launcher_page;
 #else
 #define PAPERMONO_LARGE_BSS
 #endif
+
+/* RSS feed snapshot: about 8 KiB, kept out of the UI thread stack. The copy
+ * comes from papermono_rss_get(), which may be called from this thread while
+ * the fetch worker owns the source snapshot.
+ */
+#define NEWS_VISIBLE_ITEMS 6U
+struct news_ui_state {
+	struct papermono_rss_feed feed;
+	size_t list_first;
+	size_t selected;
+	uint16_t body_page;
+	uint16_t body_pages;
+	bool detail;
+	int last_error;
+};
+static struct news_ui_state news_ui PAPERMONO_LARGE_BSS;
 
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 enum wifi_ui_mode { WIFI_UI_LIST, WIFI_UI_PASSWORD, WIFI_UI_FORGET };
@@ -760,6 +777,7 @@ static void make_chevron(lv_obj_t *screen, int32_t x, int32_t y)
 enum launcher_motif {
 	LAUNCHER_MOTIF_LIBRARY,
 	LAUNCHER_MOTIF_WEREAD,
+	LAUNCHER_MOTIF_NEWS,
 	LAUNCHER_MOTIF_CALENDAR,
 	LAUNCHER_MOTIF_TASKS,
 	LAUNCHER_MOTIF_NOTES,
@@ -781,6 +799,7 @@ struct launcher_layout_item {
 static const struct launcher_layout_item launcher_items[] = {
 	{ PAPERMONO_APP_LIBRARY, LAUNCHER_MOTIF_LIBRARY },
 	{ PAPERMONO_APP_WEREAD, LAUNCHER_MOTIF_WEREAD },
+	{ PAPERMONO_APP_NEWS, LAUNCHER_MOTIF_NEWS },
 	{ PAPERMONO_APP_CALENDAR, LAUNCHER_MOTIF_CALENDAR },
 	{ PAPERMONO_APP_TASKS, LAUNCHER_MOTIF_TASKS },
 	{ PAPERMONO_APP_NOTES, LAUNCHER_MOTIF_NOTES },
@@ -962,10 +981,10 @@ static void render_launcher_item(lv_obj_t *screen,
 	const struct papermono_ui_snapshot *snapshot)
 {
 	static const lv_image_dsc_t *const icons[] = {
-		&papermono_icon_library, &papermono_icon_weread, &papermono_icon_calendar,
-		&papermono_icon_tasks, &papermono_icon_notes, &papermono_icon_remote,
-		&papermono_icon_content, &papermono_icon_info, &papermono_icon_tools,
-		&papermono_icon_settings, &papermono_icon_power,
+		&papermono_icon_library, &papermono_icon_weread, &papermono_icon_document,
+		&papermono_icon_calendar, &papermono_icon_tasks, &papermono_icon_notes,
+		&papermono_icon_remote, &papermono_icon_content, &papermono_icon_info,
+		&papermono_icon_tools, &papermono_icon_settings, &papermono_icon_power,
 	};
 	/* icons[] is indexed by enum launcher_motif; an entry added without its
 	 * icon would be an out-of-bounds read at draw time.
@@ -2804,12 +2823,261 @@ static int info_event(void *context, const struct papermono_app_event *event,
 	return 0;
 }
 
+/* RSS reading: a six-row index and a clipped body viewport. Both are driven
+ * from the same snapshot copied by papermono_rss_get(); no widget pointer is
+ * retained across a render, so lv_obj_clean() cannot leave a stale handle.
+ */
+static void news_updated_text(char *output, size_t size, int64_t updated_at)
+{
+	if (updated_at <= 0) {
+		(void)snprintf(output, size, "尚未同步");
+		return;
+	}
+	format_info_time(output, size, updated_at);
+}
+
+static int news_open(void *context)
+{
+	ARG_UNUSED(context);
+	news_ui.list_first = 0U;
+	news_ui.selected = 0U;
+	news_ui.body_page = 0U;
+	news_ui.body_pages = 1U;
+	news_ui.detail = false;
+	news_ui.last_error = papermono_rss_request();
+	if (news_ui.last_error == -EBUSY) {
+		news_ui.last_error = 0;
+	}
+	papermono_rss_get(&news_ui.feed);
+	return 0;
+}
+
+static void news_close(void *context)
+{
+	ARG_UNUSED(context);
+	news_ui.detail = false;
+	news_ui.body_page = 0U;
+}
+
+static int render_news_empty(lv_obj_t *screen, const char *title,
+	const char *body, const char *hint)
+{
+	detail_icon(screen, &papermono_icon_document_focal, 180);
+	/* heading_48 is a reviewed subset without 资/讯; the empty-state copy
+	 * stays in the complete reading font instead of a blank glyph.
+	 */
+	lv_obj_t *label = make_label(screen, title, &papermono_reading_24, ink);
+	lv_obj_set_pos(label, 22, 384);
+	lv_obj_set_size(label, 436, 34);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	label = detail_text(screen, body, 32, 454, 416, 66, false);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+	make_footer(screen, hint);
+	return 0;
+}
+
+static int render_news_list(lv_obj_t *screen)
+{
+	const struct papermono_rss_feed *feed = &news_ui.feed;
+	char meta[96];
+	lv_obj_t *label;
+
+	/* The feed can shrink between refreshes; never leave the index on a
+	 * page that no longer contains an item.
+	 */
+	if (news_ui.list_first >= feed->count) {
+		news_ui.list_first = (feed->count - 1U) / NEWS_VISIBLE_ITEMS *
+			NEWS_VISIBLE_ITEMS;
+	}
+	const size_t page_count = MAX(1U,
+		(feed->count + NEWS_VISIBLE_ITEMS - 1U) / NEWS_VISIBLE_ITEMS);
+
+	make_header(screen, "阅读");
+	label = detail_text(screen, feed->title[0] ? feed->title : "本地资讯",
+		22, 128, 436, 34, true);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+	news_updated_text(meta, sizeof(meta), feed->updated_at);
+	(void)snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta),
+		" · %u / %u 页", (unsigned)(news_ui.list_first / NEWS_VISIBLE_ITEMS + 1U),
+		(unsigned)page_count);
+	(void)detail_text(screen, meta, 22, 162, 436, 24, false);
+	for (size_t row = 0; row < NEWS_VISIBLE_ITEMS; ++row) {
+		const size_t index = news_ui.list_first + row;
+		struct papermono_rect rect;
+
+		if (index >= feed->count ||
+		    papermono_interaction_grid_cell_rect(&news_list_grid, row,
+			    &rect) < 0) {
+			break;
+		}
+		(void)detail_row(screen, &rect, feed->items[index].title,
+			feed->items[index].published[0] ?
+				feed->items[index].published : NULL,
+			false, true);
+	}
+	make_footer(screen, "点按条目阅读 · 侧键翻页 · 长按返回");
+	return 0;
+}
+
+static int render_news_detail(lv_obj_t *screen)
+{
+	const struct papermono_rss_feed *feed = &news_ui.feed;
+	const size_t index = news_ui.selected < feed->count ?
+		news_ui.selected : 0U;
+	const struct papermono_rss_item *item = &feed->items[index];
+	lv_obj_t *label;
+
+	make_header(screen, "阅读");
+	label = detail_text(screen, item->title, 22, 128, 436, 58, true);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	if (item->published[0]) {
+		(void)detail_text(screen, item->published, 22, 190, 436, 24, false);
+	}
+	lv_obj_t *viewport = lv_obj_create(screen);
+	lv_obj_set_pos(viewport, news_body_rect.x, news_body_rect.y);
+	lv_obj_set_size(viewport, news_body_rect.width, news_body_rect.height);
+	set_box_style(viewport, paper, 0, 0);
+	label = make_label(viewport, item->body[0] ? item->body : "此条目暂无正文。",
+		&papermono_reading_24, ink);
+	lv_obj_set_width(label, news_body_rect.width);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_line_space(label, 4, LV_PART_MAIN);
+	/* Layout once to learn the wrapped height; the viewport height is the
+	 * page stride, so a page turn never cuts a line in half.
+	 */
+	lv_obj_update_layout(label);
+	const int32_t body_height = MAX(lv_obj_get_height(label),
+		news_body_rect.height);
+	news_ui.body_pages = (uint16_t)MAX(1,
+		(body_height + news_body_rect.height - 1) / news_body_rect.height);
+	if (news_ui.body_page >= news_ui.body_pages) {
+		news_ui.body_page = news_ui.body_pages - 1U;
+	}
+	lv_obj_set_pos(label, 0, -(int32_t)news_ui.body_page * news_body_rect.height);
+	char footer[64];
+	(void)snprintf(footer, sizeof(footer), "第 %u / %u 页 · 点按返回列表",
+		(unsigned)(news_ui.body_page + 1U), (unsigned)news_ui.body_pages);
+	make_footer(screen, footer);
+	return 0;
+}
+
+static int render_news(void *context, lv_obj_t *screen)
+{
+	ARG_UNUSED(context);
+	papermono_rss_get(&news_ui.feed);
+	if (!news_ui.feed.valid) {
+		if (news_ui.last_error < 0) {
+			return render_news_empty(screen, "暂无资讯",
+				"请检查网络后重试。\n轻触重新同步。",
+				"轻触重试 · 长按返回");
+		}
+		return render_news_empty(screen, "正在同步资讯",
+			"正在从订阅源获取内容，请稍候。", "正在获取资讯");
+	}
+	if (news_ui.feed.count == 0U) {
+		return render_news_empty(screen, "暂无资讯",
+			"订阅源暂时没有条目。\n轻触重新同步。",
+			"轻触重试 · 长按返回");
+	}
+	if (news_ui.detail) {
+		return render_news_detail(screen);
+	}
+	return render_news_list(screen);
+}
+
+static int news_event(void *context, const struct papermono_app_event *event,
+	struct papermono_app_command *command)
+{
+	const struct papermono_rss_feed *feed = &news_ui.feed;
+	const bool back = event->type == PAPERMONO_APP_EVENT_BACK ||
+		(event->type == PAPERMONO_APP_EVENT_PREVIOUS &&
+		 papermono_app_event_is_touch(event)) ||
+		(event->type == PAPERMONO_APP_EVENT_TAP &&
+		 event->y >= UI_DETAIL_FOOTER_TOP);
+
+	ARG_UNUSED(context);
+	if (news_ui.detail) {
+		if (event->type == PAPERMONO_APP_EVENT_TAP) {
+			news_ui.detail = false;
+			news_ui.body_page = 0U;
+			request_redraw(command);
+		} else if (back || event->type == PAPERMONO_APP_EVENT_LONG_PRESS) {
+			news_ui.detail = false;
+			news_ui.body_page = 0U;
+			request_redraw(command);
+		} else if (event->type == PAPERMONO_APP_EVENT_NEXT ||
+			   (event->type == PAPERMONO_APP_EVENT_UP &&
+			    papermono_app_event_is_touch(event))) {
+			if (news_ui.body_page + 1U < news_ui.body_pages) {
+				++news_ui.body_page;
+				request_redraw(command);
+			}
+		} else if (event->type == PAPERMONO_APP_EVENT_PREVIOUS ||
+			   (event->type == PAPERMONO_APP_EVENT_DOWN &&
+			    papermono_app_event_is_touch(event))) {
+			if (news_ui.body_page > 0U) {
+				--news_ui.body_page;
+				request_redraw(command);
+			}
+		}
+		return 0;
+	}
+	if (back || event->type == PAPERMONO_APP_EVENT_LONG_PRESS) {
+		command->type = PAPERMONO_APP_COMMAND_BACK;
+		return 0;
+	}
+	if (event->type == PAPERMONO_APP_EVENT_TAP && feed->count == 0U) {
+		news_ui.last_error = papermono_rss_request();
+		if (news_ui.last_error == -EBUSY) {
+			news_ui.last_error = 0;
+		}
+		request_redraw(command);
+		return 0;
+	}
+	if (event->type == PAPERMONO_APP_EVENT_NEXT ||
+	    (event->type == PAPERMONO_APP_EVENT_UP &&
+	     papermono_app_event_is_touch(event))) {
+		if (news_ui.list_first + NEWS_VISIBLE_ITEMS < feed->count) {
+			news_ui.list_first += NEWS_VISIBLE_ITEMS;
+			request_redraw(command);
+		}
+		return 0;
+	}
+	if (event->type == PAPERMONO_APP_EVENT_PREVIOUS ||
+	    (event->type == PAPERMONO_APP_EVENT_DOWN &&
+	     papermono_app_event_is_touch(event))) {
+		if (news_ui.list_first >= NEWS_VISIBLE_ITEMS) {
+			news_ui.list_first -= NEWS_VISIBLE_ITEMS;
+			request_redraw(command);
+		}
+		return 0;
+	}
+	if (event->type == PAPERMONO_APP_EVENT_TAP) {
+		size_t tapped_row;
+
+		if (papermono_interaction_spaced_grid_index(event,
+			PAPERMONO_INTERACTION_TAP, &news_list_grid,
+			&tapped_row) == 0) {
+			const size_t selected = news_ui.list_first + tapped_row;
+
+			if (selected < feed->count) {
+				news_ui.selected = selected;
+				news_ui.body_page = 0U;
+				news_ui.detail = true;
+				request_redraw(command);
+			}
+		}
+	} else if (event->type == PAPERMONO_APP_EVENT_CONTENT_CHANGED ||
+		   event->type == PAPERMONO_APP_EVENT_REFRESH) {
+		request_redraw(command);
+	}
+	return 0;
+}
+
 static const char *ready_text(const struct device *device)
 {
 	return device_is_ready(device) ? "驱动就绪" : "不可用";
-}
-
-static const char *status_led_text(enum papermono_status_led_state state)
+}static const char *status_led_text(enum papermono_status_led_state state)
 {
 	return state == PAPERMONO_STATUS_LED_OFF ? "熄灭 · 休眠/关机" :
 		state == PAPERMONO_STATUS_LED_BOOTING ? "白色 · 启动中" :
@@ -3790,6 +4058,7 @@ static const struct papermono_app_descriptor apps[] = {
 	{ PAPERMONO_APP_LAUNCHER, "全部应用", true, NULL, render_launcher, launcher_event, NULL, NULL },
 	{ PAPERMONO_APP_LIBRARY, "书库", true, library_open, render_library, library_event, library_close, &library_state },
 	{ PAPERMONO_APP_WEREAD, "微信读书", true, weread_open, render_weread, weread_event, NULL, &weread_ui },
+	{ PAPERMONO_APP_NEWS, "资讯", true, news_open, render_news, news_event, news_close, NULL },
 	{ PAPERMONO_APP_CONTENT, "内容中心", true, NULL, render_content_center, common_event, NULL, NULL },
 	{ PAPERMONO_APP_REMOTE, "遥控器", true, NULL, render_remote, remote_event, remote_close, &remote_state },
 	{ PAPERMONO_APP_CALENDAR, "日历", true, organizer_open, render_calendar, calendar_event, NULL, &organizer_ui },

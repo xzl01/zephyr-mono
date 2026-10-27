@@ -476,4 +476,20 @@ config PAPERMONO_WEATHER
 	  Fetch current weather and the next eight hourly temperatures from
 	  Open-Meteo over HTTPS using the pinned Let's Encrypt root.
 
+config PAPERMONO_RSS
+	bool "RSS news reader"
+	depends on NET_SOCKETS
+	default y
+	help
+	  Fetch an RSS 2.0 feed over plain HTTP and show the newest items in
+	  the news page. The URL is a string setting so it can change without
+	  rebuilding the firmware.
+
+config PAPERMONO_RSS_URL
+	string "Default RSS feed URL"
+	default ""
+	depends on PAPERMONO_RSS
+	help
+	  Feed used until the user overrides it in Settings.
+
 endmenu

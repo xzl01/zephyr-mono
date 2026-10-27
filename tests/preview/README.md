@@ -75,6 +75,10 @@ portable-model content:
 | `library-populated` | Three imported TXT files, including a long Chinese book title |
 | `tasks-populated` | Three imported JSON tasks, including a long title and a completed item |
 | `notes-populated` | Two imported Markdown notes, including a long title |
+| `news` | Two synthetic RSS items, feed title and relative page count |
+| `news-detail` | Long plain-text article body split across production paging |
+| `news-empty` | Valid feed with no items |
+| `news-error` | No cached feed and a synthetic network failure |
 | `remote-voice` | Secured host has not subscribed; production waiting guidance |
 | `remote-voice-streaming` | Subscribed synthetic voice worker in STREAMING phase |
 | `remote-voice-error` | Subscribed synthetic voice worker reports `-EIO` |
@@ -91,7 +95,7 @@ portable-model content:
 | `sleep-tomorrow-empty` | Tomorrow summary with no event |
 | `sleep-blank` | Deliberately blank summary band |
 
-The default build has 56 fixtures; disabling microphone UI leaves 53. Populated
+The default build has 60 fixtures; disabling microphone UI leaves 57. Populated
 content is authored demo material and is imported through the real content-store
 transaction API. Calendar/tasks/notes use the real portable parsers and organizer;
 reader progress comes from the real page reader and in-memory Settings shim,
