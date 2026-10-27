@@ -37,6 +37,8 @@ int papermono_rss_init(void);
 void papermono_rss_get(struct papermono_rss_feed *out);
 /* Fetches now (called when the news page opens). Keeps the SD cache warm. */
 int papermono_rss_request(void);
+/* 0 when idle, 1 while fetching, a negative errno after the last failure. */
+int papermono_rss_status(void);
 
 /* Loads the full body of an item into `buffer` (NUL terminated). Returns the
  * number of bytes read, or a negative errno when the item or cache is missing.

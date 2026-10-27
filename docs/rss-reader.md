@@ -16,6 +16,10 @@
   读取 SD 索引（2 KB）。
 - 打开资讯页时 UI 调 `papermono_rss_request()`：缓存 30 分钟内直接复用，否则后台
   抓取；失败最多尝试 3 次（间隔 20 秒），之后等下一次打开页面。
+- RTC 未校准（`time()` 不可信）时不做年龄判断，直接信任 SD 缓存，避免每次开机
+  都重新抓取。
+- 抓取状态通过 `papermono_rss_status()` 暴露：界面在失败后显示「同步失败（errno）·
+  轻触重试」，不会无限停在「正在同步资讯」。
 - 列表只用 RAM 索引；点开文章时才 `papermono_rss_body_load()` 从 SD 读正文到
   单篇 64 KB 缓冲，`lv_label_set_text_static()` 避免 LVGL 再复制一份。
 

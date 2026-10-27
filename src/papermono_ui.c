@@ -3058,9 +3058,17 @@ static int render_news(void *context, lv_obj_t *screen)
 	ARG_UNUSED(context);
 	papermono_rss_get(&news_ui.feed);
 	if (!news_ui.feed.valid) {
-		if (news_ui.last_error < 0) {
-			return render_news_empty(screen, "暂无资讯",
-				"请检查网络后重试。\n轻触重新同步。",
+		const int rss_status = papermono_rss_status();
+		char reason[96];
+
+		if (news_ui.last_error < 0 || rss_status < 0) {
+			const int error = news_ui.last_error < 0 ?
+				news_ui.last_error : rss_status;
+
+			(void)snprintf(reason, sizeof(reason),
+				"同步失败（%d）。\n请检查网络后轻触重试。",
+				error);
+			return render_news_empty(screen, "暂无资讯", reason,
 				"轻触重试 · 长按返回");
 		}
 		return render_news_empty(screen, "正在同步资讯",
