@@ -223,11 +223,11 @@ struct news_ui_state {
 	bool body_loaded;
 };
 static struct news_ui_state news_ui PAPERMONO_LARGE_BSS;
-/* One article at a time, up to PAPERMONO_RSS_BODY_MAX. Static text keeps LVGL
- * from duplicating the whole body in its 64 KiB heap; see
- * lv_label_set_text_static() in render_news_detail().
+/* One article at a time, up to PAPERMONO_RSS_BODY_MAX. The buffer itself is
+ * part of the app arena below: it is only live while the News app is open.
+ * Static text keeps LVGL from duplicating the whole body in its 64 KiB heap;
+ * see lv_label_set_text_static() in render_news_detail().
  */
-static char news_body_text[PAPERMONO_RSS_BODY_MAX + 1U] PAPERMONO_LARGE_BSS;
 
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 enum wifi_ui_mode { WIFI_UI_LIST, WIFI_UI_PASSWORD, WIFI_UI_FORGET };
@@ -278,7 +278,30 @@ struct library_ui_state {
 	int last_error;
 };
 
-static struct library_ui_state library_state PAPERMONO_LARGE_BSS;
+/* The Library working set is ~70 KB (44 KB reader session + 22 KB scan list)
+ * and is only live while the Library app is open. The news body buffer is
+ * ~64 KB and is only live while the News app is open. The router runs one app
+ * at a time and render_current() cleans the screen between apps, so the two
+ * share one PSRAM arena instead of reserving both. library_close() releases
+ * the Library half once its state has been reduced to library_progress.
+ */
+union papermono_app_arena {
+	struct library_ui_state library;
+	char news_body[PAPERMONO_RSS_BODY_MAX + 1U];
+};
+static union papermono_app_arena app_arena PAPERMONO_LARGE_BSS;
+#define library_state (app_arena.library)
+#define news_body_text (app_arena.news_body)
+
+/* The only Library state that survives leaving the app: the home tile shows
+ * the last read percentage without keeping the 44 KB reader session resident.
+ */
+struct library_progress {
+	char book_id[PAPERMONO_CONTENT_ID_LENGTH + 1U];
+	uint8_t percent;
+	bool valid;
+};
+static struct library_progress library_progress PAPERMONO_LARGE_BSS;
 static bool library_resume_requested;
 static struct papermono_note note_view PAPERMONO_LARGE_BSS;
 
@@ -830,9 +853,12 @@ static int render_home(void *context, lv_obj_t *screen)
 	char status[48];
 	char battery[16];
 	const int recent_ret = papermono_reader_recent(&recent_book);
-	const bool progress_valid = recent_ret == 0 && library_state.reader.page_loaded &&
-		strcmp(library_state.reader.book.id, recent_book.id) == 0;
-	const uint8_t progress = progress_valid ? library_state.page.approximate_percent : 0;
+	/* Read the cached progress, not library_state: the Library working set
+	 * is released in library_close() and may now hold news body data.
+	 */
+	const bool progress_valid = recent_ret == 0 && library_progress.valid &&
+		strcmp(library_progress.book_id, recent_book.id) == 0;
+	const uint8_t progress = progress_valid ? library_progress.percent : 0;
 
 	ARG_UNUSED(context);
 	read_snapshot(&snapshot);
@@ -1539,8 +1565,18 @@ static int library_open(void *context)
 	state->total_books = 0U;
 	state->selected = 0U;
 	state->mode = LIBRARY_MODE_LIST;
+	/* Library state is rebuilt on every open because library_close()
+	 * releases it. Log the scan cost so a slow card is visible instead of
+	 * silently delaying the app; if it ever gets expensive, keep the scan
+	 * index and release only the reader session.
+	 */
+	const int64_t scan_started_ms = k_uptime_get();
+
 	state->last_error = papermono_content_store_scan_books(
 		library_scan_book, state, NULL);
+	LOG_INF("Library scan: %zu of %zu book(s), error=%d (%lld ms)",
+		state->book_count, state->total_books, state->last_error,
+		(long long)(k_uptime_get() - scan_started_ms));
 	if (state->last_error == 0) {
 		library_sort(state);
 		struct papermono_content_entry recent;
@@ -1578,6 +1614,22 @@ static int library_open(void *context)
 	return 0;
 }
 
+/* Reduce the closed Library session to the few bytes the home tile shows.
+ * page_loaded is the same condition render_home() used before the working set
+ * became releasable, so a session that never rendered a page keeps the
+ * previously captured percentage instead of regressing to zero.
+ */
+static void library_capture_progress(const struct library_ui_state *state)
+{
+	if (!state->reader.page_loaded || state->reader.book.id[0] == '\0') {
+		return;
+	}
+	(void)snprintf(library_progress.book_id,
+		sizeof(library_progress.book_id), "%s", state->reader.book.id);
+	library_progress.percent = state->page.approximate_percent;
+	library_progress.valid = true;
+}
+
 static void library_close(void *context)
 {
 	struct library_ui_state *state = context;
@@ -1587,6 +1639,11 @@ static void library_close(void *context)
 	} else {
 		(void)papermono_settings_set_reader_resume(false);
 	}
+	/* Release the ~70 KB working set (scan list, reader session, page text).
+	 * library_open() rebuilds it from the card, so reopening always rescans.
+	 */
+	library_capture_progress(state);
+	memset(state, 0, sizeof(*state));
 }
 
 static void library_return_to_list(struct library_ui_state *state)
