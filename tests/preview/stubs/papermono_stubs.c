@@ -700,6 +700,8 @@ unsigned preview_rss_requests(void) { return preview_rss_request_count; }
 
 int papermono_rss_init(void) { return 0; }
 
+int papermono_rss_status(void) { return 0; }
+
 int papermono_rss_request(void)
 {
 	++preview_rss_request_count;
@@ -714,6 +716,7 @@ void papermono_rss_get(struct papermono_rss_feed *state)
 int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
 {
 	static const char sentence[] = "纸页资讯正文用于验证分页行为。";
+	static const char ending[] = "——正文结束";
 	size_t used = 0U;
 
 	if (preview_rss_body_fail || buffer == NULL || capacity == 0U ||
@@ -724,10 +727,14 @@ int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
 		(void)snprintf(buffer, capacity, "短文只有一页。");
 		return (int)strlen(buffer);
 	}
-	/* Roughly six viewports of text, enough to exercise page turns. */
-	while (used + sizeof(sentence) - 1U < capacity - 1U && used < 4000U) {
+	/* About three 19-line pages, with a recognisable final line. */
+	while (used + sizeof(sentence) - 1U < capacity - 1U && used < 2600U) {
 		memcpy(buffer + used, sentence, sizeof(sentence) - 1U);
 		used += sizeof(sentence) - 1U;
+	}
+	if (used + sizeof(ending) - 1U < capacity - 1U) {
+		memcpy(buffer + used, ending, sizeof(ending) - 1U);
+		used += sizeof(ending) - 1U;
 	}
 	buffer[used] = '\0';
 	return (int)used;

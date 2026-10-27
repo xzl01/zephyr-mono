@@ -42,15 +42,26 @@ static const struct papermono_interaction_grid_layout wifi_network_grid = {
 static const struct papermono_rect wifi_previous_rect = {22, 646, 206, 54};
 static const struct papermono_rect wifi_next_rect = {252, 646, 206, 54};
 static const struct papermono_rect wifi_connect_rect = {22, 292, 436, 54};
-/* News: six ruled rows per page between the metadata line and the footer.
- * The body viewport height is also the side-key/touch paging stride, so a
- * rendered page can never disagree with what the next page turn reveals.
+/* News skips the global page header: content starts at the top margin, and
+ * the article viewport is sized to whole reading lines (line height + 4 px
+ * line space) so a page turn never leaves a half-clipped last line.
  */
+#define NEWS_MARGIN_X 22
+#define NEWS_TEXT_WIDTH 436
+#define NEWS_TITLE_Y 24
+#define NEWS_BODY_TOP 92
+#define NEWS_BODY_BOTTOM 744
+#define NEWS_FOOTER_Y 756
+#define NEWS_LINE_SPACE 4
 static const struct papermono_interaction_grid_layout news_list_grid = {
-	.x = 22, .y = 196, .cell_width = 436, .cell_height = 78,
-	.column_gap = 0, .row_gap = 4, .columns = 1, .rows = 6,
+	.x = 22, .y = 80, .cell_width = 436, .cell_height = 78,
+	.column_gap = 0, .row_gap = 4, .columns = 1, .rows = 8,
 };
-static const struct papermono_rect news_body_rect = {22, 222, 436, 480};
+/* Maximum body area; render_news_detail() shrinks it to an exact number of
+ * line strides. Touch handling only needs the enclosing rectangle.
+ */
+static const struct papermono_rect news_body_rect = {22, NEWS_BODY_TOP, 436,
+	NEWS_BODY_BOTTOM - NEWS_BODY_TOP};
 
 enum detail_setting_index {
 	DETAIL_SETTING_SLEEP, DETAIL_SETTING_TIME, DETAIL_SETTING_FRONTLIGHT,

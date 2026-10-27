@@ -316,24 +316,22 @@ int preview_run_assertions(void)
 	struct papermono_rss_feed news_feed = {0};
 	news_feed.valid = true;
 	snprintf(news_feed.title, sizeof(news_feed.title), "纸面资讯");
-	news_feed.count = 2U;
-	snprintf(news_feed.items[0].title, sizeof(news_feed.items[0].title),
-		"第一篇文章：纸上的慢新闻");
-	snprintf(news_feed.items[0].published,
-		sizeof(news_feed.items[0].published), "2026-10-27");
-	news_feed.items[0].body_length = 4000U;
-	snprintf(news_feed.items[1].title, sizeof(news_feed.items[1].title),
-		"第二篇文章：设备上的阅读");
-	snprintf(news_feed.items[1].published,
-		sizeof(news_feed.items[1].published), "2026-10-26");
-	news_feed.items[1].body_length = 14U;
+	news_feed.count = 8U;
+	for (size_t i = 0U; i < news_feed.count; ++i) {
+		snprintf(news_feed.items[i].title,
+			sizeof(news_feed.items[i].title),
+			"第 %zu 篇文章：纸上的慢新闻", i + 1U);
+		snprintf(news_feed.items[i].published,
+			sizeof(news_feed.items[i].published), "2026-10-27");
+		news_feed.items[i].body_length = i == 0U ? 2600U : 20U;
+	}
 	news_feed.updated_at = 1793000000;
 	preview_rss_set_index(&news_feed);
 	preview_rss_body_fail_set(false);
 	preview_rss_request_result_set(0);
 	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
 	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
-	PREVIEW_CHECK(news_ui.feed.count == 2U && !news_ui.detail);
+	PREVIEW_CHECK(news_ui.feed.count == 8U && !news_ui.detail);
 	struct papermono_rect news_row;
 	PREVIEW_CHECK(papermono_interaction_grid_cell_rect(&news_list_grid, 0,
 		&news_row) == 0);
@@ -344,7 +342,18 @@ int preview_run_assertions(void)
 	PREVIEW_CHECK(news_ui.body_loaded && news_ui.body_length > 0);
 	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_REDRAW);
 	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
-	PREVIEW_CHECK(news_ui.body_pages >= 2U);
+	/* Line-aligned pagination: the stride is an exact whole number of text
+	 * lines, and the three-page stub's final line fits on its last page. */
+	const int32_t news_reading_pitch =
+		papermono_reading_24.line_height + NEWS_LINE_SPACE;
+	const int32_t news_page_pixels = news_page_stride();
+	PREVIEW_CHECK(news_page_pixels > 0);
+	PREVIEW_CHECK(news_page_pixels % news_reading_pitch == 0);
+	PREVIEW_CHECK(news_page_pixels <= NEWS_BODY_BOTTOM - NEWS_BODY_TOP);
+	PREVIEW_CHECK(news_ui.body_pages == 3U);
+	PREVIEW_CHECK(news_ui.body_height > 2 * news_page_pixels);
+	PREVIEW_CHECK(news_ui.body_height <= 3 * news_page_pixels);
+	PREVIEW_CHECK(strstr(news_body_text, "——正文结束") != NULL);
 	event = (struct papermono_app_event) {
 		.type = PAPERMONO_APP_EVENT_NEXT,
 		.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON, .x = -1, .y = -1,
@@ -352,7 +361,16 @@ int preview_run_assertions(void)
 	command = (struct papermono_app_command) {0};
 	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
 	PREVIEW_CHECK(news_ui.body_page == 1U);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.body_page == 2U);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(news_ui.body_height -
+		(int32_t)news_ui.body_page * news_page_pixels <= news_page_pixels);
 	event.type = PAPERMONO_APP_EVENT_PREVIOUS;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.body_page == 1U);
 	command = (struct papermono_app_command) {0};
 	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
 	PREVIEW_CHECK(news_ui.body_page == 0U);
@@ -456,23 +474,22 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_REMOTE);
 		return ret < 0 ? ret : papermono_app_router_render(&app_router, screen);
 	}
-	if (strncmp(name, "news", 4) == 0) {
+	if (strncmp(name, "news", 4) == 0 || strcmp(name, "article-long") == 0) {
 		struct papermono_rss_feed feed = {0};
 
 		if (strcmp(name, "news-error") != 0) {
 			feed.valid = true;
 			snprintf(feed.title, sizeof(feed.title), "纸面资讯");
-			snprintf(feed.items[0].title, sizeof(feed.items[0].title),
-				"第一篇文章：纸上的慢新闻");
-			snprintf(feed.items[0].published,
-				sizeof(feed.items[0].published), "2026-10-27");
-			feed.items[0].body_length = 4000U;
-			snprintf(feed.items[1].title, sizeof(feed.items[1].title),
-				"第二篇文章：设备上的阅读");
-			snprintf(feed.items[1].published,
-				sizeof(feed.items[1].published), "2026-10-26");
-			feed.items[1].body_length = 14U;
-			feed.count = strcmp(name, "news-empty") == 0 ? 0U : 2U;
+			feed.count = strcmp(name, "news-empty") == 0 ? 0U : 8U;
+			for (size_t i = 0U; i < feed.count; ++i) {
+				snprintf(feed.items[i].title,
+					sizeof(feed.items[i].title),
+					"第 %zu 篇文章：纸上的慢新闻", i + 1U);
+				snprintf(feed.items[i].published,
+					sizeof(feed.items[i].published),
+					"2026-10-27");
+				feed.items[i].body_length = i == 0U ? 2600U : 20U;
+			}
 			feed.updated_at = 1793000000;
 		}
 		preview_rss_set_index(&feed);
@@ -485,6 +502,11 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 			news_ui.selected = 0U;
 			news_ui.detail = true;
 			news_ui.body_page = 0U;
+		} else if (strcmp(name, "article-long") == 0) {
+			/* Last page of the three-page stub, including "——正文结束". */
+			news_ui.selected = 0U;
+			news_ui.detail = true;
+			news_ui.body_page = 2U;
 		}
 		return papermono_app_router_render(&app_router, screen);
 	}

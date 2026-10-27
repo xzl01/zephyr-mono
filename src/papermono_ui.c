@@ -206,7 +206,7 @@ static size_t launcher_page;
  * article text is read on demand by papermono_rss_body_load(), so the UI never
  * holds a second copy of every body.
  */
-#define NEWS_VISIBLE_ITEMS 6U
+#define NEWS_VISIBLE_ITEMS 8U
 struct news_ui_state {
 	struct papermono_rss_feed feed;
 	size_t list_first;
@@ -221,6 +221,8 @@ struct news_ui_state {
 	size_t body_index;
 	int body_length;
 	bool body_loaded;
+	/* Wrapped height in pixels, kept for the line-aligned page count. */
+	int32_t body_height;
 };
 static struct news_ui_state news_ui PAPERMONO_LARGE_BSS;
 /* One article at a time, up to PAPERMONO_RSS_BODY_MAX. The buffer itself is
@@ -2864,9 +2866,10 @@ static int info_event(void *context, const struct papermono_app_event *event,
 	return 0;
 }
 
-/* RSS reading: a six-row index and a clipped body viewport. Both are driven
- * from the same snapshot copied by papermono_rss_get(); no widget pointer is
- * retained across a render, so lv_obj_clean() cannot leave a stale handle.
+/* RSS reading: no global page header; the index shows eight rows and the
+ * article viewport is an exact multiple of the reading line pitch. Both are
+ * driven from the same index copied by papermono_rss_get(); no widget pointer
+ * is retained across a render, so lv_obj_clean() cannot leave a stale handle.
  */
 static void news_updated_text(char *output, size_t size, int64_t updated_at)
 {
@@ -2875,6 +2878,34 @@ static void news_updated_text(char *output, size_t size, int64_t updated_at)
 		return;
 	}
 	format_info_time(output, size, updated_at);
+}
+
+/* One text line occupies line_height + line_space. Rounding the viewport down
+ * to whole lines makes the shift-safe page stride identical to the viewport,
+ * so the last visible line is never cut in half.
+ */
+static int32_t news_page_stride(void)
+{
+	const int32_t pitch = papermono_reading_24.line_height + NEWS_LINE_SPACE;
+	const int32_t available = NEWS_BODY_BOTTOM - NEWS_BODY_TOP;
+	const int32_t lines = MAX(1, available / pitch);
+
+	return lines * pitch;
+}
+
+/* Small footer: hint on the left, page counter on the right, no rule. */
+static void news_footer(lv_obj_t *screen, const char *left, const char *right)
+{
+	lv_obj_t *label = make_chinese_label(screen, left);
+
+	lv_obj_set_pos(label, NEWS_MARGIN_X, NEWS_FOOTER_Y);
+	lv_obj_set_size(label, 320, 24);
+	if (right != NULL) {
+		label = make_chinese_label(screen, right);
+		lv_obj_set_pos(label, 366, NEWS_FOOTER_Y);
+		lv_obj_set_size(label, 92, 24);
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+	}
 }
 
 static void news_body_clear(void)
@@ -2951,6 +2982,7 @@ static int render_news_list(lv_obj_t *screen)
 {
 	const struct papermono_rss_feed *feed = &news_ui.feed;
 	char meta[96];
+	char pager[24];
 	lv_obj_t *label;
 
 	/* The feed can shrink between refreshes; never leave the index on a
@@ -2963,15 +2995,21 @@ static int render_news_list(lv_obj_t *screen)
 	const size_t page_count = MAX(1U,
 		(feed->count + NEWS_VISIBLE_ITEMS - 1U) / NEWS_VISIBLE_ITEMS);
 
-	make_header(screen, "阅读");
-	label = detail_text(screen, feed->title[0] ? feed->title : "本地资讯",
-		22, 128, 436, 34, true);
-	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-	news_updated_text(meta, sizeof(meta), feed->updated_at);
-	(void)snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta),
-		" · %u / %u 页", (unsigned)(news_ui.list_first / NEWS_VISIBLE_ITEMS + 1U),
+	/* Headerless index: feed name at the top margin, page counter right. */
+	label = make_label(screen, feed->title[0] ? feed->title : "本地资讯",
+		&papermono_reading_24, ink);
+	lv_obj_set_pos(label, NEWS_MARGIN_X, NEWS_TITLE_Y);
+	lv_obj_set_size(label, 320, 30);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	(void)snprintf(pager, sizeof(pager), "%u / %u",
+		(unsigned)(news_ui.list_first / NEWS_VISIBLE_ITEMS + 1U),
 		(unsigned)page_count);
-	(void)detail_text(screen, meta, 22, 162, 436, 24, false);
+	label = make_chinese_label(screen, pager);
+	lv_obj_set_pos(label, 366, NEWS_TITLE_Y + 4);
+	lv_obj_set_size(label, 92, 24);
+	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+	news_updated_text(meta, sizeof(meta), feed->updated_at);
+	(void)detail_text(screen, meta, NEWS_MARGIN_X, 56, NEWS_TEXT_WIDTH, 22, false);
 	for (size_t row = 0; row < NEWS_VISIBLE_ITEMS; ++row) {
 		const size_t index = news_ui.list_first + row;
 		struct papermono_rect rect;
@@ -2986,7 +3024,10 @@ static int render_news_list(lv_obj_t *screen)
 				feed->items[index].published : NULL,
 			false, true);
 	}
-	make_footer(screen, "点按条目阅读 · 侧键翻页 · 长按返回");
+	(void)snprintf(pager, sizeof(pager), "%u / %u",
+		(unsigned)(news_ui.list_first / NEWS_VISIBLE_ITEMS + 1U),
+		(unsigned)page_count);
+	news_footer(screen, "点按阅读 · 长按返回", pager);
 	return 0;
 }
 
@@ -2996,60 +3037,63 @@ static int render_news_detail(lv_obj_t *screen)
 	const size_t index = news_ui.selected < feed->count ?
 		news_ui.selected : 0U;
 	const struct papermono_rss_item_meta *item = &feed->items[index];
+	const int32_t stride = news_page_stride();
 	lv_obj_t *label;
+	char pager[24];
 
 	if (!news_ui.body_loaded || news_ui.body_index != index) {
 		(void)news_body_load(index);
 	}
-	make_header(screen, "阅读");
-	label = detail_text(screen, item->title, 22, 128, 436, 58, true);
+	/* No wordmark, date, 48 px heading or header rule: the article owns the
+	 * page. The title is two reading lines at the top margin.
+	 */
+	label = make_label(screen, item->title, &papermono_reading_24, ink);
+	lv_obj_set_pos(label, NEWS_MARGIN_X, NEWS_TITLE_Y);
+	lv_obj_set_size(label, NEWS_TEXT_WIDTH,
+		2 * papermono_reading_24.line_height);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	if (item->published[0]) {
-		(void)detail_text(screen, item->published, 22, 190, 436, 24, false);
-	}
 	if (news_ui.body_length < 0) {
 		/* A missing or unreadable SD cache is a page state, not a crash:
 		 * the index stays usable and the reader can go back and retry.
 		 */
-		label = detail_text(screen, "正文读取失败", 22, 320, 436, 40, true);
+		label = detail_text(screen, "正文读取失败", 22, 210, 436, 34, true);
 		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 		char error[64];
 		(void)snprintf(error, sizeof(error), "无法从缓存读取正文（%d）",
 			news_ui.body_length);
-		label = detail_text(screen, error, 22, 372, 436, 30, false);
+		label = detail_text(screen, error, 22, 254, 436, 30, false);
 		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-		make_footer(screen, "点按返回列表");
+		news_footer(screen, "点按返回列表", NULL);
 		return 0;
 	}
 	lv_obj_t *viewport = lv_obj_create(screen);
 	lv_obj_set_pos(viewport, news_body_rect.x, news_body_rect.y);
-	lv_obj_set_size(viewport, news_body_rect.width, news_body_rect.height);
+	lv_obj_set_size(viewport, news_body_rect.width, stride);
 	set_box_style(viewport, paper, 0, 0);
 	label = make_label(viewport, "", &papermono_reading_24, ink);
 	lv_obj_set_width(label, news_body_rect.width);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-	lv_obj_set_style_text_line_space(label, 4, LV_PART_MAIN);
+	lv_obj_set_style_text_line_space(label, NEWS_LINE_SPACE, LV_PART_MAIN);
 	/* Static text: LVGL points at the PSRAM buffer instead of duplicating a
 	 * body that may be as large as its whole 64 KiB heap.
 	 */
 	lv_label_set_text_static(label, news_ui.body_length > 0 ? news_body_text :
 		"此条目暂无正文。");
-	/* Layout once to learn the wrapped height; the viewport height is the
-	 * page stride, so a page turn never cuts a line in half.
+	/* Layout once to learn the wrapped height. The viewport and the page
+	 * stride are the same whole-line distance, so shifting by stride starts
+	 * every page exactly on a line boundary.
 	 */
 	lv_obj_update_layout(label);
-	const int32_t body_height = MAX(lv_obj_get_height(label),
-		news_body_rect.height);
+	news_ui.body_height = lv_obj_get_height(label);
 	news_ui.body_pages = (uint16_t)MAX(1,
-		(body_height + news_body_rect.height - 1) / news_body_rect.height);
+		(news_ui.body_height + stride - 1) / stride);
 	if (news_ui.body_page >= news_ui.body_pages) {
 		news_ui.body_page = news_ui.body_pages - 1U;
 	}
-	lv_obj_set_pos(label, 0, -(int32_t)news_ui.body_page * news_body_rect.height);
-	char footer[64];
-	(void)snprintf(footer, sizeof(footer), "第 %u / %u 页 · 点按返回列表",
+	lv_obj_set_pos(label, 0, -(int32_t)news_ui.body_page * stride);
+	(void)snprintf(pager, sizeof(pager), "%u / %u",
 		(unsigned)(news_ui.body_page + 1U), (unsigned)news_ui.body_pages);
-	make_footer(screen, footer);
+	news_footer(screen, "点按返回列表", pager);
 	return 0;
 }
 
