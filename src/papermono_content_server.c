@@ -1629,7 +1629,7 @@ static void normalize_provisioning_radio(bool ap_only)
 		active_protocols, tx_power);
 }
 
-static int enable_ap(void)
+static int enable_ap(bool recovery_only)
 {
 	struct net_if *iface = net_if_get_wifi_sap();
 	struct wifi_connect_req_params config = { 0 };
@@ -1640,7 +1640,9 @@ static int enable_ap(void)
 		return -ENODEV;
 	}
 	k_mutex_lock(&server_lock, K_FOREVER);
-	if (server_state.ap_enabled || ap_enabling) {
+	if (server_state.ap_enabled || ap_enabling ||
+	    (recovery_only && (server_state.station_connected ||
+		server_state.station_connecting || wifi_state.request_busy))) {
 		k_mutex_unlock(&server_lock);
 		return 0;
 	}
@@ -1745,7 +1747,8 @@ static void schedule_recovery_ap(void)
 	uint32_t delay_ms;
 
 	k_mutex_lock(&server_lock, K_FOREVER);
-	if (server_state.ap_enabled || server_state.station_connected || ap_enabling ||
+	if (server_state.ap_enabled || server_state.station_connected ||
+	    server_state.station_connecting || ap_enabling ||
 	    wifi_state.request_busy) {
 		k_mutex_unlock(&server_lock);
 		return;
@@ -2086,7 +2089,10 @@ static void enable_ap_worker(struct k_work *work)
 	if (wifi_is_paused()) {
 		return;
 	}
-	const int ret = enable_ap();
+	/* Cancellation can race a dequeued worker. Recheck under the same lock
+	 * that reserves AP startup, so an obsolete recovery cannot disturb STA.
+	 */
+	const int ret = enable_ap(true);
 
 	if (ret < 0) {
 		LOG_ERR("Unable to enable recovery SoftAP (%d)", ret);
@@ -2103,6 +2109,8 @@ static void verify_ap_worker(struct k_work *work)
 	struct net_if *iface = net_if_get_wifi_sap();
 	char expected_ssid[sizeof(server_state.ap_ssid)];
 	bool enabled;
+	bool station_connected;
+	bool defer;
 	bool healthy;
 	bool retry = false;
 	bool restart = false;
@@ -2113,10 +2121,19 @@ static void verify_ap_worker(struct k_work *work)
 	ARG_UNUSED(work);
 	k_mutex_lock(&server_lock, K_FOREVER);
 	enabled = server_state.ap_enabled;
+	station_connected = server_state.station_connected;
+	defer = server_state.station_connecting || wifi_state.request_busy;
 	(void)snprintf(expected_ssid, sizeof(expected_ssid), "%s",
 		server_state.ap_ssid);
 	k_mutex_unlock(&server_lock);
-	if (!enabled) {
+	if (!enabled || station_connected) {
+		return;
+	}
+	/* APSTA shares the station's channel. Association/handoff can make the
+	 * fixed provisioning channel check transiently false; let STA settle.
+	 */
+	if (defer) {
+		(void)wifi_reschedule(&ap_health_work, K_MSEC(AP_HEALTH_DELAY_MS));
 		return;
 	}
 
@@ -2130,8 +2147,14 @@ static void verify_ap_worker(struct k_work *work)
 
 	k_mutex_lock(&server_lock, K_FOREVER);
 	if (!server_state.ap_enabled ||
-	    strcmp(server_state.ap_ssid, expected_ssid) != 0) {
+	    strcmp(server_state.ap_ssid, expected_ssid) != 0 ||
+	    server_state.station_connected) {
 		k_mutex_unlock(&server_lock);
+		return;
+	}
+	if (server_state.station_connecting || wifi_state.request_busy) {
+		k_mutex_unlock(&server_lock);
+		(void)wifi_reschedule(&ap_health_work, K_MSEC(AP_HEALTH_DELAY_MS));
 		return;
 	}
 	state_changed = server_state.ap_verified != healthy;
@@ -2187,6 +2210,13 @@ static void disable_ap(struct k_work *work)
 	struct net_if *iface = net_if_get_wifi_sap();
 
 	ARG_UNUSED(work);
+	k_mutex_lock(&server_lock, K_FOREVER);
+	const bool handoff = server_state.station_connected &&
+		server_state.ap_enabled && !ap_enabling && !wifi_state.request_busy;
+	k_mutex_unlock(&server_lock);
+	if (!handoff) {
+		return;
+	}
 	if (iface == NULL) {
 		return;
 	}
@@ -2253,7 +2283,15 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 			ap_retry_shift = 0U;
 		}
 		request_dhcp = success;
-		request_ap_health = success;
+		request_ap_health = success && !server_state.station_connected;
+		cancel_ap_health = success && server_state.station_connected;
+		/* STA may finish while AP startup is still awaiting its event.
+		 * Its earlier connect event could not hand off an AP not yet enabled.
+		 */
+		if (success && server_state.station_connected) {
+			(void)wifi_reschedule(&disable_ap_work,
+				K_MSEC(AP_HANDOFF_DELAY_MS));
+		}
 		request_ap = !success && !server_state.station_connected;
 		LOG_INF("SoftAP enable %s (status=%d, channel=%u)",
 			success ? "complete" : "failed",
@@ -2281,7 +2319,10 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 			ap_retry_shift = 0U;
 			station_retry_shift = 0U;
 			(void)k_work_cancel_delayable(&station_retry_work);
+			(void)k_work_cancel_delayable(&enable_ap_work);
+			(void)k_work_cancel_delayable(&ap_health_work);
 		}
+		request_ap_health = !success && server_state.ap_enabled;
 		request_ap = !success && !server_state.ap_enabled;
 		request_station_retry = !success;
 		if (success && server_state.ap_enabled) {
@@ -2292,12 +2333,14 @@ static void wifi_event(struct net_mgmt_event_callback *callback,
 			success ? "complete" : "failed",
 			status == NULL ? -ENODATA : status->status);
 	} else if (event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
+		(void)k_work_cancel_delayable(&disable_ap_work);
 		/* The status may be non-zero (peer teardown, driver reset), but the
 		 * station link is gone in every case: restore the provisioning AP and
 		 * retry the saved network so the device never becomes unreachable.
 		 */
 		server_state.station_connecting = false;
 		server_state.station_connected = false;
+		request_ap_health = server_state.ap_enabled;
 		/* A disconnect in command phase 1 is intentional. A disconnect while
 		 * authenticating (ESP32 reports failures via this event) is an error.
 		 */
@@ -2735,7 +2778,7 @@ static int reset_wifi_now(void)
 	generate_credentials();
 	k_mutex_unlock(&server_lock);
 	papermono_ui_request_background_refresh();
-	ret = enable_ap();
+	ret = enable_ap(false);
 	if (ret < 0) {
 		schedule_recovery_ap();
 	}
