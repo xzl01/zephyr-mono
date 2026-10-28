@@ -677,6 +677,7 @@ void papermono_weather_get(struct papermono_weather *state)
  * struct; bodies are generated on demand, so no host file is read. */
 static struct papermono_rss_feed preview_rss;
 static int preview_rss_request_result;
+static int preview_rss_status_value;
 static bool preview_rss_body_fail;
 static unsigned preview_rss_request_count;
 static unsigned preview_rss_body_load_count;
@@ -696,6 +697,8 @@ void preview_rss_request_result_set(int result)
 	preview_rss_request_result = result;
 }
 
+void preview_rss_status_set(int status) { preview_rss_status_value = status; }
+
 void preview_rss_body_fail_set(bool fail) { preview_rss_body_fail = fail; }
 
 unsigned preview_rss_requests(void) { return preview_rss_request_count; }
@@ -707,11 +710,14 @@ void preview_rss_body_text_set(const char *text) { preview_rss_body_text = text;
 
 int papermono_rss_init(void) { return 0; }
 
-int papermono_rss_status(void) { return 0; }
+int papermono_rss_status(void) { return preview_rss_status_value; }
 
 int papermono_rss_request(void)
 {
 	++preview_rss_request_count;
+	if (preview_rss_request_result == 0) {
+		preview_rss_status_value = 1;
+	}
 	return preview_rss_request_result;
 }
 

@@ -2956,6 +2956,57 @@ static int news_body_load(size_t index)
 	return news_ui.body_length;
 }
 
+static void news_request_refresh(void)
+{
+	news_ui.last_error = papermono_rss_request();
+	if (news_ui.last_error == -EBUSY) {
+		news_ui.last_error = 0;
+	}
+}
+
+static int news_sync_status(void)
+{
+	return news_ui.last_error < 0 ? news_ui.last_error :
+		papermono_rss_status();
+}
+
+static const char *news_sync_error_text(int error)
+{
+	switch (error) {
+	case -ETIMEDOUT:
+		return "连接超时";
+	case -ENETDOWN:
+		return "网络未就绪";
+	case -ENETUNREACH:
+	case -EHOSTUNREACH:
+		return "无法连接订阅源";
+	case -EINVAL:
+	case -EPROTONOSUPPORT:
+		return "订阅地址无效";
+	case -ENODEV:
+		return "存储未就绪";
+	default:
+		return "同步失败";
+	}
+}
+
+static void news_list_meta_text(char *output, size_t size)
+{
+	char updated[32];
+	const int status = news_sync_status();
+
+	news_updated_text(updated, sizeof(updated), news_ui.feed.updated_at);
+	if (status > 0) {
+		(void)snprintf(output, size, "%s · 正在同步", updated);
+	} else if (status < 0) {
+		(void)snprintf(output, size, "%s · %s · %s", updated,
+			news_sync_error_text(status),
+			news_ui.list_first == 0U ? "下拉重试" : "显示缓存");
+	} else {
+		(void)snprintf(output, size, "%s", updated);
+	}
+}
+
 static int news_open(void *context)
 {
 	ARG_UNUSED(context);
@@ -2965,10 +3016,7 @@ static int news_open(void *context)
 	news_ui.body_pages = 1U;
 	news_ui.detail = false;
 	news_body_clear();
-	news_ui.last_error = papermono_rss_request();
-	if (news_ui.last_error == -EBUSY) {
-		news_ui.last_error = 0;
-	}
+	news_request_refresh();
 	papermono_rss_get(&news_ui.feed);
 	return 0;
 }
@@ -3020,7 +3068,7 @@ static int render_news_list(lv_obj_t *screen)
 	lv_obj_set_pos(label, NEWS_MARGIN_X, NEWS_TITLE_Y);
 	lv_obj_set_size(label, NEWS_TEXT_WIDTH, 30);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-	news_updated_text(meta, sizeof(meta), feed->updated_at);
+	news_list_meta_text(meta, sizeof(meta));
 	(void)detail_text(screen, meta, NEWS_MARGIN_X, 56, NEWS_TEXT_WIDTH, 22, false);
 	for (size_t row = 0; row < NEWS_VISIBLE_ITEMS; ++row) {
 		const size_t index = news_ui.list_first + row;
@@ -3039,7 +3087,8 @@ static int render_news_list(lv_obj_t *screen)
 	(void)snprintf(pager, sizeof(pager), "%u / %u",
 		(unsigned)(news_ui.list_first / NEWS_VISIBLE_ITEMS + 1U),
 		(unsigned)page_count);
-	news_footer(screen, "点按阅读 · 长按返回", pager);
+	news_footer(screen, news_ui.list_first == 0U ?
+		"下拉刷新 · 长按返回" : "点按阅读 · 长按返回", pager);
 	return 0;
 }
 
@@ -3113,27 +3162,31 @@ static int render_news(void *context, lv_obj_t *screen)
 {
 	ARG_UNUSED(context);
 	papermono_rss_get(&news_ui.feed);
-	if (!news_ui.feed.valid) {
-		const int rss_status = papermono_rss_status();
+	if (!news_ui.feed.valid || news_ui.feed.count == 0U) {
+		const int rss_status = news_sync_status();
 		char reason[96];
 
-		if (news_ui.last_error < 0 || rss_status < 0) {
-			const int error = news_ui.last_error < 0 ?
-				news_ui.last_error : rss_status;
-
+		/* A refreshed source can become empty while reading or on a later
+		 * list page. Its visible empty state must accept the same first-page
+		 * pull gesture rather than retain hidden article/paging state.
+		 */
+		news_ui.detail = false;
+		news_ui.list_first = 0U;
+		news_ui.body_page = 0U;
+		if (rss_status < 0) {
 			(void)snprintf(reason, sizeof(reason),
-				"同步失败（%d）。\n请检查网络后轻触重试。",
-				error);
+				"%s。\n请检查网络与订阅地址后重试。",
+				news_sync_error_text(rss_status));
 			return render_news_empty(screen, "暂无资讯", reason,
-				"轻触重试 · 长按返回");
+				"下拉或轻触重试 · 长按返回");
 		}
-		return render_news_empty(screen, "正在同步资讯",
-			"正在从订阅源获取内容，请稍候。", "正在获取资讯");
-	}
-	if (news_ui.feed.count == 0U) {
+		if (rss_status > 0 || !news_ui.feed.valid) {
+			return render_news_empty(screen, "正在同步资讯",
+				"正在从订阅源获取内容，请稍候。", "正在获取资讯");
+		}
 		return render_news_empty(screen, "暂无资讯",
-			"订阅源暂时没有条目。\n轻触重新同步。",
-			"轻触重试 · 长按返回");
+			"订阅源暂时没有条目。\n下拉或轻触重新同步。",
+			"下拉或轻触重试 · 长按返回");
 	}
 	if (news_ui.detail) {
 		return render_news_detail(screen);
@@ -3190,11 +3243,14 @@ static int news_event(void *context, const struct papermono_app_event *event,
 		command->type = PAPERMONO_APP_COMMAND_BACK;
 		return 0;
 	}
-	if (event->type == PAPERMONO_APP_EVENT_TAP && feed->count == 0U) {
-		news_ui.last_error = papermono_rss_request();
-		if (news_ui.last_error == -EBUSY) {
-			news_ui.last_error = 0;
-		}
+	/* At the first list page a completed downward touch gesture refreshes.
+	 * Other list pages retain the same previous-page gesture, and the detail
+	 * branch above keeps downward swipes for reading navigation.
+	 */
+	if ((event->type == PAPERMONO_APP_EVENT_DOWN &&
+	     papermono_app_event_is_touch(event) && news_ui.list_first == 0U) ||
+	    (event->type == PAPERMONO_APP_EVENT_TAP && feed->count == 0U)) {
+		news_request_refresh();
 		request_redraw(command);
 		return 0;
 	}

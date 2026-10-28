@@ -2848,6 +2848,46 @@ static size_t rss_dechunk(char *body, size_t length)
 	return output;
 }
 
+static int rss_bind_source(int sock, const struct sockaddr_in *remote)
+{
+	struct net_if *iface = rss_iface();
+	const struct net_in_addr *address;
+	struct sockaddr_in local = {
+		.sin_family = AF_INET,
+	};
+	char source_text[16];
+	char remote_text[16];
+
+	if (iface == NULL) {
+		return -ENETDOWN;
+	}
+	address = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
+	if (address == NULL) {
+		return -ENETDOWN;
+	}
+	local.sin_addr = *address;
+	if (local.sin_addr.s_addr == 0U) {
+		return -ENETDOWN;
+	}
+	/* In STA+AP mode, Zephyr's unbound IPv4 source selection can prefer
+	 * the AP for a destination outside both subnets. Binding the concrete
+	 * station address fixes this connection's interface without changing
+	 * the AP's routing or the global default interface.
+	 */
+	if (zsock_bind(sock, (struct sockaddr *)&local, sizeof(local)) < 0) {
+		const int ret = -errno;
+
+		RSS_LOG_WRN("RSS source bind failed (%d)", ret);
+		return ret;
+	}
+	RSS_LOG_INF("RSS connect source %s -> %s",
+		    net_addr_ntop(AF_INET, &local.sin_addr, source_text,
+				  sizeof(source_text)),
+		    net_addr_ntop(AF_INET, &remote->sin_addr, remote_text,
+				  sizeof(remote_text)));
+	return 0;
+}
+
 static int rss_http_get(const char *url, char *response, size_t capacity,
 			size_t *body_offset, size_t *body_length,
 			bool *truncated)
@@ -2892,6 +2932,11 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 	sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock < 0) {
 		return -errno;
+	}
+	ret = rss_bind_source(sock, &address);
+	if (ret < 0) {
+		zsock_close(sock);
+		return ret;
 	}
 	if (zsock_connect(sock, (struct sockaddr *)&address,
 			  sizeof(address)) < 0) {

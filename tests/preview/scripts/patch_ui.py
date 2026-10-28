@@ -28,6 +28,7 @@ void preview_fs_mount_result(int result);
 void preview_hid_set_state(const struct papermono_hid_state *state);
 void preview_rss_set_index(const struct papermono_rss_feed *feed);
 void preview_rss_request_result_set(int result);
+void preview_rss_status_set(int status);
 void preview_rss_body_fail_set(bool fail);
 unsigned preview_rss_requests(void);
 unsigned preview_rss_body_loads(void);
@@ -40,6 +41,18 @@ void preview_rss_body_text_set(const char *text);
 		return -EINVAL; \
 	} \
 } while (0)
+
+static bool preview_has_text(lv_obj_t *root, const char *text)
+{
+	if (lv_obj_check_type(root, &lv_label_class) &&
+	    strstr(lv_label_get_text(root), text) != NULL) {
+		return true;
+	}
+	for (uint32_t i = 0U; i < lv_obj_get_child_count(root); ++i) {
+		if (preview_has_text(lv_obj_get_child(root, i), text)) return true;
+	}
+	return false;
+}
 
 static bool preview_zeroed(const void *memory, size_t length)
 {
@@ -459,6 +472,107 @@ int preview_run_assertions(void)
 	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
 	preview_rss_request_result_set(0);
 
+	/* Pull to refresh belongs to the first list page, including its empty
+	 * states. Pagination and article navigation retain their old meaning. */
+	news_feed.count = 12U;
+	for (size_t i = NEWS_VISIBLE_ITEMS; i < news_feed.count; ++i) {
+		news_feed.items[i] = news_feed.items[0];
+	}
+	preview_rss_set_index(&news_feed);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+	preview_rss_status_set(0);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "下拉刷新"));
+	const unsigned rss_requests_before_pull = preview_rss_requests();
+	enum papermono_app_event_type pull_type;
+	PREVIEW_CHECK(papermono_touch_gesture_classify(240, 140, 240, 300,
+		300U, 480, 800, &pull_type) == 0);
+	PREVIEW_CHECK(pull_type == PAPERMONO_APP_EVENT_DOWN);
+	event = (struct papermono_app_event) {
+		.type = pull_type, .source = PAPERMONO_APP_EVENT_SOURCE_TOUCH,
+		.x = 240, .y = 140, .duration_ms = 300U,
+	};
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_REDRAW);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 1U);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "正在同步"));
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "已更新资讯"));
+	/* Another completed pull is still a request through the data layer's
+	 * single-flight path; rendering itself never issues a request. */
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 2U);
+	PREVIEW_CHECK(papermono_rss_status() == 1);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 2U);
+	event.type = PAPERMONO_APP_EVENT_PREVIOUS;
+	event.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_NONE);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 2U);
+	event.type = PAPERMONO_APP_EVENT_NEXT;
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.list_first == NEWS_VISIBLE_ITEMS);
+	event.type = PAPERMONO_APP_EVENT_DOWN;
+	event.source = PAPERMONO_APP_EVENT_SOURCE_TOUCH;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.list_first == 0U);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 2U);
+	/* Reading keeps downward swipes as previous-page, including at page 1. */
+	event = preview_tap(&news_row);
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	news_ui.body_page = 1U;
+	event.type = PAPERMONO_APP_EVENT_DOWN;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.body_page == 0U && news_ui.detail);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 2U);
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_NONE);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 2U);
+	event = preview_tap(&news_body_rect);
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	preview_rss_status_set(-ETIMEDOUT);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "连接超时 · 下拉重试"));
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "已更新资讯"));
+	PREVIEW_CHECK(news_ui.feed.count == 12U && !news_ui.detail);
+	/* A valid-but-empty feed also exposes the failed request and recovers by
+	 * the same pull instead of claiming the source is simply empty. */
+	event.type = PAPERMONO_APP_EVENT_NEXT;
+	event.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(news_ui.list_first == NEWS_VISIBLE_ITEMS);
+	news_feed.count = 0U;
+	preview_rss_set_index(&news_feed);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(news_ui.list_first == 0U && !news_ui.detail);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "连接超时"));
+	event.type = PAPERMONO_APP_EVENT_DOWN;
+	event.source = PAPERMONO_APP_EVENT_SOURCE_TOUCH;
+	command = (struct papermono_app_command) {0};
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 3U);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "正在同步资讯"));
+	preview_rss_set_index(NULL);
+	preview_rss_status_set(-ENETDOWN);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "网络未就绪"));
+	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_pull + 4U);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(preview_has_text(lv_screen_active(), "正在同步资讯"));
+	preview_rss_status_set(0);
+
 	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
 	PREVIEW_CHECK(preview_draft_erased());
 	preview_wifi_probe_reset();
@@ -541,6 +655,8 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 			-ENETUNREACH : 0);
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS);
 		if (ret < 0) return ret;
+		preview_rss_status_set(strcmp(name, "news-syncing") == 0 ? 1 :
+			strcmp(name, "news-cached-error") == 0 ? -ETIMEDOUT : 0);
 		if (strcmp(name, "news-detail") == 0) {
 			news_ui.selected = 0U;
 			news_ui.detail = true;

@@ -221,3 +221,4 @@ cc -std=c17 -Wall -Wextra -Werror -Iinclude \
 	-o "$build_dir/test_rss"
 "$build_dir/test_rss"
 python3 tests/host/test_rss_refresh.py
+python3 tests/host/test_rss_network.py
