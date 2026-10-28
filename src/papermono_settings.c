@@ -2,7 +2,6 @@
 
 #include <errno.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -305,22 +304,6 @@ static int papermono_settings_set(const char *name, size_t len,
 		preferences.sleep_summary = (enum papermono_sleep_summary)value;
 		return 0;
 	}
-	if (settings_name_steq(name, "rss_url", &next) && next == NULL) {
-		if (len == 0U || len > sizeof(preferences.rss_url)) {
-			return 0;
-		}
-		char loaded[PAPERMONO_RSS_URL_MAX + 1U] = { 0 };
-		const int ret = read_cb(cb_arg, loaded, len);
-
-		if (ret < 0) {
-			return ret;
-		}
-		if ((size_t)ret != len || loaded[len - 1U] != '\0') {
-			return 0;
-		}
-		memcpy(preferences.rss_url, loaded, sizeof(loaded));
-		return 0;
-	}
 	if (settings_name_steq(name, "wifi_ssid", &next) && next == NULL) {
 		if (len == 0U || len > sizeof(preferences.wifi_ssid)) {
 			return 0;
@@ -385,15 +368,6 @@ int papermono_settings_init(void)
 		LOG_ERR("PaperMono settings load failed (%d)", ret);
 		return ret;
 	}
-#ifdef CONFIG_PAPERMONO_RSS_URL
-	/* A legacy record does not carry the feed URL, so it can still be empty
-	 * after the load; fall back to the Kconfig default then.
-	 */
-	if (preferences.rss_url[0] == '\0') {
-		(void)snprintf(preferences.rss_url, sizeof(preferences.rss_url),
-			"%s", CONFIG_PAPERMONO_RSS_URL);
-	}
-#endif
 	const size_t ssid_length = strnlen(preferences.wifi_ssid,
 		sizeof(preferences.wifi_ssid));
 	const size_t psk_length = strnlen(preferences.wifi_psk,
@@ -542,31 +516,6 @@ int papermono_settings_set_timezone(const char *name, int16_t offset_minutes)
 	candidate.timezone_offset_minutes = offset_minutes;
 	const int ret = persist_preferences(&candidate, false);
 
-	k_mutex_unlock(&settings_lock);
-	return ret;
-}
-
-int papermono_settings_set_rss_url(const char *url)
-{
-	if (url != NULL) {
-		const size_t length = strnlen(url, PAPERMONO_RSS_URL_MAX + 1U);
-
-		if (length > PAPERMONO_RSS_URL_MAX) {
-			return -EINVAL;
-		}
-		if (length > 0U && strncmp(url, "http://", 7U) != 0) {
-			return -EINVAL;
-		}
-	}
-	k_mutex_lock(&settings_lock, K_FOREVER);
-	const char *value = url != NULL ? url : "";
-	int ret = settings_save_one("papermono/rss_url", value,
-		strlen(value) + 1U);
-
-	if (ret == 0) {
-		(void)snprintf(preferences.rss_url, sizeof(preferences.rss_url),
-			"%s", value);
-	}
 	k_mutex_unlock(&settings_lock);
 	return ret;
 }

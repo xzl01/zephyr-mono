@@ -30,9 +30,6 @@ void preview_display_result(int result);
 void preview_fs_mount_result(int result);
 void preview_hid_set_state(const struct papermono_hid_state *state);
 void preview_weather_fixture(const char *name);
-void preview_rss_set_feed(const struct papermono_rss_feed *feed);
-void preview_rss_request_result_set(int result);
-unsigned preview_rss_requests(void);
 extern bool papermono_preview_rtc_ready;
 #if defined(CONFIG_PAPERMONO_BLE_MIC)
 void preview_mic_set_state(const struct papermono_ble_mic_state *state);
@@ -318,83 +315,6 @@ int preview_run_assertions(void)
 	preview_sync_active = false;
 	PREVIEW_CHECK(!automatic_sleep_inhibited());
 
-	/* RSS index/detail: production routing, six-row hit grid and body paging.
-	 * The feed is synthetic plain text, exactly the worker's published shape. */
-	struct papermono_rss_feed news_feed = {0};
-	static const char news_sentence[] = "纸页资讯正文用于验证分页行为。";
-	news_feed.valid = true;
-	snprintf(news_feed.title, sizeof(news_feed.title), "纸面资讯");
-	news_feed.count = 2U;
-	snprintf(news_feed.items[0].title, sizeof(news_feed.items[0].title),
-		"第一篇文章：纸上的慢新闻");
-	snprintf(news_feed.items[0].published, sizeof(news_feed.items[0].published),
-		"2026-10-27");
-	for (size_t used = 0U;
-	     used + sizeof(news_sentence) - 1U < sizeof(news_feed.items[0].body);
-	     used += sizeof(news_sentence) - 1U) {
-		memcpy(news_feed.items[0].body + used, news_sentence,
-			sizeof(news_sentence) - 1U);
-	}
-	snprintf(news_feed.items[1].title, sizeof(news_feed.items[1].title),
-		"第二篇文章：设备上的阅读");
-	snprintf(news_feed.items[1].published, sizeof(news_feed.items[1].published),
-		"2026-10-26");
-	snprintf(news_feed.items[1].body, sizeof(news_feed.items[1].body),
-		"短文只有一页。");
-	news_feed.updated_at = 1793000000;
-	preview_rss_set_feed(&news_feed);
-	preview_rss_request_result_set(0);
-	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
-	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
-	PREVIEW_CHECK(news_ui.feed.count == 2U && !news_ui.detail);
-	struct papermono_rect news_row;
-	PREVIEW_CHECK(papermono_interaction_grid_cell_rect(&news_list_grid, 0,
-		&news_row) == 0);
-	event = preview_tap(&news_row);
-	command = (struct papermono_app_command) {0};
-	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
-	PREVIEW_CHECK(news_ui.detail && news_ui.selected == 0U);
-	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_REDRAW);
-	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
-	/* PAPERMONO_RSS_BODY_MAX (511 bytes) fits the 480px viewport at 24px, so
-	 * the production snapshot reports one page here. Inject a two-page count
-	 * to keep the side-key paging branch covered by the event assertion. */
-	PREVIEW_CHECK(news_ui.body_pages == 1U);
-	news_ui.body_pages = 2U;
-	event = (struct papermono_app_event) {
-		.type = PAPERMONO_APP_EVENT_NEXT,
-		.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON, .x = -1, .y = -1,
-	};
-	command = (struct papermono_app_command) {0};
-	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
-	PREVIEW_CHECK(news_ui.body_page == 1U);
-	event.type = PAPERMONO_APP_EVENT_PREVIOUS;
-	command = (struct papermono_app_command) {0};
-	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
-	PREVIEW_CHECK(news_ui.body_page == 0U);
-	news_ui.body_pages = 1U;
-	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
-	/* A tap on the body returns to the index; long press leaves the app. */
-	event = preview_tap(&news_body_rect);
-	command = (struct papermono_app_command) {0};
-	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
-	PREVIEW_CHECK(!news_ui.detail && command.type == PAPERMONO_APP_COMMAND_REDRAW);
-	event = (struct papermono_app_event) {
-		.type = PAPERMONO_APP_EVENT_LONG_PRESS,
-		.source = PAPERMONO_APP_EVENT_SOURCE_BUTTON, .x = -1, .y = -1,
-	};
-	command = (struct papermono_app_command) {0};
-	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
-	PREVIEW_CHECK(command.type == PAPERMONO_APP_COMMAND_BACK);
-	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
-	/* No cached feed and a failing request still renders the error state. */
-	preview_rss_set_feed(NULL);
-	preview_rss_request_result_set(-ENETUNREACH);
-	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
-	PREVIEW_CHECK(news_ui.last_error == -ENETUNREACH);
-	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
-	preview_rss_request_result_set(0);
-
 	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
 	PREVIEW_CHECK(preview_draft_erased());
 	preview_wifi_probe_reset();
@@ -595,44 +515,6 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 #endif
 		return ret < 0 ? ret : papermono_app_router_render(&app_router, screen);
 	}
-	if (strncmp(name, "news", 4) == 0) {
-		struct papermono_rss_feed feed = {0};
-		static const char sentence[] = "纸页资讯正文用于验证分页行为。";
-
-		if (strcmp(name, "news-error") != 0) {
-			feed.valid = true;
-			snprintf(feed.title, sizeof(feed.title), "纸面资讯");
-			snprintf(feed.items[0].title, sizeof(feed.items[0].title),
-				"第一篇文章：纸上的慢新闻");
-			snprintf(feed.items[0].published,
-				sizeof(feed.items[0].published), "2026-10-27");
-			for (size_t used = 0U;
-			     used + sizeof(sentence) - 1U < sizeof(feed.items[0].body);
-			     used += sizeof(sentence) - 1U) {
-				memcpy(feed.items[0].body + used, sentence,
-					sizeof(sentence) - 1U);
-			}
-			snprintf(feed.items[1].title, sizeof(feed.items[1].title),
-				"第二篇文章：设备上的阅读");
-			snprintf(feed.items[1].published,
-				sizeof(feed.items[1].published), "2026-10-26");
-			snprintf(feed.items[1].body, sizeof(feed.items[1].body),
-				"短文只有一页。");
-			feed.count = strcmp(name, "news-empty") == 0 ? 0U : 2U;
-			feed.updated_at = 1793000000;
-		}
-		preview_rss_set_feed(&feed);
-		preview_rss_request_result_set(strcmp(name, "news-error") == 0 ?
-			-ENETUNREACH : 0);
-		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS);
-		if (ret < 0) return ret;
-		if (strcmp(name, "news-detail") == 0) {
-			news_ui.selected = 0U;
-			news_ui.detail = true;
-			news_ui.body_page = 0U;
-		}
-		return papermono_app_router_render(&app_router, screen);
-	}
 	const struct {
 		const char *name;
 		enum papermono_app_id app;
@@ -733,8 +615,7 @@ def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: patch_ui.py <snapshot.c> <preview.c>")
     source = Path(sys.argv[1]).read_text()
-    for symbol in ("static int render_wifi(", "wifi_ui", "PAPERMONO_APP_WIFI",
-                   "static int render_news(", "PAPERMONO_APP_NEWS", "news_ui"):
+    for symbol in ("static int render_wifi(", "wifi_ui", "PAPERMONO_APP_WIFI"):
         if symbol not in source:
             raise SystemExit(f"UI interface changed or incomplete: missing {symbol}")
     Path(sys.argv[2]).write_text(source + GLUE)

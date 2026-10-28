@@ -33,7 +33,6 @@ enum papermono_app_id {
 	/* App IDs are persisted in Settings/NVS. Append new values only. */
 	PAPERMONO_APP_WEREAD = 13,
 	PAPERMONO_APP_WIFI = 14,
-	PAPERMONO_APP_NEWS = 15,
 	PAPERMONO_APP_COUNT,
 };
 
