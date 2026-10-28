@@ -35,11 +35,19 @@
     #content-list span { overflow-wrap: anywhere; flex: 1; }
     #message { min-height: 1.5rem; margin: .5rem 0; }
     #message.error { color: var(--danger); font-weight: 600; }
+    #rss-fields { border: 0; padding: 0; margin: 0; min-width: 0; width: 100%; }
+    #rss-list { width: 100%; }
+    .rss-source { border-top: 1px solid var(--border); padding: .9rem 0; display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(14rem, 2fr) auto; gap: .75rem; align-items: end; }
+    .rss-source .field { min-width: 0; }
+    #rss-message { min-height: 1.5rem; margin: .5rem 0 0; }
+    #rss-message.error { color: var(--danger); }
     progress { width: 100%; height: 1rem; accent-color: var(--focus); }
     .muted { color: var(--muted); }
     @media (max-width: 520px) {
       form > .field, .actions > .field { flex-basis: 100%; }
       form > button, .actions > button { flex: 1; }
+      .rss-source { grid-template-columns: 1fr; }
+      .rss-source button { justify-self: start; }
     }
   </style>
 </head>
@@ -64,6 +72,21 @@
   </section>
 
   <main id="panel" hidden>
+    <section id="rss-panel">
+      <h2>资讯订阅</h2>
+      <p class="muted">设备顶部按此列表切换订阅。每个源单独缓存，下拉只刷新当前源。</p>
+      <form id="rss-form">
+        <fieldset id="rss-fields">
+          <div id="rss-list"></div>
+          <div class="actions">
+            <button id="rss-add" type="button" disabled>新增订阅</button>
+            <button id="rss-save" type="submit" disabled>保存订阅</button>
+            <button id="rss-reload" type="button">重新加载</button>
+          </div>
+        </fieldset>
+      </form>
+      <p id="rss-message" role="status" aria-live="polite"></p>
+    </section>
     <section>
       <h2>内容</h2>
       <div class="actions">
@@ -118,6 +141,20 @@
     const kindInput = document.querySelector("#kind");
     const uploadButton = document.querySelector("#upload-button");
     const uploadProgress = document.querySelector("#upload-progress");
+    const rssPanel = document.querySelector("#rss-panel");
+    const rssForm = document.querySelector("#rss-form");
+    const rssFields = document.querySelector("#rss-fields");
+    const rssList = document.querySelector("#rss-list");
+    const rssMessage = document.querySelector("#rss-message");
+    const rssAdd = document.querySelector("#rss-add");
+    const rssSave = document.querySelector("#rss-save");
+    let rssSources = [];
+    let rssLimit = 4;
+    let rssDirty = false;
+    let rssLoaded = false;
+    let rssEditVersion = 0;
+    let rssLoadSerial = 0;
+    let rssLoading = false;
     let token = "";
 
     function setMessage(text, error = false) {
@@ -177,11 +214,161 @@
         storeToken("");
         pairPanel.hidden = false;
         panel.hidden = true;
-        throw new Error("会话已失效，请重新输入设备配对码");
+        const error = new Error("会话已失效，请重新输入设备配对码");
+        error.status = 401;
+        throw error;
       }
-      if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
+      if (!response.ok) {
+        let explanation = text || `HTTP ${response.status}`;
+        try { const data = JSON.parse(text); explanation = data.message || data.error || explanation; } catch (_) {}
+        const error = new Error(explanation);
+        error.status = response.status;
+        throw error;
+      }
       return text;
     }
+
+    function setRssMessage(text, error = false) {
+      rssMessage.textContent = text;
+      rssMessage.classList.toggle("error", error);
+    }
+
+    function renderRssSources() {
+      rssList.replaceChildren();
+      if (!rssSources.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "还没有订阅。新增后保存，即可在设备上阅读。";
+        rssList.append(empty);
+      }
+      for (const source of rssSources) {
+        const row = document.createElement("div");
+        row.className = "rss-source";
+        for (const [key, labelText, placeholder] of [
+          ["name", "订阅名称", "例如：金价"],
+          ["url", "RSS 地址", "http://…"]
+        ]) {
+          const label = document.createElement("label");
+          label.className = "field";
+          const caption = document.createElement("span");
+          caption.textContent = labelText;
+          const input = document.createElement("input");
+          input.type = key === "url" ? "url" : "text";
+          input.required = true;
+          input.value = source[key];
+          input.placeholder = placeholder;
+          input.autocomplete = "off";
+          input.spellcheck = false;
+          input.addEventListener("input", () => { source[key] = input.value; rssDirty = true; ++rssEditVersion; });
+          label.append(caption, input);
+          row.append(label);
+        }
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "移除";
+        remove.setAttribute("aria-label", `移除订阅 ${source.name || "未命名"}`);
+        remove.addEventListener("click", () => {
+          rssSources = rssSources.filter(item => item.id !== source.id);
+          rssDirty = true;
+          ++rssEditVersion;
+          renderRssSources();
+          setRssMessage("已从列表移除，保存后生效。");
+        });
+        row.append(remove);
+        rssList.append(row);
+      }
+      rssAdd.disabled = !rssLoaded || rssSources.length >= rssLimit;
+      rssSave.disabled = !rssLoaded || rssLoading;
+    }
+
+    async function refreshRssSources() {
+      const editVersion = rssEditVersion;
+      const serial = ++rssLoadSerial;
+      rssLoading = true;
+      rssSave.disabled = true;
+      document.querySelector("#rss-reload").disabled = true;
+      try {
+        const data = JSON.parse(await request("/api/v1/rss/sources", { cache: "no-store" }));
+        if (serial !== rssLoadSerial) return;
+        if (editVersion !== rssEditVersion) {
+          setRssMessage("读取期间有新修改，当前输入已保留；需要时可重新加载。");
+          return;
+        }
+        rssLimit = data.max_sources || 4;
+        rssSources = data.sources.map(source => ({ id: source.id, name: source.name, url: source.url }));
+        rssDirty = false;
+        rssLoaded = true;
+        rssPanel.hidden = false;
+        renderRssSources();
+        setRssMessage(`可保存最多 ${rssLimit} 个订阅。`);
+      } catch (error) {
+        if (error.status === 401) throw error;
+        if (serial !== rssLoadSerial) return;
+        if (error.status === 404) { rssPanel.hidden = true; return; }
+        setRssMessage(`读取订阅失败：${error.message}`, true);
+      } finally {
+        if (serial === rssLoadSerial) {
+          rssLoading = false;
+          rssSave.disabled = !rssLoaded;
+          document.querySelector("#rss-reload").disabled = false;
+        }
+      }
+    }
+
+    rssAdd.addEventListener("click", () => {
+      if (!rssLoaded || rssSources.length >= rssLimit) return;
+      let id;
+      do { id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.slice(0, 15); }
+      while (rssSources.some(source => source.id === id));
+      rssSources.push({ id, name: "", url: "" });
+      rssDirty = true;
+      ++rssEditVersion;
+      renderRssSources();
+      rssList.lastElementChild.querySelector("input").focus();
+      setRssMessage("填写名称和 http:// 地址，保存后生效。");
+    });
+
+    rssForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (!rssLoaded || rssLoading) return;
+      const encoder = new TextEncoder();
+      const sources = rssSources.map(source => ({ id: source.id, name: source.name.trim(), url: source.url.trim() }));
+      try {
+        for (const source of sources) {
+          if (!source.name || encoder.encode(source.name).length > 47) throw new Error("订阅名称为空或过长，请缩短名称");
+          let address;
+          try { address = new URL(source.url); }
+          catch (_) { throw new Error("RSS 地址格式不正确，请填写完整的 http:// 地址"); }
+          if (address.protocol !== "http:" || address.username || address.password || address.hash || encoder.encode(source.url).length > 191 || /\s/.test(source.url)) {
+            throw new Error("请填写有效的 http:// RSS 地址，不包含账号、密码或空格");
+          }
+        }
+        rssFields.disabled = true;
+        ++rssEditVersion;
+        rssForm.setAttribute("aria-busy", "true");
+        setRssMessage("正在保存订阅…");
+        await request("/api/v1/rss/sources", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sources })
+        });
+        rssSources = sources;
+        rssDirty = false;
+        renderRssSources();
+        setRssMessage("订阅已保存。设备可切换新栏目，打开或下拉时更新内容。");
+      } catch (error) {
+        setRssMessage(`保存失败：${error.message}。当前输入已保留。`, true);
+      } finally {
+        rssFields.disabled = false;
+        rssForm.setAttribute("aria-busy", "false");
+        rssAdd.disabled = !rssLoaded || rssSources.length >= rssLimit;
+      }
+    });
+
+    document.querySelector("#rss-reload").addEventListener("click", async () => {
+      if (rssDirty && !confirm("重新加载会放弃未保存的订阅修改，继续吗？")) return;
+      try { await refreshRssSources(); }
+      catch (error) { setMessage(error.message, true); }
+    });
 
     function encodeName(name) {
       const bytes = new TextEncoder().encode(name);
@@ -328,6 +515,7 @@
         panel.hidden = false;
         setMessage("本地会话已建立");
         await refreshContent();
+        await refreshRssSources();
       } catch (error) {
         setMessage(`配对失败：${error.message}`, true);
       } finally {
@@ -372,6 +560,7 @@
         try {
           await redeemTicket(handoffTicket);
           await refreshContent();
+          await refreshRssSources();
           pairPanel.hidden = true;
           panel.hidden = false;
           setMessage("已恢复本地会话");
@@ -386,6 +575,7 @@
       if (!token) return;
       try {
         await refreshContent();
+        await refreshRssSources();
         pairPanel.hidden = true;
         panel.hidden = false;
         setMessage("已恢复本地会话");

@@ -217,6 +217,17 @@ cc -std=c17 -Wall -Wextra -Werror -Iinclude \
 	-o "$build_dir/test_quotes"
 "$build_dir/test_quotes"
 cc -std=c17 -Wall -Wextra -Werror -Iinclude \
-	tests/host/test_rss.c src/papermono_rss.c \
+	tests/host/test_rss.c src/papermono_rss.c src/papermono_rss_table.c \
 	-o "$build_dir/test_rss"
 "$build_dir/test_rss"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_rss_table.c src/papermono_rss_table.c \
+	-o "$build_dir/test_rss_table"
+"$build_dir/test_rss_table"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_rss_sources.c -o "$build_dir/test_rss_sources"
+"$build_dir/test_rss_sources"
+python3 tests/host/test_rss_refresh.py
+python3 tests/host/test_rss_network.py
+python3 tests/host/test_rss_sources_endpoint.py
+python3 tests/host/test_rss_sources_web.py

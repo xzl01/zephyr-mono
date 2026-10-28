@@ -14,7 +14,11 @@ PAGES = ["settings", "sleep", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-pas
          "wifi-symbols", "wifi-63chars", "wifi-connecting", "wifi-failure",
          "wifi-scan-failure", "wifi-empty", "wifi-forget",
          "home", "launcher-1", "launcher-2", "library", "weread", "calendar",
-         "news", "news-detail", "news-empty", "news-error", "article-long",
+         "news", "news-detail", "news-empty", "news-error", "news-syncing",
+         "news-cached-error", "article-long",
+         "news-ai", "news-four-sources", "news-no-sources", "news-table",
+         "news-table-wide", "news-table-long", "news-table-after",
+         "news-table-dense",
          "tasks", "notes", "info", "content-center", "remote", "remote-pairing",
          "remote-passkey", "remote-media", "remote-presentation", "remote-mouse",
          "tools", "system",
@@ -24,7 +28,7 @@ MODULES = ["app", "interaction", "settings", "content_store", "content_validatio
            "organizer", "reader", "personal_data", "text_codec", "text_layout",
            "reader_cache", "epub", "archive_safety", "weread", "weread_view",
            "info_provider", "touch_gesture", "wifi_input", "fs_read",
-           "almanac", "quotes"]
+           "almanac", "quotes", "rss_table"]
 EXCLUDED = {"drivers", "others"}
 EXCLUDED_LIBS = {"freetype", "tiny_ttf", "lodepng", "libpng", "bmp", "tjpgd",
                  "libjpeg_turbo", "libwebp", "gif", "qrcode", "barcode", "rlottie",

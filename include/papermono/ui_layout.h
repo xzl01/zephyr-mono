@@ -53,6 +53,9 @@ static const struct papermono_rect wifi_connect_rect = {22, 292, 436, 54};
 #define NEWS_BODY_BOTTOM 744
 #define NEWS_FOOTER_Y 756
 #define NEWS_LINE_SPACE 4
+/* The source strip replaces the old feed-title line; the list's eight rows
+ * and metadata band retain their existing positions. */
+static const struct papermono_rect news_sources_rect = {22, 12, 436, 44};
 static const struct papermono_interaction_grid_layout news_list_grid = {
 	.x = 22, .y = 80, .cell_width = 436, .cell_height = 78,
 	.column_gap = 0, .row_gap = 4, .columns = 1, .rows = 8,

@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include <papermono/rss.h>
+#include <papermono/rss_table.h>
 
 /* Host-only seams of src/papermono_rss.c. */
 extern void papermono_rss_test_set_cache_dir(const char *directory);
@@ -848,6 +849,341 @@ static void test_malformed_input(void)
 	assert(papermono_rss_test_load() < 0);
 }
 
+static void table_html(const char *html)
+{
+	size_t offset = append_feed_open(0U, "Tables");
+
+	offset = append_text(offset, "<item><title>Table article</title><description><![CDATA[");
+	offset = append_text(offset, html);
+	offset = append_text(offset, "]]></description></item>");
+	offset = append_feed_close(offset);
+	begin_test();
+	ingest(xml_buffer, offset);
+	assert(papermono_rss_body_load(0U, body_buffer, sizeof(body_buffer)) >= 0);
+}
+
+/* Decode independently of the renderer to check the whole cached result,
+ * including characters adjoining a skipped malformed source byte.
+ */
+static void assert_valid_utf8(const char *text, size_t length)
+{
+	for (size_t i = 0U; i < length;) {
+		const unsigned char lead = (unsigned char)text[i++];
+		unsigned int code_point;
+		unsigned int minimum;
+		size_t remaining;
+
+		if (lead < 0x80U) continue;
+		if (lead >= 0xC2U && lead <= 0xDFU) {
+			code_point = lead & 0x1FU;
+			minimum = 0x80U;
+			remaining = 1U;
+		} else if (lead >= 0xE0U && lead <= 0xEFU) {
+			code_point = lead & 0x0FU;
+			minimum = 0x800U;
+			remaining = 2U;
+		} else {
+			assert(lead >= 0xF0U && lead <= 0xF4U);
+			code_point = lead & 0x07U;
+			minimum = 0x10000U;
+			remaining = 3U;
+		}
+		assert(remaining <= length - i);
+		while (remaining-- > 0U) {
+			const unsigned char continuation = (unsigned char)text[i++];
+			assert((continuation & 0xC0U) == 0x80U);
+			code_point = (code_point << 6U) | (continuation & 0x3FU);
+		}
+		assert(code_point >= minimum && code_point <= 0x10FFFFU);
+		assert(code_point < 0xD800U || code_point > 0xDFFFU);
+	}
+}
+
+static void test_utf8_scalars(void)
+{
+	static const char *const invalid[] = {
+		"\x80", "\xBF", "\xC0\x80", "\xC1\xBF",
+		"\xC2", "\xDF", "\xE0", "\xE0\xA0", "\xE1\x80",
+		"\xED\x9F", "\xEF\xBF", "\xF0", "\xF0\x90",
+		"\xF0\x90\x80", "\xF1\x80\x80", "\xF4\x8F\xBF",
+		"\xE0\x80\x80", "\xE0\x9F\xBF", "\xED\xA0\x80",
+		"\xED\xBF\xBF", "\xF0\x80\x80\x80", "\xF0\x8F\xBF\xBF",
+		"\xF4\x90\x80\x80", "\xF4\xBF\xBF\xBF",
+		"\xF5\x80\x80\x80", "\xF8\x80\x80\x80\x80", "\xFF",
+	};
+	static const char boundaries[] =
+		"\xC2\x80\xDF\xBF\xE0\xA0\x80\xED\x9F\xBF"
+		"\xEE\x80\x80\xEF\xBF\xBF\xF0\x90\x80\x80"
+		"\xF3\xBF\xBF\xBF\xF4\x8F\xBF\xBF";
+	char html[256];
+
+	for (size_t i = 0U; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+		(void)snprintf(html, sizeof(html),
+			"<p>A%s中<b>B</b></p><table><tr><td>C%s</td>"
+			"<td>右</td></tr></table>", invalid[i], invalid[i]);
+		table_html(html);
+		assert(strcmp(body_buffer, "A中B\n\n" PAPERMONO_RSS_TABLE_BEGIN
+			PAPERMONO_RSS_TABLE_ROW "C\t右\n" PAPERMONO_RSS_TABLE_END) == 0);
+		assert_valid_utf8(body_buffer, strlen(body_buffer));
+
+		/* An incomplete source unit at the field boundary is not cached. */
+		(void)snprintf(html, sizeof(html), "A%s", invalid[i]);
+		table_html(html);
+		assert(strcmp(body_buffer, "A") == 0);
+	}
+	(void)snprintf(html, sizeof(html), "A%s中", boundaries);
+	table_html(html);
+	assert(strcmp(body_buffer, html) == 0);
+	assert_valid_utf8(body_buffer, strlen(body_buffer));
+
+	/* A bad lead cannot swallow a tag boundary, a quote, or the first byte
+	 * of a following valid scalar; markup stays hidden and cells stay aligned. */
+	table_html("<table><tr><td title='\xC2'><!--\xE1--><script>\xF1</script>"
+		"A\xC2</td><td>中</td></tr></table>");
+	assert(strcmp(body_buffer, PAPERMONO_RSS_TABLE_BEGIN
+		PAPERMONO_RSS_TABLE_ROW "A\t中\n" PAPERMONO_RSS_TABLE_END) == 0);
+	table_html("<p>h中 https://example.com/中文。</p>");
+	assert(strcmp(body_buffer, "h中 example.com/中文。") == 0);
+	assert_valid_utf8(body_buffer, strlen(body_buffer));
+
+	/* URL collection reaching its fixed byte limit also keeps a scalar whole. */
+	size_t length = (size_t)snprintf(xml_buffer, sizeof(xml_buffer),
+		"<p>https://example.com/");
+	for (size_t i = 0U; i < 300U; ++i) {
+		memcpy(xml_buffer + length, "中", 3U);
+		length += 3U;
+	}
+	(void)snprintf(xml_buffer + length, sizeof(xml_buffer) - length, "</p>");
+	/* table_html writes xml_buffer itself, so keep the source separate. */
+	char url_html[1024];
+	memcpy(url_html, xml_buffer, length + sizeof("</p>"));
+	table_html(url_html);
+	assert_valid_utf8(body_buffer, strlen(body_buffer));
+}
+
+static void test_utf8_control_boundaries(void)
+{
+	static const struct {
+		unsigned char lead;
+		size_t length;
+	} leads[] = {
+		{ 0xC2U, 2U }, { 0xDFU, 2U }, { 0xE0U, 3U },
+		{ 0xE1U, 3U }, { 0xEDU, 3U }, { 0xEFU, 3U },
+		{ 0xF0U, 4U }, { 0xF1U, 4U }, { 0xF4U, 4U },
+		{ 0xF5U, 4U }, { 0xFFU, 4U },
+	};
+	size_t offset = append_feed_open(0U, "Controls");
+	size_t expected_rows = 0U;
+
+	offset = append_text(offset,
+		"<item><title>T</title><description><![CDATA[<table>");
+	/* All C0 values, at every continuation position of each lead class.
+	 * Explicit lengths retain embedded NUL bytes in the ingest input. */
+	for (size_t l = 0U; l < sizeof(leads) / sizeof(leads[0]); ++l) {
+		for (size_t position = 1U; position < leads[l].length; ++position) {
+			for (unsigned int control = 0U; control < 0x20U; ++control) {
+				offset = append_text(offset, "<tr><td>A");
+				xml_buffer[offset++] = (char)leads[l].lead;
+				for (size_t p = 1U; p < leads[l].length; ++p) {
+					xml_buffer[offset++] = p == position ?
+						(char)control : (char)0x80U;
+				}
+				offset = append_text(offset, "B</td><td>中</td></tr>");
+				++expected_rows;
+			}
+		}
+	}
+	offset = append_text(offset, "</table>]]></description></item>");
+	offset = append_feed_close(offset);
+	begin_test();
+	ingest(xml_buffer, offset);
+	assert(papermono_rss_test_load() == 1);
+	papermono_rss_get(&current);
+	assert(papermono_rss_body_load(0U, body_buffer, sizeof(body_buffer)) > 0);
+	assert_valid_utf8(body_buffer, strlen(body_buffer));
+	struct papermono_rss_block block;
+	size_t cursor = 0U;
+	assert(papermono_rss_block_next(body_buffer, strlen(body_buffer), &cursor, &block));
+	assert(block.kind == PAPERMONO_RSS_BLOCK_TABLE && block.table.complete);
+	assert(block.table.row_count == expected_rows && block.table.column_count == 2U);
+	size_t row_cursor = 0U;
+	for (size_t l = 0U; l < sizeof(leads) / sizeof(leads[0]); ++l) {
+		for (size_t position = 1U; position < leads[l].length; ++position) {
+			for (unsigned int control = 0U; control < 0x20U; ++control) {
+				struct papermono_rss_table_row row;
+				struct papermono_rss_slice cell;
+				size_t cell_cursor = 0U;
+				const char *expected = control >= 9U && control <= 13U ?
+					"A B" : "AB";
+
+				assert(papermono_rss_table_row_next(&block.table, &row_cursor, &row));
+				assert(row.column_count == 2U && !row.header);
+				assert(papermono_rss_table_cell_next(&row, &cell_cursor, &cell));
+				assert(cell.length == strlen(expected));
+				assert(memcmp(cell.text, expected, cell.length) == 0);
+				assert(papermono_rss_table_cell_next(&row, &cell_cursor, &cell));
+				assert(cell.length == strlen("中") && memcmp(cell.text, "中", cell.length) == 0);
+				assert(!papermono_rss_table_cell_next(&row, &cell_cursor, &cell));
+			}
+		}
+	}
+	assert(!papermono_rss_block_next(body_buffer, strlen(body_buffer), &cursor, &block));
+
+	/* A malformed prefix cannot smuggle any complete codec record into
+	 * ordinary text, even when followed by tabs/newlines and valid CJK. */
+	table_html("\xC2\x1eT1\n\xE1\x80\x1eH\tInjected\n"
+		"\xF1\x80\x80\x1eR\tFake\n\xFF\x1e" "E\n<p>中</p>");
+	assert(strchr(body_buffer, '\x1e') == NULL);
+	assert(strstr(body_buffer, "中") != NULL);
+	assert_valid_utf8(body_buffer, strlen(body_buffer));
+	cursor = 0U;
+	while (papermono_rss_block_next(body_buffer, strlen(body_buffer), &cursor, &block)) {
+		assert(block.kind == PAPERMONO_RSS_BLOCK_TEXT);
+	}
+}
+
+static void test_utf8_titles(void)
+{
+	size_t offset = append_feed_open(0U, "A\xC2\t中\xED\xA0\x80Z");
+
+	offset = append_text(offset, "<item><title>A\xF1\x80\x1e中&#30;Z</title>"
+		"<description>body</description></item>");
+	offset = append_feed_close(offset);
+	begin_test();
+	ingest(xml_buffer, offset);
+	assert(strcmp(current.title, "A 中Z") == 0);
+	assert(strcmp(current.items[0].title, "A中Z") == 0);
+	assert_valid_utf8(current.title, strlen(current.title));
+	assert_valid_utf8(current.items[0].title, strlen(current.items[0].title));
+
+	/* Entity output must be atomic too: a title boundary never stores only
+	 * the first one or two bytes of a decoded multi-byte character. */
+	offset = append_feed_open(0U, "T");
+	offset = append_text(offset, "<item><title>");
+	offset = append_repeat(offset, 'A', PAPERMONO_RSS_TITLE_MAX - 1U);
+	offset = append_text(offset, "&#x4E2D;Z</title><description>body</description></item>");
+	offset = append_feed_close(offset);
+	begin_test();
+	ingest(xml_buffer, offset);
+	assert(strlen(current.items[0].title) == PAPERMONO_RSS_TITLE_MAX - 1U);
+	assert_valid_utf8(current.items[0].title, strlen(current.items[0].title));
+}
+
+static void test_html_tables(void)
+{
+	table_html("<p>前文</p><table><caption>行情摘要</caption><thead><tr>"
+		"<th>品种</th><th>价&nbsp;格</th><th></th></tr></thead><tbody>"
+		"<tr><td><b>AU</b>USD</td><td>1&amp;2<br>3</td><td></td></tr>"
+		"</tbody></table><p>后文</p>");
+	assert(strcmp(body_buffer, "前文\n\n行情摘要\n\n"
+		PAPERMONO_RSS_TABLE_BEGIN PAPERMONO_RSS_TABLE_HEADER "品种\t价格\t\n"
+		PAPERMONO_RSS_TABLE_ROW "AUUSD\t1&2 3\t\n"
+		PAPERMONO_RSS_TABLE_END "\n\n后文") == 0);
+
+	table_html("before<table><tr><td>one</td></tr></table>between"
+		"<table><tr><th>two</th></tr></table>after");
+	const char *first = strstr(body_buffer, PAPERMONO_RSS_TABLE_BEGIN);
+	assert(first != NULL);
+	const char *middle = strstr(first, "between");
+	const char *second = strstr(first + 4U, PAPERMONO_RSS_TABLE_BEGIN);
+	assert(middle != NULL && second != NULL && first < middle && middle < second);
+	assert(strstr(second, "after") != NULL);
+
+	/* Merged cells expand to explicit empty placeholders, preserving the
+	 * original columns for subsequent rows rather than shifting values left. */
+	table_html("<table><tr><th>A</th><th>B</th><th>C</th></tr>"
+		"<tr><td colspan='2' rowspan=2>X</td><td>Y</td></tr>"
+		"<tr><td>Z</td></tr></table>");
+	assert(strcmp(body_buffer, PAPERMONO_RSS_TABLE_BEGIN
+		PAPERMONO_RSS_TABLE_HEADER "A\tB\tC\n"
+		PAPERMONO_RSS_TABLE_ROW "X\t\tY\n"
+		PAPERMONO_RSS_TABLE_ROW "\t\tZ\n"
+		PAPERMONO_RSS_TABLE_END) == 0);
+
+	/* A nested table is only inline content of its outer cell. */
+	table_html("<table><tr><td>left<table><tr><td>inside1</td>"
+		"<td>inside2</td></tr></table>tail</td><td>right</td></tr></table>");
+	assert(strcmp(body_buffer, PAPERMONO_RSS_TABLE_BEGIN
+		PAPERMONO_RSS_TABLE_ROW "left inside1 inside2 tail\tright\n"
+		PAPERMONO_RSS_TABLE_END) == 0);
+
+	/* Missing cell/row/table end tags are repaired at the body boundary. */
+	table_html("<table><tr><td>a<td>b");
+	assert(strcmp(body_buffer, PAPERMONO_RSS_TABLE_BEGIN
+		PAPERMONO_RSS_TABLE_ROW "a\tb\n" PAPERMONO_RSS_TABLE_END) == 0);
+
+	/* Private record bytes may only originate in the converter. */
+	table_html("pre&#30;T1\n&#30;H\tA\n&#30;R\tB\n&#30;Epost\x1e");
+	assert(strchr(body_buffer, '\x1e') == NULL);
+	assert(strstr(body_buffer, "preT1") != NULL);
+
+	/* Unsupported spans preserve visible content with an explicit sequential
+	 * fallback, never silently map it to the wrong grid columns. */
+	table_html("<table><tr><td colspan='999999'>preserved</td><td>next</td></tr></table>");
+	assert(strstr(body_buffer, "按单元格顺序显示") != NULL);
+	assert(strstr(body_buffer, "preserved | next") != NULL);
+	assert(strstr(body_buffer, PAPERMONO_RSS_TABLE_BEGIN) == NULL);
+	table_html("<table><tr><td rowspan='0'>kept</td></tr></table>");
+	assert(strstr(body_buffer, "按单元格顺序显示") != NULL && strstr(body_buffer, "kept") != NULL);
+
+	/* A quoted > in an unrelated attribute does not hide later spans. */
+	table_html("<table><tr><td title='> inside' colspan='2'>pair</td><td>third</td></tr></table>");
+	assert(strstr(body_buffer, PAPERMONO_RSS_TABLE_ROW "pair\t\tthird\n") != NULL);
+	table_html("<table><tr><td title='属性不显示'><!--评论不显示-->"
+		"<script>脚本不显示</script><style>样式不显示</style>可见</td></tr></table>");
+	assert(strcmp(body_buffer, PAPERMONO_RSS_TABLE_BEGIN
+		PAPERMONO_RSS_TABLE_ROW "可见\n" PAPERMONO_RSS_TABLE_END) == 0);
+
+	char html[2048];
+	size_t length = (size_t)snprintf(html, sizeof(html), "<table><tr><th>长格</th></tr><tr><td>");
+	for (unsigned int i = 0U; i < 180U; ++i) {
+		memcpy(html + length, "长", 3U);
+		length += 3U;
+	}
+	(void)snprintf(html + length, sizeof(html) - length, "</td></tr></table>");
+	table_html(html);
+	const char *long_cell = strstr(body_buffer, PAPERMONO_RSS_TABLE_ROW);
+	assert(long_cell != NULL);
+	long_cell += 3U;
+	assert(strchr(long_cell, '\n') - long_cell == 540);
+
+	/* Ordinary wide tables are not limited by the merged-cell tracking
+	 * budget. Every column remains represented in the streamed codec. */
+	length = (size_t)snprintf(html, sizeof(html), "<table><tr>");
+	for (unsigned int i = 0U; i < 40U; ++i) {
+		length += (size_t)snprintf(html + length, sizeof(html) - length,
+			"<td>%u</td>", i);
+	}
+	(void)snprintf(html + length, sizeof(html) - length, "</tr><tr></tr></table>");
+	table_html(html);
+	assert(strstr(body_buffer, "\t38\t39\n") != NULL);
+	assert(strstr(body_buffer, "按单元格顺序显示") == NULL);
+	assert(strstr(body_buffer, PAPERMONO_RSS_TABLE_ROW "\n") != NULL);
+	table_html("<table><tr><td/><td>kept</td></tr></table>");
+	assert(strstr(body_buffer, PAPERMONO_RSS_TABLE_ROW "\tkept\n") != NULL);
+
+	length = (size_t)snprintf(html, sizeof(html), "<table><tr><td title='");
+	memset(html + length, 'x', 256U); length += 256U;
+	(void)snprintf(html + length, sizeof(html) - length,
+		"' colspan='2'>attributes kept</td><td>last</td></tr></table>");
+	table_html(html);
+	assert(strstr(body_buffer, "按单元格顺序显示") != NULL);
+	assert(strstr(body_buffer, "attributes kept | last") != NULL);
+
+	/* Once a UTF-8 unit exceeds the body limit, later ASCII/control records
+	 * must not fill the leftover byte and alter a truncated cell's content. */
+	static char large_html[PAPERMONO_RSS_BODY_MAX + 128U];
+	length = (size_t)snprintf(large_html, sizeof(large_html), "<table><tr><td>");
+	memset(large_html + length, 'x', PAPERMONO_RSS_BODY_MAX - 8U);
+	length += PAPERMONO_RSS_BODY_MAX - 8U;
+	(void)snprintf(large_html + length, sizeof(large_html) - length,
+		"长Z</td></tr></table>");
+	table_html(large_html);
+	assert(strlen(body_buffer) == PAPERMONO_RSS_BODY_MAX - 1U);
+	assert(strchr(body_buffer, 'Z') == NULL);
+	assert(strstr(body_buffer, PAPERMONO_RSS_TABLE_END) == NULL);
+}
+
 int main(void)
 {
 	test_corpus_index();
@@ -881,6 +1217,10 @@ int main(void)
 	test_body_cache_total_limit();
 	test_commit_recovery();
 	test_malformed_input();
+	test_html_tables();
+	test_utf8_scalars();
+	test_utf8_control_boundaries();
+	test_utf8_titles();
 	(void)system("rm -rf " TEST_CACHE_DIR);
 	puts("rss feed parsing and SD cache: PASS");
 	return 0;

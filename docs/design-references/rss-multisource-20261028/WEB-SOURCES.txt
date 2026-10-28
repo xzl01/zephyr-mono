@@ -1,0 +1,4 @@
+Actual embedded content-center HTML, synthetic localhost API; desktop 1280px, mobile 390x844.
+385696459c39ca378578f023a0403d1a8675a48d36aab11d78d584ddb123ef58  src/web/content-center.html
+06496c7c29b00e66551bf0e89b5998fe4d03071f81afcb6e9381f5c41846d120  tests/host/preview_content_web.py
+2448a0c05cd9c825c1950f55b33fb1d6d07827179987c2d76442eeec9c7503a2  tests/host/test_rss_sources_web.py

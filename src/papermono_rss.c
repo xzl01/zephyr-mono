@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include <papermono/rss.h>
+#include <papermono/rss_table.h>
 
 #if defined(__ZEPHYR__)
 #include <time.h>
@@ -51,10 +52,9 @@ LOG_MODULE_REGISTER(papermono_rss, LOG_LEVEL_INF);
 /* Largest feed body / all bodies kept on the SD card, per the public header. */
 #define RSS_BODY_LIMIT ((size_t)PAPERMONO_RSS_BODY_MAX)
 #define RSS_BODIES_TOTAL_MAX (256U * 1024U)
-/* The cache is refreshed only when the news page is opened and is older than
- * this; there is no background polling.
+/* Every news-page open checks the source; the SD cache remains readable while
+ * that request runs. There is no background polling or cache-age gate.
  */
-#define RSS_CACHE_FRESH_SECONDS (30U * 60U)
 #define RSS_FETCH_ATTEMPTS 3U
 #define RSS_FETCH_RETRY_MS 20000U
 #define RSS_IPV4_WAIT_MS 30000U
@@ -399,6 +399,9 @@ static bool rss_sink_put(struct rss_sink *sink, const char *data, size_t length)
 		return true;
 	}
 	sink->total += length;
+	if (sink->overflow) {
+		return true;
+	}
 	if (sink->stored + length > sink->limit) {
 		sink->overflow = true;
 		return true;
@@ -439,18 +442,47 @@ static void rss_plain_put(struct rss_plain_writer *writer, const char *data,
 	}
 }
 
-static size_t rss_utf8_sequence_length(unsigned char lead)
+/* A source unit is accepted only when it is a complete Unicode scalar.
+ * Invalid bytes are skipped individually by callers, so an ASCII delimiter
+ * after a bad lead still reaches the HTML/control-character scanner.
+ */
+static size_t rss_utf8_scalar_length(const char *text, size_t available)
 {
-	if (lead >= 0xF0U) {
-		return 4U;
+	if (available == 0U) {
+		return 0U;
 	}
-	if (lead >= 0xE0U) {
-		return 3U;
+	const unsigned char lead = (unsigned char)text[0];
+	size_t length;
+
+	if (lead < 0x80U) {
+		return 1U;
 	}
-	if (lead >= 0xC0U) {
-		return 2U;
+	if (lead >= 0xC2U && lead <= 0xDFU) {
+		length = 2U;
+	} else if (lead >= 0xE0U && lead <= 0xEFU) {
+		length = 3U;
+	} else if (lead >= 0xF0U && lead <= 0xF4U) {
+		length = 4U;
+	} else {
+		return 0U;
 	}
-	return 1U;
+	if (length > available) {
+		return 0U;
+	}
+	for (size_t i = 1U; i < length; ++i) {
+		if (((unsigned char)text[i] & 0xC0U) != 0x80U) {
+			return 0U;
+		}
+	}
+	const unsigned char second = (unsigned char)text[1];
+
+	if ((lead == 0xE0U && second < 0xA0U) ||
+	    (lead == 0xEDU && second >= 0xA0U) ||
+	    (lead == 0xF0U && second < 0x90U) ||
+	    (lead == 0xF4U && second >= 0x90U)) {
+		return 0U;
+	}
+	return length;
 }
 
 static void rss_render_title_text(const char *text, size_t length,
@@ -472,13 +504,14 @@ static void rss_render_title_text(const char *text, size_t length,
 						  decoded, &consumed);
 
 			if (written > 0U) {
-				for (size_t i = 0U; i < written; ++i) {
-					if (rss_is_space(decoded[i])) {
+				if (written == 1U) {
+					if (rss_is_space(decoded[0])) {
 						writer.pending_space = true;
-					} else {
-						rss_plain_put(&writer,
-							      &decoded[i], 1U);
+					} else if ((unsigned char)decoded[0] >= 0x20U) {
+						rss_plain_put(&writer, decoded, 1U);
 					}
+				} else {
+					rss_plain_put(&writer, decoded, written);
 				}
 				index += consumed;
 				continue;
@@ -489,16 +522,18 @@ static void rss_render_title_text(const char *text, size_t length,
 		if (lead < 0x80U) {
 			if (rss_is_space((char)lead)) {
 				writer.pending_space = true;
-			} else {
+			} else if (lead >= 0x20U) {
 				rss_plain_put(&writer, text + index, 1U);
 			}
 			++index;
 			continue;
 		}
-		size_t sequence = rss_utf8_sequence_length(lead);
+		const size_t sequence =
+			rss_utf8_scalar_length(text + index, length - index);
 
-		if (sequence > length - index) {
-			sequence = length - index;
+		if (sequence == 0U) {
+			++index;
+			continue;
 		}
 		rss_plain_put(&writer, text + index, sequence);
 		index += sequence;
@@ -557,6 +592,9 @@ static size_t rss_render_title_to_buffer(const char *text, size_t length,
 #define RSS_HTML_DISPLAY_MAX 48U
 #define RSS_HTML_INDENT_MAX 3U
 #define RSS_HTML_RAW_TAG_MAX 8U
+#define RSS_HTML_ATTR_MAX 192U
+#define RSS_HTML_TABLE_COLUMNS 32U
+#define RSS_HTML_TABLE_ROWSPAN 64U
 
 struct rss_line_writer {
 	struct rss_sink *sink;
@@ -734,9 +772,31 @@ struct rss_html_render {
 	bool heading_pending_space;
 	bool heading_overflow;
 	bool prev_word_char;
+	char attributes[RSS_HTML_ATTR_MAX];
+	size_t attributes_length;
+	bool attributes_overflow;
+	unsigned int table_depth;
+	unsigned int table_saved_indent;
+	unsigned int table_column;
+	unsigned int table_cell_start;
+	unsigned int table_colspan;
+	unsigned int table_rowspan;
+	unsigned int table_plain_cells;
+	uint8_t table_rowspans[RSS_HTML_TABLE_COLUMNS];
+	bool table_grid_open;
+	bool table_row_open;
+	bool table_row_started;
+	bool table_cell_open;
+	bool table_plain;
+	bool table_caption;
 };
 
 static void rss_html_feed_ascii(struct rss_html_render *render, char ch);
+static void rss_html_text_ascii(struct rss_html_render *render, char ch);
+static void rss_html_table_text_prepare(struct rss_html_render *render);
+static void rss_html_entity_flush(struct rss_html_render *render);
+static void rss_url_append(struct rss_html_render *render, const char *data,
+			   size_t length);
 
 static bool rss_tag_is(const char *name, size_t length, const char *literal)
 {
@@ -809,28 +869,37 @@ static void rss_html_text_units(struct rss_html_render *render,
 	if (length == 0U) {
 		return;
 	}
+	if (render->state == RSS_HTML_LT ||
+	    (render->state == RSS_HTML_TAG_NAME && render->closing &&
+	     render->name_len == 0U)) {
+		/* A non-ASCII character cannot start an HTML tag name. Keep a
+		 * malformed literal <中文 whole rather than emitting byte fragments.
+		 */
+		const bool closing = render->state == RSS_HTML_TAG_NAME;
+		render->state = RSS_HTML_TEXT;
+		render->closing = false;
+		rss_html_text_ascii(render, '<');
+		if (closing) rss_html_text_ascii(render, '/');
+	} else if (render->state != RSS_HTML_TEXT) {
+		/* UTF-8 inside attributes, comments and script/style is markup, not
+		 * visible text. Still feed the scanner so quotes and limits stay in
+		 * sync, without routing these bytes to the line writer.
+		 */
+		for (size_t i = 0U; i < length; ++i) rss_html_feed_ascii(render, data[i]);
+		return;
+	}
+	if (render->entity_active) rss_html_entity_flush(render);
+	rss_html_table_text_prepare(render);
 	if (render->heading_candidate) {
 		rss_html_heading_collect(render, data, length);
 		return;
 	}
 	if (render->url_active) {
-		goto append_url;
+		rss_url_append(render, data, length);
+		return;
 	}
 	rss_lw_text(&render->line, data, length);
 	render->prev_word_char = false;
-	return;
-append_url:
-	{
-		/* URL collection is handled by the caller through the byte
-		 * interface; multibyte URL content simply gets appended.
-		 */
-		for (size_t i = 0U; i < length; ++i) {
-			rss_html_feed_ascii(render, data[i]);
-			if (!render->url_active) {
-				break;
-			}
-		}
-	}
 }
 
 static bool rss_url_prefix_possible(struct rss_html_render *render)
@@ -864,8 +933,16 @@ static void rss_url_reset(struct rss_html_render *render)
 
 static void rss_url_emit_plain(struct rss_html_render *render)
 {
-	for (size_t i = 0U; i < render->url_len; ++i) {
-		rss_lw_text(&render->line, &render->url[i], 1U);
+	for (size_t i = 0U; i < render->url_len;) {
+		const size_t sequence = rss_utf8_scalar_length(
+			render->url + i, render->url_len - i);
+
+		if (sequence == 0U) {
+			++i;
+			continue;
+		}
+		rss_lw_text(&render->line, render->url + i, sequence);
+		i += sequence;
 	}
 	render->prev_word_char =
 		render->url_len > 0U &&
@@ -1007,15 +1084,16 @@ static void rss_url_terminate(struct rss_html_render *render)
 	/* Punctuation that had been collected as part of the URL stays as text
 	 * right after the shortened link.
 	 */
-	for (size_t i = url_end; i < render->url_len; i +=
-	     rss_utf8_sequence_length((unsigned char)render->url[i])) {
-		size_t sequence =
-			rss_utf8_sequence_length((unsigned char)render->url[i]);
+	for (size_t i = url_end; i < render->url_len;) {
+		const size_t sequence = rss_utf8_scalar_length(
+			render->url + i, render->url_len - i);
 
-		if (sequence > render->url_len - i) {
-			sequence = render->url_len - i;
+		if (sequence == 0U) {
+			++i;
+			continue;
 		}
 		rss_lw_text(&render->line, render->url + i, sequence);
+		i += sequence;
 	}
 	rss_url_reset(render);
 	render->prev_word_char = false;
@@ -1024,36 +1102,39 @@ static void rss_url_terminate(struct rss_html_render *render)
 static void rss_url_append(struct rss_html_render *render, const char *data,
 			   size_t length)
 {
-	for (size_t i = 0U; i < length; ++i) {
-		const char ch = data[i];
-
-		if (render->url_discard) {
-			continue;
-		}
-		if (render->url_len >= sizeof(render->url) - 1U) {
-			if (!render->url_prefix_ok) {
-				rss_url_emit_plain(render);
-				return;
-			}
-			render->url_discard = true;
-			continue;
-		}
-		render->url[render->url_len++] = ch;
+	if (render->url_discard) {
+		return;
+	}
+	/* Keep the validated scalar whole, including at the fixed URL limit. */
+	if (length > sizeof(render->url) - 1U - render->url_len) {
 		if (!render->url_prefix_ok) {
-			if ((unsigned char)ch >= 0x80U) {
-				rss_url_emit_plain(render);
-				return;
-			}
-			if (!rss_url_prefix_possible(render)) {
-				rss_url_emit_plain(render);
-				return;
-			}
+			rss_url_emit_plain(render);
+			rss_lw_text(&render->line, data, length);
+			return;
 		}
+		render->url_discard = true;
+		return;
+	}
+	memcpy(render->url + render->url_len, data, length);
+	render->url_len += length;
+	if (!render->url_prefix_ok &&
+	    ((unsigned char)data[0] >= 0x80U ||
+	     !rss_url_prefix_possible(render))) {
+		rss_url_emit_plain(render);
 	}
 }
 
 static void rss_html_text_ascii(struct rss_html_render *render, char ch)
 {
+	/* Source text cannot inject the private table records, NUL terminators or
+	 * other control characters into a cached body. Whitespace is folded below.
+	 */
+	if ((unsigned char)ch < 0x20U && !rss_is_space(ch)) {
+		return;
+	}
+	if (!rss_is_space(ch)) {
+		rss_html_table_text_prepare(render);
+	}
 	if (render->heading_candidate) {
 		rss_html_heading_collect(render, &ch, 1U);
 		return;
@@ -1141,11 +1222,288 @@ static void rss_html_start_raw_text(struct rss_html_render *render,
 	render->state = RSS_HTML_RAW_TEXT;
 }
 
+/* A small, bounded attribute buffer is enough for normal merged cells. If a
+ * cell's attributes cannot be inspected completely, the whole remaining table
+ * is explicitly rendered as sequential text instead of risking shifted data.
+ */
+static unsigned int rss_html_span(struct rss_html_render *render,
+				 const char *wanted, unsigned int maximum,
+				 bool *unsupported)
+{
+	const char *data = render->attributes;
+	const size_t length = render->attributes_length;
+	size_t p = 0U;
+
+	if (render->attributes_overflow) {
+		*unsupported = true;
+		return 1U;
+	}
+	while (p < length) {
+		while (p < length && (rss_is_space(data[p]) || data[p] == '/')) ++p;
+		const size_t name_start = p;
+		while (p < length && (rss_is_alpha(data[p]) ||
+		       (data[p] >= '0' && data[p] <= '9') || data[p] == '-' ||
+		       data[p] == '_' || data[p] == ':')) ++p;
+		const size_t name_length = p - name_start;
+		if (name_length == 0U) {
+			++p;
+			continue;
+		}
+		while (p < length && rss_is_space(data[p])) ++p;
+		if (p >= length || data[p] != '=') continue;
+		++p;
+		while (p < length && rss_is_space(data[p])) ++p;
+		char quote = '\0';
+		if (p < length && (data[p] == '\'' || data[p] == '"')) quote = data[p++];
+		const size_t value_start = p;
+		while (p < length && (quote ? data[p] != quote : !rss_is_space(data[p]))) ++p;
+		const size_t value_length = p - value_start;
+		if (quote && p < length) ++p;
+		if (name_length != strlen(wanted) ||
+		    !rss_memcmp_ci(data + name_start, wanted, name_length)) continue;
+		unsigned int value = 0U;
+		if (value_length == 0U) *unsupported = true;
+		for (size_t i = 0U; i < value_length; ++i) {
+			const char ch = data[value_start + i];
+			if (ch < '0' || ch > '9' || value > maximum / 10U) {
+				*unsupported = true;
+				return 1U;
+			}
+			value = value * 10U + (unsigned int)(ch - '0');
+			if (value > maximum) {
+				*unsupported = true;
+				return 1U;
+			}
+		}
+		if (value == 0U) *unsupported = true;
+		return value > 0U ? value : 1U;
+	}
+	return 1U;
+}
+
+static void rss_table_line_reset(struct rss_html_render *render)
+{
+	render->line.pending_breaks = 0U;
+	render->line.pending_space = false;
+	render->line.line_open = false;
+	render->line.line_text = 0U;
+	render->line.last_cjk = false;
+}
+
+static void rss_table_cell_prefix(struct rss_html_render *render, bool header)
+{
+	if (!render->table_grid_open) {
+		rss_lw_break(&render->line, 2U);
+		rss_lw_flush(&render->line);
+		(void)rss_sink_put(render->sink, PAPERMONO_RSS_TABLE_BEGIN, 4U);
+		render->table_grid_open = true;
+	}
+	if (!render->table_row_started) {
+		(void)rss_sink_put(render->sink, header ? PAPERMONO_RSS_TABLE_HEADER :
+			PAPERMONO_RSS_TABLE_ROW, 3U);
+		render->table_row_started = true;
+	} else {
+		(void)rss_sink_put(render->sink, "\t", 1U);
+	}
+	rss_table_line_reset(render);
+	render->line.line_open = true;
+	render->line.has_content = true;
+}
+
+static void rss_table_cell_close(struct rss_html_render *render)
+{
+	if (!render->table_cell_open) return;
+	for (unsigned int i = 0U; i < render->table_colspan; ++i) {
+		if (render->table_cell_start + i < RSS_HTML_TABLE_COLUMNS) {
+			render->table_rowspans[render->table_cell_start + i] =
+				(uint8_t)render->table_rowspan;
+		}
+		if (i > 0U) {
+			rss_table_cell_prefix(render, false);
+			++render->table_column;
+		}
+	}
+	render->line.pending_space = false;
+	render->table_cell_open = false;
+}
+
+static void rss_table_row_close(struct rss_html_render *render)
+{
+	rss_table_cell_close(render);
+	if (render->table_row_open && !render->table_row_started) {
+		rss_table_cell_prefix(render, false);
+	}
+	if (render->table_row_started) (void)rss_sink_put(render->sink, "\n", 1U);
+	render->table_row_open = false;
+	render->table_row_started = false;
+	rss_table_line_reset(render);
+}
+
+static void rss_table_grid_close(struct rss_html_render *render)
+{
+	rss_table_row_close(render);
+	if (render->table_grid_open) {
+		(void)rss_sink_put(render->sink, PAPERMONO_RSS_TABLE_END, 3U);
+		render->table_grid_open = false;
+	}
+	rss_lw_break(&render->line, 2U);
+}
+
+static void rss_table_finish(struct rss_html_render *render)
+{
+	if (!render->table_plain) rss_table_grid_close(render);
+	render->table_depth = 0U;
+	render->table_plain = false;
+	render->table_caption = false;
+	render->line.indent = render->table_saved_indent;
+	rss_lw_break(&render->line, 2U);
+}
+
+static void rss_table_row_open(struct rss_html_render *render)
+{
+	rss_table_row_close(render);
+	for (size_t i = 0U; i < RSS_HTML_TABLE_COLUMNS; ++i) {
+		if (render->table_rowspans[i] > 0U) --render->table_rowspans[i];
+	}
+	render->table_row_open = true;
+	render->table_column = 0U;
+	render->table_caption = false;
+}
+
+static void rss_table_degrade(struct rss_html_render *render)
+{
+	static const char notice[] = "表格含超范围合并单元格，以下按单元格顺序显示。";
+	if (!render->table_row_started) render->table_row_open = false;
+	rss_table_grid_close(render);
+	render->table_plain = true;
+	render->table_plain_cells = 0U;
+	rss_lw_text(&render->line, notice, sizeof(notice) - 1U);
+	rss_lw_break(&render->line, 2U);
+}
+
+static void rss_html_table_text_prepare(struct rss_html_render *render)
+{
+	if (render->table_depth > 0U && !render->table_cell_open &&
+	    !render->table_plain && !render->table_caption) {
+		/* Captions and malformed visible text between rows remain ordinary
+		 * text at their source position instead of corrupting a row record.
+		 */
+		rss_table_grid_close(render);
+		render->table_caption = true;
+	}
+}
+
+static bool rss_table_break_tag(const char *name, size_t length)
+{
+	return rss_tag_is(name, length, "br") || rss_tag_is(name, length, "p") ||
+	       rss_tag_is(name, length, "div") || rss_tag_is(name, length, "li") ||
+	       rss_tag_is(name, length, "tr") || rss_tag_is(name, length, "td") ||
+	       rss_tag_is(name, length, "th") || rss_tag_is(name, length, "ul") ||
+	       rss_tag_is(name, length, "ol") || rss_tag_is(name, length, "blockquote") ||
+	       rss_tag_is(name, length, "section") || rss_tag_is(name, length, "pre") ||
+	       (length == 2U && name[0] == 'h' && name[1] >= '1' && name[1] <= '6');
+}
+
+static bool rss_html_table_tag(struct rss_html_render *render,
+			       const char *name, size_t length, bool closing)
+{
+	if (rss_tag_is(name, length, "table")) {
+		if (closing) {
+			if (render->table_depth == 1U) rss_table_finish(render);
+			else if (render->table_depth > 1U) --render->table_depth;
+		} else if (render->table_depth > 0U) {
+			++render->table_depth;
+			rss_lw_space(&render->line);
+		} else {
+			render->table_depth = 1U;
+			render->table_saved_indent = render->line.indent;
+			render->line.indent = 0U;
+			render->table_plain = false;
+			render->table_caption = false;
+			memset(render->table_rowspans, 0, sizeof(render->table_rowspans));
+			rss_lw_break(&render->line, 2U);
+		}
+		return true;
+	}
+	if (render->table_depth == 0U) return false;
+	if (render->table_depth > 1U) {
+		/* Nested rows/cells stay inside the containing outer cell. */
+		if (rss_table_break_tag(name, length)) rss_lw_space(&render->line);
+		return true;
+	}
+	if (rss_tag_is(name, length, "caption")) {
+		if (!closing) {
+			if (!render->table_plain) rss_table_grid_close(render);
+			render->table_caption = true;
+		} else render->table_caption = false;
+		rss_lw_break(&render->line, 2U);
+		return true;
+	}
+	if (rss_tag_is(name, length, "tr")) {
+		if (render->table_plain) {
+			rss_lw_break(&render->line, 1U);
+			render->table_plain_cells = 0U;
+		} else if (closing) rss_table_row_close(render);
+		else rss_table_row_open(render);
+		return true;
+	}
+	if (rss_tag_is(name, length, "td") || rss_tag_is(name, length, "th")) {
+		if (closing) {
+			if (!render->table_plain) rss_table_cell_close(render);
+			else rss_lw_space(&render->line);
+			return true;
+		}
+		bool unsupported = false;
+		const unsigned int colspan = rss_html_span(render, "colspan",
+			RSS_HTML_TABLE_COLUMNS, &unsupported);
+		const unsigned int rowspan = rss_html_span(render, "rowspan",
+			RSS_HTML_TABLE_ROWSPAN, &unsupported);
+		if (!render->table_plain) {
+			if (!render->table_row_open) rss_table_row_open(render);
+			rss_table_cell_close(render);
+			while (render->table_column < RSS_HTML_TABLE_COLUMNS &&
+			       render->table_rowspans[render->table_column] > 0U) {
+				rss_table_cell_prefix(render, rss_tag_is(name, length, "th"));
+				++render->table_column;
+			}
+			if ((colspan > 1U || rowspan > 1U) &&
+			    (render->table_column >= RSS_HTML_TABLE_COLUMNS ||
+			     colspan > RSS_HTML_TABLE_COLUMNS - render->table_column)) unsupported = true;
+			if (!unsupported) {
+				for (unsigned int i = 0U; i < colspan; ++i) {
+					if (render->table_column + i < RSS_HTML_TABLE_COLUMNS &&
+					    render->table_rowspans[render->table_column + i] > 0U) unsupported = true;
+				}
+			}
+			if (unsupported) rss_table_degrade(render);
+		}
+		if (render->table_plain) {
+			if (render->table_plain_cells++ > 0U) {
+				render->line.pending_space = false;
+				rss_lw_text(&render->line, " | ", 3U);
+			}
+			return true;
+		}
+		rss_table_cell_prefix(render, rss_tag_is(name, length, "th"));
+		render->table_cell_start = render->table_column++;
+		render->table_colspan = colspan;
+		render->table_rowspan = rowspan;
+		render->table_cell_open = true;
+		return true;
+	}
+	if (rss_table_break_tag(name, length)) {
+		if (render->table_cell_open || render->table_plain) rss_lw_space(&render->line);
+		else if (render->table_caption) rss_lw_break(&render->line, 1U);
+	}
+	return true;
+}
+
 static void rss_html_dispatch(struct rss_html_render *render)
 {
 	const char *name = render->name;
 	const size_t length = render->name_len;
 	const bool closing = render->closing;
+	const bool self_closing = render->self_closing;
 
 	render->closing = false;
 	render->self_closing = false;
@@ -1161,6 +1519,10 @@ static void rss_html_dispatch(struct rss_html_render *render)
 	if ((rss_tag_is(name, length, "script") ||
 	     rss_tag_is(name, length, "style")) && !closing) {
 		rss_html_start_raw_text(render, name, length);
+		return;
+	}
+	if (rss_html_table_tag(render, name, length, closing)) {
+		if (self_closing && !closing) (void)rss_html_table_tag(render, name, length, true);
 		return;
 	}
 	if (rss_tag_is(name, length, "br")) {
@@ -1258,6 +1620,8 @@ static void rss_html_feed_ascii(struct rss_html_render *render, char ch)
 					rss_url_terminate(render);
 				}
 				render->state = RSS_HTML_LT;
+				render->attributes_length = 0U;
+				render->attributes_overflow = false;
 				return;
 			}
 			if (ch == '&') {
@@ -1333,6 +1697,11 @@ static void rss_html_feed_ascii(struct rss_html_render *render, char ch)
 			}
 			return;
 		case RSS_HTML_TAG_SKIP:
+			if (ch != '>' || render->quote != '\0') {
+				if (render->attributes_length < sizeof(render->attributes)) {
+					render->attributes[render->attributes_length++] = ch;
+				} else render->attributes_overflow = true;
+			}
 			if (render->quote != '\0') {
 				if (ch == render->quote) {
 					render->quote = '\0';
@@ -1429,6 +1798,7 @@ static void rss_html_finish(struct rss_html_render *render)
 	if (render->heading_candidate) {
 		rss_html_heading_finish(render);
 	}
+	if (render->table_depth > 0U) rss_table_finish(render);
 }
 
 static void rss_render_body(const char *text, size_t length, bool literal,
@@ -1472,10 +1842,12 @@ static void rss_render_body(const char *text, size_t length, bool literal,
 			++index;
 			continue;
 		}
-		size_t sequence = rss_utf8_sequence_length(lead);
+		const size_t sequence =
+			rss_utf8_scalar_length(text + index, length - index);
 
-		if (sequence > length - index) {
-			sequence = length - index;
+		if (sequence == 0U) {
+			++index;
+			continue;
 		}
 		rss_html_text_units(&render, text + index, sequence);
 		index += sequence;
@@ -1710,14 +2082,54 @@ next_item:
 /* Snapshot state and SD cache                                                */
 /* ------------------------------------------------------------------------- */
 
-static struct papermono_rss_feed snapshot RSS_PSRAM;
+struct rss_source_state {
+	struct papermono_rss_source source;
+	struct papermono_rss_feed feed;
+	char key[17];
+	uint32_t generation;
+	uint32_t revision;
+	int result;
+	bool index_loaded;
+	bool pending;
+	bool inflight;
+};
+
+struct rss_registry_disk {
+	uint32_t magic;
+	uint16_t version;
+	uint16_t count;
+	struct papermono_rss_source sources[PAPERMONO_RSS_SOURCE_MAX];
+	uint32_t checksum;
+};
+
+struct rss_cache_identity {
+	char id[PAPERMONO_RSS_SOURCE_ID_MAX + 1U];
+	char url[PAPERMONO_RSS_SOURCE_URL_MAX + 1U];
+};
+
+static struct rss_source_state source_states[PAPERMONO_RSS_SOURCE_MAX] RSS_PSRAM;
+static struct rss_source_state next_states[PAPERMONO_RSS_SOURCE_MAX] RSS_PSRAM;
+static struct rss_registry_disk registry_block RSS_PSRAM;
+static struct rss_cache_identity identity_block RSS_PSRAM;
+static size_t source_count RSS_PSRAM;
+static uint32_t registry_generation RSS_PSRAM;
+static uint32_t revision_serial RSS_PSRAM;
+static bool registry_initialized;
+static bool registry_checked;
+static bool registry_persisted;
+struct rss_fetch_job {
+    size_t slot;
+    uint32_t generation;
+    struct papermono_rss_source source;
+    char key[17];
+};
+
 static struct papermono_rss_feed staging RSS_PSRAM;
 /* Serialised index block; only touched while rss_lock is held. Keeping it out
  * of the caller stack matters for the 2 KB read/dump in body_load and on the
  * worker thread.
  */
 static struct rss_index_disk index_block RSS_PSRAM;
-static bool index_loaded;
 
 #if !defined(__ZEPHYR__)
 static char rss_host_cache_directory[160] = ".";
@@ -1725,7 +2137,6 @@ static char rss_host_cache_directory[160] = ".";
 
 #if defined(__ZEPHYR__)
 static K_MUTEX_DEFINE(rss_lock);
-static int64_t last_fetch_uptime_ms;
 
 static inline void rss_lock_take(void)
 {
@@ -1959,37 +2370,53 @@ static int rss_file_unlink(const char *path)
 }
 #endif
 
-static int rss_build_path(char *out, size_t capacity, const char *leaf)
+static int rss_build_path(const char *key, char *out, size_t capacity,
+                          const char *leaf)
 {
 #if defined(__ZEPHYR__)
-	const int written = snprintf(out, capacity, "%s/rss/%s",
-				     PAPERMONO_CONTENT_ROOT, leaf);
+    const int written = key != NULL && key[0] != '\0' ?
+        snprintf(out, capacity, "%s/rss/%s/%s", PAPERMONO_CONTENT_ROOT, key, leaf) :
+        snprintf(out, capacity, "%s/rss/%s", PAPERMONO_CONTENT_ROOT, leaf);
 #else
-	const int written = snprintf(out, capacity, "%s/papermono/rss/%s",
-				     rss_host_cache_directory, leaf);
+    const int written = key != NULL && key[0] != '\0' ?
+        snprintf(out, capacity, "%s/papermono/rss/%s/%s", rss_host_cache_directory, key, leaf) :
+        snprintf(out, capacity, "%s/papermono/rss/%s", rss_host_cache_directory, leaf);
 #endif
-
-	return written < 0 || (size_t)written >= capacity ? -ENAMETOOLONG : 0;
+    return written < 0 || (size_t)written >= capacity ? -ENAMETOOLONG : 0;
 }
 
-static int rss_ensure_directory(void)
+#if !defined(__ZEPHYR__)
+#include <sys/stat.h>
+static int rss_mkdir_if_missing(const char *path)
 {
-#if defined(__ZEPHYR__)
-	int ret = rss_mkdir_if_missing(PAPERMONO_CONTENT_ROOT);
-
-	if (ret < 0) {
-		return ret;
-	}
-	return rss_mkdir_if_missing(PAPERMONO_CONTENT_ROOT "/rss");
-#else
-	return 0;
+    return mkdir(path, 0700) == 0 || errno == EEXIST ? 0 : -errno;
+}
 #endif
+
+static int rss_ensure_directory(const char *key)
+{
+    char path[RSS_CACHE_PATH_MAX];
+    int ret;
+#if defined(__ZEPHYR__)
+    ret = rss_mkdir_if_missing(PAPERMONO_CONTENT_ROOT);
+#else
+    const int length = snprintf(path, sizeof(path), "%s/papermono", rss_host_cache_directory);
+    if (length < 0 || (size_t)length >= sizeof(path)) return -ENAMETOOLONG;
+    ret = rss_mkdir_if_missing(path);
+#endif
+    if (ret < 0) return ret;
+    ret = rss_build_path(NULL, path, sizeof(path), "");
+    if (ret < 0) return ret;
+    ret = rss_mkdir_if_missing(path);
+    if (ret < 0 || key == NULL || key[0] == '\0') return ret;
+    ret = rss_build_path(NULL, path, sizeof(path), key);
+    return ret < 0 ? ret : rss_mkdir_if_missing(path);
 }
 
-static int rss_unlink_leaf(const char *leaf)
+static int rss_unlink_leaf(const char *key, const char *leaf)
 {
 	char path[RSS_CACHE_PATH_MAX];
-	int ret = rss_build_path(path, sizeof(path), leaf);
+	int ret = rss_build_path(key, path, sizeof(path), leaf);
 
 	if (ret < 0) {
 		return ret;
@@ -1997,10 +2424,10 @@ static int rss_unlink_leaf(const char *leaf)
 	return rss_file_unlink(path);
 }
 
-static int rss_leaf_exists(const char *leaf)
+static int rss_leaf_exists(const char *key, const char *leaf)
 {
 	char path[RSS_CACHE_PATH_MAX];
-	int ret = rss_build_path(path, sizeof(path), leaf);
+	int ret = rss_build_path(key, path, sizeof(path), leaf);
 
 	if (ret < 0) {
 		return ret;
@@ -2008,10 +2435,10 @@ static int rss_leaf_exists(const char *leaf)
 	return rss_file_exists(path);
 }
 
-static int rss_leaf_size(const char *leaf, size_t *size)
+static int rss_leaf_size(const char *key, const char *leaf, size_t *size)
 {
 	char path[RSS_CACHE_PATH_MAX];
-	int ret = rss_build_path(path, sizeof(path), leaf);
+	int ret = rss_build_path(key, path, sizeof(path), leaf);
 
 	if (ret < 0) {
 		return ret;
@@ -2019,16 +2446,16 @@ static int rss_leaf_size(const char *leaf, size_t *size)
 	return rss_file_size(path, size);
 }
 
-static int rss_leaf_rename(const char *from_leaf, const char *to_leaf)
+static int rss_leaf_rename(const char *key, const char *from_leaf, const char *to_leaf)
 {
 	char from[RSS_CACHE_PATH_MAX];
 	char to[RSS_CACHE_PATH_MAX];
-	int ret = rss_build_path(from, sizeof(from), from_leaf);
+	int ret = rss_build_path(key, from, sizeof(from), from_leaf);
 
 	if (ret < 0) {
 		return ret;
 	}
-	ret = rss_build_path(to, sizeof(to), to_leaf);
+	ret = rss_build_path(key, to, sizeof(to), to_leaf);
 	if (ret < 0) {
 		return ret;
 	}
@@ -2042,14 +2469,14 @@ static int rss_file_exists(const char *path)
 	return rss_file_size(path, &size) == 0;
 }
 
-static int rss_write_file(const char *leaf, const void *data, size_t length,
+static int rss_write_file(const char *key, const char *leaf, const void *data, size_t length,
 			  uint8_t *bounce)
 {
 	char path[RSS_CACHE_PATH_MAX];
 	struct rss_file file = { 0 };
 	int ret;
 
-	ret = rss_build_path(path, sizeof(path), leaf);
+	ret = rss_build_path(key, path, sizeof(path), leaf);
 	if (ret < 0) {
 		return ret;
 	}
@@ -2084,7 +2511,7 @@ static int rss_write_file(const char *leaf, const void *data, size_t length,
 	return ret;
 }
 
-static int rss_read_file(const char *leaf, void *data, size_t capacity,
+static int rss_read_file(const char *key, const char *leaf, void *data, size_t capacity,
 			 size_t *length)
 {
 	char path[RSS_CACHE_PATH_MAX];
@@ -2092,7 +2519,7 @@ static int rss_read_file(const char *leaf, void *data, size_t capacity,
 	size_t done = 0U;
 	int ret;
 
-	ret = rss_build_path(path, sizeof(path), leaf);
+	ret = rss_build_path(key, path, sizeof(path), leaf);
 	if (ret < 0) {
 		return ret;
 	}
@@ -2131,25 +2558,25 @@ static int rss_read_file(const char *leaf, void *data, size_t capacity,
  * Replace `final` with `tmp`, keeping the previous file in `bak` so the caller
  * can restore it if the companion file cannot be committed too.
  */
-static int rss_swap_file(const char *tmp_leaf, const char *final_leaf,
+static int rss_swap_file(const char *key, const char *tmp_leaf, const char *final_leaf,
 			 const char *bak_leaf, bool *had_backup)
 {
 	bool backup = false;
 	int ret;
 
 	*had_backup = false;
-	if (rss_leaf_exists(final_leaf) == 1) {
-		(void)rss_unlink_leaf(bak_leaf);
-		ret = rss_leaf_rename(final_leaf, bak_leaf);
+	if (rss_leaf_exists(key, final_leaf) == 1) {
+		(void)rss_unlink_leaf(key, bak_leaf);
+		ret = rss_leaf_rename(key, final_leaf, bak_leaf);
 		if (ret < 0) {
 			return ret;
 		}
 		backup = true;
 	}
-	ret = rss_leaf_rename(tmp_leaf, final_leaf);
+	ret = rss_leaf_rename(key, tmp_leaf, final_leaf);
 	if (ret < 0) {
 		if (backup) {
-			(void)rss_leaf_rename(bak_leaf, final_leaf);
+			(void)rss_leaf_rename(key, bak_leaf, final_leaf);
 		}
 		return ret;
 	}
@@ -2158,31 +2585,335 @@ static int rss_swap_file(const char *tmp_leaf, const char *final_leaf,
 }
 
 /* Recover a cache left behind by a reset in the middle of a commit. */
-static void rss_cache_recover(void)
+static void rss_cache_recover(const char *key)
 {
-	const int bodies_bak = rss_leaf_exists(RSS_BODIES_BAK_FILE);
-	const int index_bak = rss_leaf_exists(RSS_INDEX_BAK_FILE);
+	const int bodies_bak = rss_leaf_exists(key, RSS_BODIES_BAK_FILE);
+	const int index_bak = rss_leaf_exists(key, RSS_INDEX_BAK_FILE);
 
 	if (bodies_bak == 1) {
 		if (index_bak == 1) {
 			/* Both files were already replaced; the leftovers are
 			 * stale backups.
 			 */
-			(void)rss_unlink_leaf(RSS_BODIES_BAK_FILE);
-			(void)rss_unlink_leaf(RSS_INDEX_BAK_FILE);
+			(void)rss_unlink_leaf(key, RSS_BODIES_BAK_FILE);
+			(void)rss_unlink_leaf(key, RSS_INDEX_BAK_FILE);
 		} else {
 			/* Bodies were replaced but the index was not: roll the
 			 * bodies back so the old index still matches.
 			 */
-			(void)rss_unlink_leaf(RSS_BODIES_FILE);
-			(void)rss_leaf_rename(RSS_BODIES_BAK_FILE,
+			(void)rss_unlink_leaf(key, RSS_BODIES_FILE);
+			(void)rss_leaf_rename(key, RSS_BODIES_BAK_FILE,
 					      RSS_BODIES_FILE);
 		}
 	} else if (index_bak == 1) {
-		(void)rss_unlink_leaf(RSS_INDEX_BAK_FILE);
+		(void)rss_unlink_leaf(key, RSS_INDEX_BAK_FILE);
 	}
-	(void)rss_unlink_leaf(RSS_INDEX_TMP_FILE);
-	(void)rss_unlink_leaf(RSS_BODIES_TMP_FILE);
+	(void)rss_unlink_leaf(key, RSS_INDEX_TMP_FILE);
+	(void)rss_unlink_leaf(key, RSS_BODIES_TMP_FILE);
+}
+
+#define RSS_REGISTRY_MAGIC 0x52535353UL
+#define RSS_REGISTRY_VERSION 1U
+#define RSS_SOURCES_FILE "sources.bin"
+#define RSS_SOURCES_TMP_FILE "sources.tmp"
+#define RSS_SOURCES_BAK_FILE "sources.bak"
+#define RSS_IDENTITY_FILE "source.bin"
+#define RSS_IDENTITY_TMP_FILE "source.tmp"
+
+static uint32_t rss_checksum(const void *data, size_t length)
+{
+    const uint8_t *bytes = data;
+    uint32_t hash = 2166136261U;
+    for (size_t i = 0U; i < length; ++i) hash = (hash ^ bytes[i]) * 16777619U;
+    return hash;
+}
+
+static uint32_t rss_next_revision(void)
+{
+    if (++revision_serial == 0U) ++revision_serial;
+    return revision_serial;
+}
+
+static bool rss_source_equal(const struct papermono_rss_source *a,
+                             const struct papermono_rss_source *b)
+{
+    return strcmp(a->id, b->id) == 0 && strcmp(a->url, b->url) == 0;
+}
+
+static void rss_source_copy(struct papermono_rss_source *out,
+                            const struct papermono_rss_source *source)
+{
+    memset(out, 0, sizeof(*out));
+    memcpy(out->id, source->id, strlen(source->id));
+    memcpy(out->name, source->name, strlen(source->name));
+    memcpy(out->url, source->url, strlen(source->url));
+}
+
+static size_t rss_bounded_length(const char *text, size_t capacity)
+{
+    size_t length = 0U;
+    while (length < capacity && text[length] != '\0') ++length;
+    return length;
+}
+
+static bool rss_name_valid(const char *text, size_t length)
+{
+    bool visible = false;
+    for (size_t i = 0U; i < length;) {
+        const uint8_t lead = (uint8_t)text[i];
+        uint32_t point;
+        size_t bytes;
+        uint32_t minimum;
+        if (lead < 0x80U) { point = lead; bytes = 1U; minimum = 0U; }
+        else if (lead >= 0xc2U && lead <= 0xdfU) {
+            point = lead & 0x1fU; bytes = 2U; minimum = 0x80U;
+        } else if (lead >= 0xe0U && lead <= 0xefU) {
+            point = lead & 0x0fU; bytes = 3U; minimum = 0x800U;
+        } else if (lead >= 0xf0U && lead <= 0xf4U) {
+            point = lead & 0x07U; bytes = 4U; minimum = 0x10000U;
+        } else return false;
+        if (i + bytes > length) return false;
+        for (size_t j = 1U; j < bytes; ++j) {
+            const uint8_t next = (uint8_t)text[i + j];
+            if ((next & 0xc0U) != 0x80U) return false;
+            point = (point << 6) | (next & 0x3fU);
+        }
+        if (point < minimum || point > 0x10ffffU ||
+            (point >= 0xd800U && point <= 0xdfffU) || point < 32U ||
+            (point >= 0x7fU && point <= 0x9fU)) return false;
+        if (point != 32U && point != 0xa0U && point != 0x3000U) visible = true;
+        i += bytes;
+    }
+    return visible;
+}
+
+static bool rss_source_valid(const struct papermono_rss_source *source)
+{
+    const size_t id = rss_bounded_length(source->id, sizeof(source->id));
+    const size_t name = rss_bounded_length(source->name, sizeof(source->name));
+    const size_t url = rss_bounded_length(source->url, sizeof(source->url));
+    if (id == 0U || id >= sizeof(source->id) || name == 0U ||
+        name >= sizeof(source->name) || url < 8U || url >= sizeof(source->url) ||
+        strncmp(source->url, "http://", 7U) != 0) return false;
+    for (size_t i = 0U; i < id; ++i) {
+        const char ch = source->id[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) return false;
+    }
+    if (!rss_name_valid(source->name, name)) return false;
+    for (size_t i = 0U; i < url; ++i) {
+        if ((uint8_t)source->url[i] <= 32U || (uint8_t)source->url[i] >= 127U ||
+            source->url[i] == '\\' || source->url[i] == '#') return false;
+    }
+    const char *authority = source->url + 7U;
+    const char *end = strchr(authority, '/');
+    if (end == NULL) end = source->url + url;
+    const char *colon = memchr(authority, ':', (size_t)(end - authority));
+    const char *host_end = colon != NULL ? colon : end;
+    if (host_end == authority || (size_t)(host_end - authority) > RSS_HOST_MAX) return false;
+    for (const char *p = authority; p < host_end; ++p) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '-' || *p == '.')) return false;
+    }
+    if (colon != NULL) {
+        unsigned port = 0U;
+        if (colon + 1U == end || end - colon > 6) return false;
+        for (const char *p = colon + 1U; p < end; ++p) {
+            if (*p < '0' || *p > '9') return false;
+            port = port * 10U + (unsigned)(*p - '0');
+            if (port > 65535U) return false;
+        }
+        if (port == 0U) return false;
+    }
+    return (size_t)(source->url + url - end) <= RSS_PATH_MAX;
+}
+
+static bool rss_sources_valid(const struct papermono_rss_source *sources, size_t count)
+{
+    if (count > PAPERMONO_RSS_SOURCE_MAX || (count != 0U && sources == NULL)) return false;
+    for (size_t i = 0U; i < count; ++i) {
+        if (!rss_source_valid(&sources[i])) return false;
+        for (size_t j = 0U; j < i; ++j) {
+            if (strcmp(sources[i].id, sources[j].id) == 0 ||
+                strcmp(sources[i].url, sources[j].url) == 0) return false;
+        }
+    }
+    return true;
+}
+
+static void rss_source_key(const struct papermono_rss_source *source, char key[17])
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    const char *values[] = { source->id, source->url };
+    for (size_t i = 0U; i < 2U; ++i) {
+        for (const unsigned char *p = (const unsigned char *)values[i]; *p; ++p)
+            hash = (hash ^ *p) * UINT64_C(1099511628211);
+        hash = (hash ^ 0U) * UINT64_C(1099511628211);
+    }
+    (void)snprintf(key, 17U, "%08x%08x", (unsigned)(hash >> 32), (unsigned)hash);
+#if !defined(__ZEPHYR__)
+    /* Existing parser/cache tests exercise the old root-level cache through
+     * their legacy source. Explicit multi-source tests use keyed directories. */
+    if (strcmp(source->id, "legacy") == 0 &&
+        strcmp(source->url, "http://legacy.test/rss") == 0) key[0] = '\0';
+#endif
+}
+
+static void rss_apply_sources_locked(const struct papermono_rss_source *sources,
+                                    size_t count)
+{
+    uint32_t generation = registry_generation + 1U;
+    if (generation == 0U) ++generation;
+    memset(next_states, 0, sizeof(next_states));
+    for (size_t i = 0U; i < count; ++i) {
+        bool same_slot = false;
+        bool requested = false;
+        for (size_t j = 0U; j < source_count; ++j) {
+            if (rss_source_equal(&sources[i], &source_states[j].source)) {
+                next_states[i] = source_states[j];
+                same_slot = i == j;
+                requested = source_states[j].pending || source_states[j].inflight;
+                break;
+            }
+        }
+        rss_source_copy(&next_states[i].source, &sources[i]);
+        rss_source_key(&sources[i], next_states[i].key);
+        if (!same_slot) {
+            next_states[i].generation = generation;
+            /* Preserve an explicit request when its stable source moves to
+             * another tab slot; its old job cannot publish to the new slot. */
+            next_states[i].pending = requested;
+            next_states[i].inflight = false;
+            if (requested) next_states[i].result = 1;
+            else if (next_states[i].result > 0) next_states[i].result = 0;
+        }
+    }
+    memcpy(source_states, next_states, sizeof(source_states));
+    source_count = count;
+    registry_generation = generation;
+}
+
+static bool rss_registry_block_valid(size_t length)
+{
+    return length == sizeof(registry_block) &&
+        registry_block.magic == RSS_REGISTRY_MAGIC &&
+        registry_block.version == RSS_REGISTRY_VERSION &&
+        registry_block.count <= PAPERMONO_RSS_SOURCE_MAX &&
+        registry_block.checksum == rss_checksum(&registry_block,
+            offsetof(struct rss_registry_disk, checksum)) &&
+        rss_sources_valid(registry_block.sources, registry_block.count);
+}
+
+static int rss_registry_read(const char *leaf)
+{
+    size_t size = 0U;
+    size_t length = 0U;
+    int ret = rss_leaf_size(NULL, leaf, &size);
+    if (ret < 0) return ret;
+    if (size != sizeof(registry_block)) return -EBADMSG;
+    ret = rss_read_file(NULL, leaf, &registry_block, sizeof(registry_block), &length);
+    return ret < 0 ? ret : rss_registry_block_valid(length) ? 0 : -EBADMSG;
+}
+
+static void rss_registry_defaults_locked(void)
+{
+    size_t count = 0U;
+    memset(&registry_block, 0, sizeof(registry_block));
+#if defined(__ZEPHYR__)
+    const char *legacy_url = papermono_settings_get()->rss_url;
+    if (legacy_url[0] != '\0') {
+        struct papermono_rss_source *source = &registry_block.sources[count];
+        (void)snprintf(source->id, sizeof(source->id), "gold");
+        (void)snprintf(source->name, sizeof(source->name), "金价");
+        (void)snprintf(source->url, sizeof(source->url), "%s", legacy_url);
+        if (rss_source_valid(source)) ++count;
+    }
+#ifdef CONFIG_PAPERMONO_RSS_AI_URL
+    if (CONFIG_PAPERMONO_RSS_AI_URL[0] != '\0') {
+        struct papermono_rss_source *source = &registry_block.sources[count];
+        (void)snprintf(source->id, sizeof(source->id), "ai");
+        (void)snprintf(source->name, sizeof(source->name), "AI资讯");
+        (void)snprintf(source->url, sizeof(source->url), "%s", CONFIG_PAPERMONO_RSS_AI_URL);
+        if (rss_source_valid(source)) ++count;
+    }
+#endif
+#else
+    struct papermono_rss_source *source = &registry_block.sources[count++];
+    (void)snprintf(source->id, sizeof(source->id), "legacy");
+    (void)snprintf(source->name, sizeof(source->name), "RSS");
+    (void)snprintf(source->url, sizeof(source->url), "http://legacy.test/rss");
+#endif
+    rss_apply_sources_locked(registry_block.sources, count);
+}
+
+static void rss_registry_ensure_locked(void)
+{
+    int ret;
+    bool final_valid;
+    if (!registry_initialized) {
+        registry_initialized = true;
+        rss_registry_defaults_locked();
+    }
+    if (registry_checked || rss_platform_mount() < 0) return;
+    registry_checked = true;
+    if (rss_leaf_exists(NULL, RSS_SOURCES_FILE) != 1 &&
+        rss_leaf_exists(NULL, RSS_SOURCES_BAK_FILE) == 1)
+        (void)rss_leaf_rename(NULL, RSS_SOURCES_BAK_FILE, RSS_SOURCES_FILE);
+    (void)rss_unlink_leaf(NULL, RSS_SOURCES_TMP_FILE);
+    ret = rss_registry_read(RSS_SOURCES_FILE);
+    final_valid = ret == 0;
+    if (ret < 0) {
+        if (rss_registry_read(RSS_SOURCES_BAK_FILE) < 0) return;
+        (void)rss_unlink_leaf(NULL, RSS_SOURCES_FILE);
+        final_valid = rss_leaf_rename(NULL, RSS_SOURCES_BAK_FILE, RSS_SOURCES_FILE) == 0;
+    }
+    rss_apply_sources_locked(registry_block.sources, registry_block.count);
+    registry_persisted = true;
+    if (final_valid) (void)rss_unlink_leaf(NULL, RSS_SOURCES_BAK_FILE);
+}
+
+static bool rss_job_current_locked(const struct rss_fetch_job *job)
+{
+    return job->slot < source_count &&
+        source_states[job->slot].generation == job->generation &&
+        rss_source_equal(&source_states[job->slot].source, &job->source);
+}
+
+static void rss_job_copy_locked(size_t source, struct rss_fetch_job *job)
+{
+    job->slot = source;
+    job->generation = source_states[source].generation;
+    job->source = source_states[source].source;
+    memcpy(job->key, source_states[source].key, sizeof(job->key));
+}
+
+static int rss_cache_identity(const struct papermono_rss_source *source,
+                              const char *key, bool create, uint8_t *bounce)
+{
+    size_t length = 0U;
+    int ret;
+#if !defined(__ZEPHYR__)
+    if (key[0] == '\0') return 0;
+#endif
+    ret = rss_read_file(key, RSS_IDENTITY_FILE, &identity_block, sizeof(identity_block), &length);
+    if (ret == 0) {
+        size_t size = 0U;
+        return rss_leaf_size(key, RSS_IDENTITY_FILE, &size) == 0 &&
+            size == sizeof(identity_block) && length == sizeof(identity_block) &&
+            memchr(identity_block.id, '\0', sizeof(identity_block.id)) != NULL &&
+            memchr(identity_block.url, '\0', sizeof(identity_block.url)) != NULL &&
+            strcmp(identity_block.id, source->id) == 0 &&
+            strcmp(identity_block.url, source->url) == 0 ? 0 : -EBADMSG;
+    }
+    if (!create || ret != -ENOENT) return ret;
+    if (rss_leaf_exists(key, RSS_INDEX_FILE) == 1 ||
+        rss_leaf_exists(key, RSS_BODIES_FILE) == 1) return -EBADMSG;
+    memset(&identity_block, 0, sizeof(identity_block));
+    memcpy(identity_block.id, source->id, strlen(source->id));
+    memcpy(identity_block.url, source->url, strlen(source->url));
+    ret = rss_write_file(key, RSS_IDENTITY_TMP_FILE, &identity_block,
+                         sizeof(identity_block), bounce);
+    return ret < 0 ? ret : rss_leaf_rename(key, RSS_IDENTITY_TMP_FILE, RSS_IDENTITY_FILE);
 }
 
 static void rss_feed_to_disk(const struct papermono_rss_feed *feed,
@@ -2203,8 +2934,10 @@ static void rss_feed_to_disk(const struct papermono_rss_feed *feed,
 	}
 }
 
-static int rss_cache_load(void)
+static int rss_cache_load(struct rss_source_state *state)
 {
+	const char *key = state->key;
+	struct papermono_rss_feed *snapshot = &state->feed;
 	struct rss_index_disk *disk = &index_block;
 	size_t read = 0U;
 	size_t bodies_size = 0U;
@@ -2212,10 +2945,11 @@ static int rss_cache_load(void)
 	uint64_t total_check = 0U;
 	int ret;
 
-	rss_cache_recover();
-	memset(&snapshot, 0, sizeof(snapshot));
-	memset(&staging, 0, sizeof(staging));
-	ret = rss_read_file(RSS_INDEX_FILE, disk, sizeof(*disk), &read);
+	rss_cache_recover(key);
+	memset(snapshot, 0, sizeof(*snapshot));
+	ret = rss_cache_identity(&state->source, key, false, NULL);
+	if (ret < 0) return ret;
+	ret = rss_read_file(key, RSS_INDEX_FILE, disk, sizeof(*disk), &read);
 	if (ret < 0) {
 		return ret;
 	}
@@ -2235,26 +2969,27 @@ static int rss_cache_load(void)
 	}
 	total = (size_t)total_check;
 	if (total > 0U) {
-		ret = rss_leaf_size(RSS_BODIES_FILE, &bodies_size);
+		ret = rss_leaf_size(key, RSS_BODIES_FILE, &bodies_size);
 		if (ret < 0 || bodies_size < total) {
 			return -EBADMSG;
 		}
 	}
-	snapshot.valid = true;
-	snapshot.updated_at = disk->updated_at;
-	memcpy(snapshot.title, disk->title, sizeof(snapshot.title));
-	snapshot.title[PAPERMONO_RSS_TITLE_MAX] = '\0';
-	snapshot.count = disk->count;
+	snapshot->valid = true;
+	snapshot->updated_at = disk->updated_at;
+	memcpy(snapshot->title, disk->title, sizeof(snapshot->title));
+	snapshot->title[PAPERMONO_RSS_TITLE_MAX] = '\0';
+	snapshot->count = disk->count;
 	for (size_t i = 0U; i < disk->count; ++i) {
-		memcpy(snapshot.items[i].title, disk->items[i].title,
-		       sizeof(snapshot.items[i].title));
-		snapshot.items[i].title[PAPERMONO_RSS_TITLE_MAX] = '\0';
-		memcpy(snapshot.items[i].published, disk->items[i].published,
-		       sizeof(snapshot.items[i].published));
-		snapshot.items[i]
+		memcpy(snapshot->items[i].title, disk->items[i].title,
+		       sizeof(snapshot->items[i].title));
+		snapshot->items[i].title[PAPERMONO_RSS_TITLE_MAX] = '\0';
+		memcpy(snapshot->items[i].published, disk->items[i].published,
+		       sizeof(snapshot->items[i].published));
+		snapshot->items[i]
 			.published[PAPERMONO_RSS_DATE_MAX] = '\0';
-		snapshot.items[i].body_length = disk->items[i].body_length;
+		snapshot->items[i].body_length = disk->items[i].body_length;
 	}
+	state->revision = rss_next_revision();
 	return 0;
 }
 
@@ -2264,31 +2999,32 @@ static int rss_cache_load(void)
  * (retried on the next call) and another negative errno when the cache is
  * missing or corrupt (also latched; a fetch will replace it).
  */
-static int rss_ensure_index(void)
+static int rss_ensure_index(struct rss_source_state *state)
 {
 	int ret;
 
-	if (index_loaded) {
+	if (state->index_loaded) {
 		return 0;
 	}
 	ret = rss_platform_mount();
 	if (ret < 0) {
 		return -ENODEV;
 	}
-	ret = rss_cache_load();
-	index_loaded = true;
+	ret = rss_cache_load(state);
+	state->index_loaded = true;
 	if (ret < 0) {
 		RSS_LOG_WRN("RSS SD cache unusable (%d); RAM index stays empty",
 			    ret);
 		return ret;
 	}
 	RSS_LOG_INF("RSS cache loaded: %u items, updated_at %lld",
-		    (unsigned int)snapshot.count,
-		    (long long)snapshot.updated_at);
+		    (unsigned int)state->feed.count,
+		    (long long)state->feed.updated_at);
 	return 1;
 }
 
 struct rss_body_writer {
+	const char *key;
 	struct rss_file file;
 	uint8_t *bounce;
 	size_t bounce_used;
@@ -2333,14 +3069,15 @@ static int rss_body_writer_emit(void *context, const char *data,
 }
 
 static int rss_body_writer_begin(struct rss_body_writer *writer,
-				 uint8_t *bounce)
+				 uint8_t *bounce, const char *key)
 {
 	char path[RSS_CACHE_PATH_MAX];
 	int ret;
 
 	memset(writer, 0, sizeof(*writer));
 	writer->bounce = bounce;
-	ret = rss_build_path(path, sizeof(path), RSS_BODIES_TMP_FILE);
+	writer->key = key;
+	ret = rss_build_path(key, path, sizeof(path), RSS_BODIES_TMP_FILE);
 	if (ret < 0) {
 		return ret;
 	}
@@ -2372,13 +3109,14 @@ static int rss_body_writer_finish(struct rss_body_writer *writer)
 
 static void rss_body_writer_abort(struct rss_body_writer *writer)
 {
+	const char *key = writer->key;
 	char path[RSS_CACHE_PATH_MAX];
 
 	if (writer->open) {
 		(void)rss_file_close(&writer->file);
 		writer->open = false;
 	}
-	if (rss_build_path(path, sizeof(path), RSS_BODIES_TMP_FILE) == 0) {
+	if (rss_build_path(key, path, sizeof(path), RSS_BODIES_TMP_FILE) == 0) {
 		(void)rss_file_unlink(path);
 	}
 }
@@ -2430,54 +3168,60 @@ static uint8_t *rss_write_bounce_get(void)
 #endif
 }
 
-static int rss_cache_commit(const struct papermono_rss_feed *feed,
+static int rss_cache_commit(const struct rss_fetch_job *job,
+			    const struct papermono_rss_feed *feed,
 			    const uint8_t *bounce)
 {
+	const char *key = job->key;
 	bool bodies_backup = false;
 	bool index_backup = false;
 	int ret;
 
 	rss_lock_take();
+	if (!rss_job_current_locked(job)) {
+		(void)rss_unlink_leaf(key, RSS_INDEX_TMP_FILE);
+		(void)rss_unlink_leaf(key, RSS_BODIES_TMP_FILE);
+		rss_lock_release();
+		return -ESTALE;
+	}
 	rss_feed_to_disk(feed, &index_block);
-	ret = rss_write_file(RSS_INDEX_TMP_FILE, &index_block,
+	ret = rss_write_file(key, RSS_INDEX_TMP_FILE, &index_block,
 			     sizeof(index_block), (uint8_t *)bounce);
 	if (ret < 0) {
-		(void)rss_unlink_leaf(RSS_INDEX_TMP_FILE);
-		(void)rss_unlink_leaf(RSS_BODIES_TMP_FILE);
+		(void)rss_unlink_leaf(key, RSS_INDEX_TMP_FILE);
+		(void)rss_unlink_leaf(key, RSS_BODIES_TMP_FILE);
 		rss_lock_release();
 		return ret;
 	}
-	ret = rss_swap_file(RSS_BODIES_TMP_FILE, RSS_BODIES_FILE,
+	ret = rss_swap_file(key, RSS_BODIES_TMP_FILE, RSS_BODIES_FILE,
 			    RSS_BODIES_BAK_FILE, &bodies_backup);
 	if (ret < 0) {
-		(void)rss_unlink_leaf(RSS_INDEX_TMP_FILE);
-		(void)rss_unlink_leaf(RSS_BODIES_TMP_FILE);
+		(void)rss_unlink_leaf(key, RSS_INDEX_TMP_FILE);
+		(void)rss_unlink_leaf(key, RSS_BODIES_TMP_FILE);
 		rss_lock_release();
 		return ret;
 	}
-	ret = rss_swap_file(RSS_INDEX_TMP_FILE, RSS_INDEX_FILE,
+	ret = rss_swap_file(key, RSS_INDEX_TMP_FILE, RSS_INDEX_FILE,
 			    RSS_INDEX_BAK_FILE, &index_backup);
 	if (ret < 0) {
 		if (bodies_backup) {
-			(void)rss_unlink_leaf(RSS_BODIES_FILE);
-			(void)rss_leaf_rename(RSS_BODIES_BAK_FILE,
+			(void)rss_unlink_leaf(key, RSS_BODIES_FILE);
+			(void)rss_leaf_rename(key, RSS_BODIES_BAK_FILE,
 					      RSS_BODIES_FILE);
 		}
-		(void)rss_unlink_leaf(RSS_INDEX_TMP_FILE);
+		(void)rss_unlink_leaf(key, RSS_INDEX_TMP_FILE);
 		rss_lock_release();
 		return ret;
 	}
 	if (bodies_backup) {
-		(void)rss_unlink_leaf(RSS_BODIES_BAK_FILE);
+		(void)rss_unlink_leaf(key, RSS_BODIES_BAK_FILE);
 	}
 	if (index_backup) {
-		(void)rss_unlink_leaf(RSS_INDEX_BAK_FILE);
+		(void)rss_unlink_leaf(key, RSS_INDEX_BAK_FILE);
 	}
-	snapshot = *feed;
-	index_loaded = true;
-#if defined(__ZEPHYR__)
-	last_fetch_uptime_ms = k_uptime_get();
-#endif
+	source_states[job->slot].feed = *feed;
+	source_states[job->slot].index_loaded = true;
+	source_states[job->slot].revision = rss_next_revision();
 	rss_lock_release();
 	return 0;
 }
@@ -2486,9 +3230,10 @@ static int rss_cache_commit(const struct papermono_rss_feed *feed,
  * Parse @p xml and replace the SD cache with the result. The old cache is left
  * untouched unless every step succeeds.
  */
-static int rss_cache_store(const char *xml, size_t length, int64_t updated_at,
+static int rss_cache_store(const struct rss_fetch_job *job, const char *xml, size_t length, int64_t updated_at,
 			   bool truncated)
 {
+	const char *key = job->key;
 	struct rss_body_writer writer;
 	struct rss_body_consumer consumer = {
 		.append = rss_body_append,
@@ -2500,11 +3245,16 @@ static int rss_cache_store(const char *xml, size_t length, int64_t updated_at,
 	if (bounce == NULL) {
 		return -ENOMEM;
 	}
-	ret = rss_ensure_directory();
+	ret = rss_ensure_directory(key);
 	if (ret < 0) {
 		return ret;
 	}
-	ret = rss_body_writer_begin(&writer, bounce);
+	rss_lock_take();
+	ret = rss_job_current_locked(job) ?
+		rss_cache_identity(&job->source, key, true, bounce) : -ESTALE;
+	rss_lock_release();
+	if (ret < 0) return ret;
+	ret = rss_body_writer_begin(&writer, bounce, key);
 	if (ret < 0) {
 		return ret;
 	}
@@ -2519,12 +3269,12 @@ static int rss_cache_store(const char *xml, size_t length, int64_t updated_at,
 		rss_body_writer_abort(&writer);
 		return ret;
 	}
-	ret = rss_cache_commit(&staging, bounce);
+	ret = rss_cache_commit(job, &staging, bounce);
 	if (ret < 0) {
 		return ret;
 	}
 	RSS_LOG_INF("RSS cache updated: %u items, %u feed bytes",
-		    (unsigned int)snapshot.count, (unsigned int)length);
+		    (unsigned int)staging.count, (unsigned int)length);
 	return 0;
 }
 
@@ -2532,90 +3282,177 @@ static int rss_cache_store(const char *xml, size_t length, int64_t updated_at,
 /* Public data API                                                            */
 /* ------------------------------------------------------------------------- */
 
+size_t papermono_rss_source_count(void)
+{
+    size_t count;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    count = source_count;
+    rss_lock_release();
+    return count;
+}
+
+int papermono_rss_source_get(size_t source, struct papermono_rss_source *out)
+{
+    if (out == NULL) return -EINVAL;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    const int ret = source < source_count ? 0 : -ENOENT;
+    if (ret == 0) *out = source_states[source].source;
+    else memset(out, 0, sizeof(*out));
+    rss_lock_release();
+    return ret;
+}
+
+uint32_t papermono_rss_sources_generation(void)
+{
+    uint32_t generation;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    generation = registry_generation;
+    rss_lock_release();
+    return generation;
+}
+
+int papermono_rss_sources_replace(const struct papermono_rss_source *sources,
+                                 size_t count)
+{
+    uint8_t bounce[RSS_WRITE_BOUNCE];
+    bool backup = false;
+    bool same;
+    int ret;
+    if (!rss_sources_valid(sources, count)) return -EINVAL;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    same = count == source_count;
+    for (size_t i = 0U; same && i < count; ++i) {
+        same = rss_source_equal(&sources[i], &source_states[i].source) &&
+            strcmp(sources[i].name, source_states[i].source.name) == 0;
+    }
+    if (same && registry_persisted) {
+        rss_lock_release();
+        return 0;
+    }
+    ret = rss_platform_mount();
+    if (ret < 0) {
+        rss_lock_release();
+        return -ENODEV;
+    }
+    ret = rss_ensure_directory(NULL);
+    if (ret < 0) {
+        rss_lock_release();
+        return ret;
+    }
+    memset(&registry_block, 0, sizeof(registry_block));
+    registry_block.magic = RSS_REGISTRY_MAGIC;
+    registry_block.version = RSS_REGISTRY_VERSION;
+    registry_block.count = (uint16_t)count;
+    for (size_t i = 0U; i < count; ++i) rss_source_copy(&registry_block.sources[i], &sources[i]);
+    registry_block.checksum = rss_checksum(&registry_block,
+        offsetof(struct rss_registry_disk, checksum));
+    ret = rss_write_file(NULL, RSS_SOURCES_TMP_FILE, &registry_block,
+                         sizeof(registry_block), bounce);
+    if (ret == 0) ret = rss_swap_file(NULL, RSS_SOURCES_TMP_FILE, RSS_SOURCES_FILE,
+                                      RSS_SOURCES_BAK_FILE, &backup);
+    if (ret == 0) {
+        rss_apply_sources_locked(registry_block.sources, count);
+        registry_checked = true;
+        registry_persisted = true;
+        if (backup) (void)rss_unlink_leaf(NULL, RSS_SOURCES_BAK_FILE);
+    } else {
+        (void)rss_unlink_leaf(NULL, RSS_SOURCES_TMP_FILE);
+    }
+    rss_lock_release();
+#if defined(__ZEPHYR__)
+    if (ret == 0) papermono_ui_request_content_refresh();
+#endif
+    return ret;
+}
+
+uint32_t papermono_rss_revision(size_t source)
+{
+    uint32_t revision = 0U;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    if (source < source_count) revision = source_states[source].revision;
+    rss_lock_release();
+    return revision;
+}
+
+void papermono_rss_get_source(size_t source, struct papermono_rss_feed *out)
+{
+    if (out == NULL) return;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    if (source < source_count) {
+        (void)rss_ensure_index(&source_states[source]);
+        *out = source_states[source].feed;
+    } else memset(out, 0, sizeof(*out));
+    rss_lock_release();
+}
+
 void papermono_rss_get(struct papermono_rss_feed *out)
 {
-	if (out == NULL) {
-		return;
-	}
-	rss_lock_take();
-	*out = snapshot;
-	rss_lock_release();
+    papermono_rss_get_source(0U, out);
+}
+
+int papermono_rss_body_load_source(size_t source, size_t index, char *buffer,
+                                  size_t capacity)
+{
+    struct rss_file file = { 0 };
+    size_t offset = 0U, done = 0U;
+    int ret;
+    if (buffer == NULL || capacity == 0U) return -EINVAL;
+    buffer[0] = '\0';
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    if (source >= source_count) {
+        rss_lock_release();
+        return -ENOENT;
+    }
+    struct rss_source_state *state = &source_states[source];
+    const char *key = state->key;
+    ret = rss_ensure_index(state);
+    if (ret == -ENODEV || !state->feed.valid || index >= state->feed.count) {
+        rss_lock_release();
+        return -ENOENT;
+    }
+    for (size_t i = 0U; i < index; ++i) offset += state->feed.items[i].body_length;
+    const size_t length = state->feed.items[index].body_length;
+    const size_t to_read = RSS_MIN(length, capacity - 1U);
+    if (to_read > 0U) {
+        char path[RSS_CACHE_PATH_MAX];
+        ret = rss_build_path(key, path, sizeof(path), RSS_BODIES_FILE);
+        if (ret == 0) ret = rss_file_open_read(&file, path);
+        if (ret == 0) ret = rss_file_seek(&file, offset);
+        while (ret == 0 && done < to_read) {
+            const int received = rss_file_read(&file, buffer + done, to_read - done);
+            if (received < 0) { ret = received; break; }
+            if (received == 0) { ret = -EIO; break; }
+            done += (size_t)received;
+        }
+        (void)rss_file_close(&file);
+    } else ret = 0;
+    rss_lock_release();
+    if (ret < 0) return ret;
+    buffer[done] = '\0';
+    return (int)done;
 }
 
 int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
 {
-	struct rss_file file = { 0 };
-	size_t offset = 0U;
-	size_t to_read;
-	size_t done = 0U;
-	uint32_t length;
-	int ret = 0;
-
-	if (buffer == NULL || capacity == 0U) {
-		return -EINVAL;
-	}
-	rss_lock_take();
-	ret = rss_ensure_index();
-	if (ret == -ENODEV) {
-		rss_lock_release();
-		return -ENOENT;
-	}
-	if (!snapshot.valid || index >= snapshot.count) {
-		rss_lock_release();
-		return -ENOENT;
-	}
-	length = snapshot.items[index].body_length;
-	for (size_t i = 0U; i < index; ++i) {
-		offset += snapshot.items[i].body_length;
-	}
-	if (length == 0U) {
-		buffer[0] = '\0';
-		rss_lock_release();
-		return 0;
-	}
-	to_read = RSS_MIN((size_t)length, capacity - 1U);
-	{
-		char path[RSS_CACHE_PATH_MAX];
-
-		ret = rss_build_path(path, sizeof(path), RSS_BODIES_FILE);
-		if (ret < 0) {
-			rss_lock_release();
-			return -ENOENT;
-		}
-		ret = rss_file_open_read(&file, path);
-		if (ret < 0) {
-			rss_lock_release();
-			return -ENOENT;
-		}
-		ret = rss_file_seek(&file, offset);
-		while (ret == 0 && done < to_read) {
-			const int received = rss_file_read(
-				&file, buffer + done, to_read - done);
-
-			if (received < 0) {
-				ret = received;
-				break;
-			}
-			if (received == 0) {
-				break;
-			}
-			done += (size_t)received;
-		}
-		(void)rss_file_close(&file);
-	}
-	rss_lock_release();
-	if (ret < 0) {
-		return ret;
-	}
-	buffer[done] = '\0';
-	return (int)done;
+    return papermono_rss_body_load_source(0U, index, buffer, capacity);
 }
+
 
 #if defined(__ZEPHYR__)
 
 /* ------------------------------------------------------------------------- */
 /* HTTP fetch                                                                 */
 /* ------------------------------------------------------------------------- */
+
+#define RSS_HTTP_IDLE_TIMEOUT_MS 10000U
+#define RSS_HTTP_TOTAL_TIMEOUT_MS 30000U
 
 struct rss_url {
 	char host[RSS_HOST_MAX + 1U];
@@ -2853,10 +3690,70 @@ static size_t rss_dechunk(char *body, size_t length)
 	return output;
 }
 
+static int rss_socket_timeout(int sock, int option, int64_t deadline)
+{
+	const int64_t remaining = deadline - k_uptime_get();
+	const int64_t timeout_ms = RSS_MIN(remaining,
+					 (int64_t)RSS_HTTP_IDLE_TIMEOUT_MS);
+	struct zsock_timeval timeout;
+
+	if (remaining <= 0) {
+		return -ETIMEDOUT;
+	}
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	if (zsock_setsockopt(sock, SOL_SOCKET, option, &timeout,
+			     sizeof(timeout)) < 0) {
+		return -errno;
+	}
+	return 0;
+}
+
+static int rss_bind_source(int sock, const struct sockaddr_in *remote)
+{
+	struct net_if *iface = rss_iface();
+	const struct net_in_addr *address;
+	struct sockaddr_in local = {
+		.sin_family = AF_INET,
+	};
+	char source_text[16];
+	char remote_text[16];
+
+	if (iface == NULL) {
+		return -ENETDOWN;
+	}
+	address = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
+	if (address == NULL) {
+		return -ENETDOWN;
+	}
+	local.sin_addr = *address;
+	if (local.sin_addr.s_addr == 0U) {
+		return -ENETDOWN;
+	}
+	/* In STA+AP mode, Zephyr's unbound IPv4 source selection can prefer
+	 * the AP for a destination outside both subnets. Binding the concrete
+	 * station address fixes this connection's interface without changing
+	 * the AP's routing or the global default interface.
+	 */
+	if (zsock_bind(sock, (struct sockaddr *)&local, sizeof(local)) < 0) {
+		const int ret = -errno;
+
+		RSS_LOG_WRN("RSS source bind failed (%d)", ret);
+		return ret;
+	}
+	RSS_LOG_INF("RSS connect source %s -> %s",
+		    net_addr_ntop(AF_INET, &local.sin_addr, source_text,
+				  sizeof(source_text)),
+		    net_addr_ntop(AF_INET, &remote->sin_addr, remote_text,
+				  sizeof(remote_text)));
+	return 0;
+}
+
 static int rss_http_get(const char *url, char *response, size_t capacity,
 			size_t *body_offset, size_t *body_length,
 			bool *truncated)
 {
+	const int64_t deadline = k_uptime_get() + RSS_HTTP_TOTAL_TIMEOUT_MS;
 	struct rss_url parts;
 	struct sockaddr_in address = {
 		.sin_family = AF_INET,
@@ -2886,6 +3783,12 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 		(void)snprintf(port_text, sizeof(port_text), "%u",
 			       (unsigned int)parts.port);
 		ret = zsock_getaddrinfo(parts.host, port_text, &hints, &result);
+		if (k_uptime_get() >= deadline) {
+			if (result != NULL) {
+				zsock_freeaddrinfo(result);
+			}
+			return -ETIMEDOUT;
+		}
 		if (ret != 0 || result == NULL) {
 			RSS_LOG_WRN("RSS DNS lookup failed for %s (%d)",
 				    parts.host, ret);
@@ -2898,9 +3801,31 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 	if (sock < 0) {
 		return -errno;
 	}
-	if (zsock_connect(sock, (struct sockaddr *)&address,
-			  sizeof(address)) < 0) {
+	ret = rss_socket_timeout(sock, SO_RCVTIMEO, deadline);
+	if (ret == 0) {
+		ret = rss_socket_timeout(sock, SO_SNDTIMEO, deadline);
+	}
+	if (ret < 0) {
+		zsock_close(sock);
+		return ret;
+	}
+	ret = rss_bind_source(sock, &address);
+	if (ret < 0) {
+		zsock_close(sock);
+		return ret;
+	}
+	if (k_uptime_get() >= deadline) {
+		zsock_close(sock);
+		return -ETIMEDOUT;
+	}
+	ret = zsock_connect(sock, (struct sockaddr *)&address, sizeof(address));
+	if (ret < 0) {
 		ret = -errno;
+	}
+	if (k_uptime_get() >= deadline) {
+		ret = -ETIMEDOUT;
+	}
+	if (ret < 0) {
 		RSS_LOG_WRN("RSS connect failed (%d) to %s", ret,
 			    net_addr_ntop(AF_INET, &address.sin_addr,
 					  (char[16]){ 0 }, 16));
@@ -2928,14 +3853,24 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 		return -EINVAL;
 	}
 	while (sent < (size_t)request_len) {
+		ret = rss_socket_timeout(sock, SO_SNDTIMEO, deadline);
+		if (ret < 0) {
+			zsock_close(sock);
+			return ret;
+		}
 		const ssize_t wrote = zsock_send(sock, request + sent,
 						 (size_t)request_len - sent, 0);
 
+		if (k_uptime_get() >= deadline) {
+			zsock_close(sock);
+			return -ETIMEDOUT;
+		}
 		if (wrote < 0) {
 			if (errno == EINTR) {
 				continue;
 			}
-			ret = -errno;
+			ret = errno == EAGAIN || errno == EWOULDBLOCK ?
+				-ETIMEDOUT : -errno;
 			zsock_close(sock);
 			return ret;
 		}
@@ -2946,9 +3881,18 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 		sent += (size_t)wrote;
 	}
 	while (used + 1U < capacity) {
+		ret = rss_socket_timeout(sock, SO_RCVTIMEO, deadline);
+		if (ret < 0) {
+			zsock_close(sock);
+			return ret;
+		}
 		const ssize_t received = zsock_recv(sock, response + used,
 						    capacity - 1U - used, 0);
 
+		if (k_uptime_get() >= deadline) {
+			zsock_close(sock);
+			return -ETIMEDOUT;
+		}
 		if (received == 0) {
 			break;
 		}
@@ -2956,7 +3900,8 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 			if (errno == EINTR) {
 				continue;
 			}
-			ret = -errno;
+			ret = errno == EAGAIN || errno == EWOULDBLOCK ?
+				-ETIMEDOUT : -errno;
 			zsock_close(sock);
 			return ret;
 		}
@@ -3003,16 +3948,13 @@ static int rss_http_get(const char *url, char *response, size_t capacity,
 /* ------------------------------------------------------------------------- */
 
 static char response[RSS_RESPONSE_MAX] RSS_PSRAM;
+static struct rss_fetch_job worker_job RSS_PSRAM;
 static K_SEM_DEFINE(request_sem, 0, 1);
-static atomic_t fetch_busy;
-/* 0 idle, 1 fetching, negative errno of the last failed refresh. */
-static atomic_t last_result;
 static atomic_t worker_started;
 static struct k_thread worker_thread;
+static size_t worker_cursor RSS_PSRAM;
 
 #if defined(CONFIG_ESP_SPIRAM)
-/* The worker stack lives in PSRAM: the parser is iterative and uses little
- * stack, and internal DRAM has no room for another 6 KB. */
 static Z_KERNEL_STACK_DEFINE_IN(worker_stack, RSS_THREAD_STACK_SIZE, RSS_PSRAM);
 #else
 static K_THREAD_STACK_DEFINE(worker_stack, RSS_THREAD_STACK_SIZE);
@@ -3020,253 +3962,252 @@ static K_THREAD_STACK_DEFINE(worker_stack, RSS_THREAD_STACK_SIZE);
 
 static int64_t rss_wall_clock(void)
 {
-	const time_t now = time(NULL);
-
-	return now > 1600000000 ? (int64_t)now : 0;
+    const time_t now = time(NULL);
+    return now > 1600000000 ? (int64_t)now : 0;
 }
 
-static bool rss_cache_fresh_locked(void)
+static bool rss_job_current(const struct rss_fetch_job *job)
 {
-	const int64_t now = rss_wall_clock();
-
-	if (!snapshot.valid) {
-		return false;
-	}
-	if (snapshot.updated_at > 0) {
-		if (now == 0) {
-			/* The RTC is not calibrated, so the age is unknown; trust
-			 * the card cache instead of refetching on every boot.
-			 */
-			return true;
-		}
-		return now >= snapshot.updated_at &&
-		       now - snapshot.updated_at <
-			       (int64_t)RSS_CACHE_FRESH_SECONDS;
-	}
-	/* Without a cache timestamp, use the uptime of this boot's fetch. */
-	return last_fetch_uptime_ms != 0 &&
-	       k_uptime_get() - last_fetch_uptime_ms <
-		       (int64_t)RSS_CACHE_FRESH_SECONDS * 1000;
+    bool current;
+    rss_lock_take();
+    current = rss_job_current_locked(job);
+    rss_lock_release();
+    return current;
 }
 
-static bool rss_wait_ipv4(void)
+static void rss_fetch_complete(const struct rss_fetch_job *job, int result)
 {
-	for (uint32_t waited = 0U; waited < RSS_IPV4_WAIT_MS;
-	     waited += 1000U) {
-		if (rss_network_ready()) {
-			return true;
-		}
-		k_msleep(1000);
-	}
-	return rss_network_ready();
+    bool publish = false;
+    rss_lock_take();
+    if (rss_job_current_locked(job)) {
+        struct rss_source_state *state = &source_states[job->slot];
+        state->result = result;
+        state->inflight = false;
+        publish = true;
+    }
+    rss_lock_release();
+    if (publish && result == 0) papermono_ui_request_content_refresh();
+    else if (publish) papermono_ui_request_background_refresh();
 }
 
-static int rss_fetch_once(const char *url)
+static bool rss_wait_ipv4(const struct rss_fetch_job *job)
 {
-	size_t body_offset = 0U;
-	size_t body_length = 0U;
-	bool truncated = false;
-	int ret;
+    for (uint32_t waited = 0U; waited < RSS_IPV4_WAIT_MS; waited += 1000U) {
+        if (!rss_job_current(job)) return false;
+        if (rss_network_ready()) return true;
+        k_msleep(1000);
+    }
+    return rss_network_ready();
+}
 
-	ret = rss_http_get(url, response, sizeof(response), &body_offset,
-			   &body_length, &truncated);
-	if (ret < 0) {
-		return ret;
-	}
-	return rss_cache_store(response + body_offset, body_length,
-			       rss_wall_clock(), truncated);
+static int rss_fetch_once(const struct rss_fetch_job *job)
+{
+    size_t body_offset = 0U, body_length = 0U;
+    bool truncated = false;
+    int ret = rss_http_get(job->source.url, response, sizeof(response),
+                           &body_offset, &body_length, &truncated);
+    if (ret < 0) return ret;
+    return rss_cache_store(job, response + body_offset, body_length,
+                            rss_wall_clock(), truncated);
+}
+
+static bool rss_next_job(struct rss_fetch_job *job)
+{
+    bool found = false;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    for (size_t offset = 0U; offset < source_count; ++offset) {
+        const size_t index = (worker_cursor + offset) % source_count;
+        struct rss_source_state *state = &source_states[index];
+        if (state->pending && !state->inflight) {
+            rss_job_copy_locked(index, job);
+            state->pending = false;
+            state->inflight = true;
+            worker_cursor = (index + 1U) % source_count;
+            found = true;
+            break;
+        }
+    }
+    rss_lock_release();
+    return found;
+}
+
+static bool rss_retry_delay(const struct rss_fetch_job *job)
+{
+    for (uint32_t waited = 0U; ; waited += 1000U) {
+        bool retry = true;
+        rss_lock_take();
+        if (!rss_job_current_locked(job)) retry = false;
+        for (size_t i = 0U; retry && i < source_count; ++i) {
+            if (i != job->slot && source_states[i].pending) retry = false;
+        }
+        rss_lock_release();
+        if (!retry) return false;
+        if (waited >= RSS_FETCH_RETRY_MS) return true;
+        k_msleep(1000);
+    }
 }
 
 static void rss_worker(void *a, void *b, void *c)
 {
-	static uint8_t sd_retries;
-	char url[PAPERMONO_RSS_URL_MAX + 1U];
-
-	ARG_UNUSED(a);
-	ARG_UNUSED(b);
-	ARG_UNUSED(c);
-	RSS_LOG_INF("RSS worker started (SD cache, fetch on demand)");
-	for (;;) {
-		int loaded;
-		bool fresh = false;
-		int ret = -EIO;
-
-		(void)k_sem_take(&request_sem, K_FOREVER);
-		if (!atomic_cas(&fetch_busy, 0, 1)) {
-			continue;
-		}
-		atomic_set(&last_result, 1);
-		rss_lock_take();
-		loaded = rss_ensure_index();
-		if (loaded >= 0) {
-			fresh = rss_cache_fresh_locked();
-		}
-		rss_lock_release();
-		if (loaded == 1) {
-			papermono_ui_request_background_refresh();
-		}
-		if (loaded == -ENODEV) {
-			/* The UI mounts the card a few seconds after boot; keep the
-			 * page's request alive instead of leaving it on "syncing".
-			 */
-			if (sd_retries < 15U) {
-				++sd_retries;
-				atomic_set(&fetch_busy, 0);
-				k_msleep(2000);
-				k_sem_give(&request_sem);
-				continue;
-			}
-			RSS_LOG_WRN("RSS skipped: SD cache is not available");
-			atomic_set(&last_result, -ENODEV);
-			atomic_set(&fetch_busy, 0);
-			continue;
-		}
-		sd_retries = 0U;
-		if (fresh) {
-			RSS_LOG_INF("RSS cache is fresh; not fetching");
-			atomic_set(&fetch_busy, 0);
-			continue;
-		}
-		(void)snprintf(url, sizeof(url), "%s",
-			       papermono_settings_get()->rss_url);
-		if (url[0] == '\0' || strncmp(url, "http://", 7U) != 0) {
-			RSS_LOG_WRN("RSS URL is not a plain http:// URL");
-			atomic_set(&last_result, -EINVAL);
-			atomic_set(&fetch_busy, 0);
-			continue;
-		}
-		if (!rss_wait_ipv4()) {
-			RSS_LOG_WRN("RSS fetch skipped: IPv4 is not ready");
-			atomic_set(&last_result, -ENETDOWN);
-			atomic_set(&fetch_busy, 0);
-			continue;
-		}
-		for (uint8_t attempt = 0U; attempt < RSS_FETCH_ATTEMPTS;
-		     ++attempt) {
-			ensure_default_router();
-			ret = rss_fetch_once(url);
-			if (ret == 0) {
-				break;
-			}
-			RSS_LOG_WRN("RSS attempt %u/%u failed (%d)",
-				    attempt + 1U, RSS_FETCH_ATTEMPTS, ret);
-			if (ret == -EINVAL || ret == -EPROTONOSUPPORT) {
-				break;
-			}
-			if (attempt + 1U < RSS_FETCH_ATTEMPTS) {
-				k_msleep(RSS_FETCH_RETRY_MS);
-			}
-		}
-		atomic_set(&last_result, ret);
-		if (ret == 0) {
-			papermono_ui_request_background_refresh();
-		} else {
-			RSS_LOG_WRN("RSS refresh failed (%d); the next news-page open will retry",
-				    ret);
-			papermono_ui_request_background_refresh();
-		}
-		atomic_set(&fetch_busy, 0);
-	}
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    RSS_LOG_INF("RSS worker started (per-source SD cache, fetch on demand)");
+    for (;;) {
+        (void)k_sem_take(&request_sem, K_FOREVER);
+        while (rss_next_job(&worker_job)) {
+            int loaded = -ENODEV;
+            int ret = -EIO;
+            for (uint8_t retry = 0U; retry <= 15U; ++retry) {
+                rss_lock_take();
+                if (!rss_job_current_locked(&worker_job)) {
+                    rss_lock_release();
+                    loaded = -ESTALE;
+                    break;
+                }
+                loaded = rss_ensure_index(&source_states[worker_job.slot]);
+                rss_lock_release();
+                if (loaded != -ENODEV || retry == 15U) break;
+                k_msleep(2000);
+            }
+            if (loaded == -ESTALE) continue;
+            if (loaded == 1) papermono_ui_request_background_refresh();
+            if (loaded == -ENODEV) {
+                rss_fetch_complete(&worker_job, -ENODEV);
+                continue;
+            }
+            if (!rss_wait_ipv4(&worker_job)) {
+                rss_fetch_complete(&worker_job, -ENETDOWN);
+                continue;
+            }
+            for (uint8_t attempt = 0U; attempt < RSS_FETCH_ATTEMPTS; ++attempt) {
+                if (!rss_job_current(&worker_job)) { ret = -ESTALE; break; }
+                ensure_default_router();
+                ret = rss_fetch_once(&worker_job);
+                if (ret == 0 || ret == -ESTALE) break;
+                RSS_LOG_WRN("RSS source %s attempt %u/%u failed (%d)",
+                            worker_job.source.id, attempt + 1U, RSS_FETCH_ATTEMPTS, ret);
+                if (ret == -EINVAL || ret == -EPROTONOSUPPORT) break;
+                /* A failed source must not hold a newly selected source
+                 * behind its 20-second retry backoff. Keep only this explicit
+                 * request; the user can retry the failed source later. */
+                if (attempt + 1U < RSS_FETCH_ATTEMPTS &&
+                    !rss_retry_delay(&worker_job)) break;
+            }
+            if (ret != 0 && ret != -ESTALE) RSS_LOG_WRN("RSS source %s refresh failed (%d)",
+                                                       worker_job.source.id, ret);
+            rss_fetch_complete(&worker_job, ret);
+        }
+    }
 }
 
 int papermono_rss_init(void)
 {
-	if (!atomic_cas(&worker_started, 0, 1)) {
-		return 0;
-	}
-	(void)k_thread_create(&worker_thread, worker_stack,
-			      K_THREAD_STACK_SIZEOF(worker_stack), rss_worker,
-			      NULL, NULL, NULL, 9, 0, K_NO_WAIT);
-	/* The SD card is usually still being brought up by the UI at this
-	 * point; this attempt only helps when it is already mounted. The worker
-	 * retries through papermono_rss_request().
-	 */
-	rss_lock_take();
-	if (rss_ensure_index() == 1) {
-		RSS_LOG_INF("RSS index restored from SD at boot");
-	}
-	rss_lock_release();
-	return 0;
+    if (!atomic_cas(&worker_started, 0, 1)) return 0;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    if (source_count != 0U) (void)rss_ensure_index(&source_states[0]);
+    rss_lock_release();
+    (void)k_thread_create(&worker_thread, worker_stack,
+                          K_THREAD_STACK_SIZEOF(worker_stack), rss_worker,
+                          NULL, NULL, NULL, 9, 0, K_NO_WAIT);
+    return 0;
 }
 
-int papermono_rss_status(void)
-{
-	return (int)atomic_get(&last_result);
-}
-
-int papermono_rss_request(void)
-{
-	bool needs_work;
-
-	rss_lock_take();
-	needs_work = !index_loaded || !rss_cache_fresh_locked();
-	rss_lock_release();
-	if (!needs_work) {
-		return 0;
-	}
-	if (atomic_get(&fetch_busy) != 0) {
-		return 0;
-	}
-	k_sem_give(&request_sem);
-	return 0;
-}
-
-#else /* Host build: no network, no worker; the tests drive the cache. */
+#else /* Host build: no network or worker; tests drive individual caches. */
 
 int papermono_rss_init(void)
 {
-	return 0;
+    rss_registry_ensure_locked();
+    return 0;
 }
 
-int papermono_rss_request(void)
+#endif /* __ZEPHYR__ */
+
+int papermono_rss_request_source(size_t source)
 {
-	return 0;
+    bool queued = false;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    if (source >= source_count) {
+        rss_lock_release();
+        return -ENOENT;
+    }
+    struct rss_source_state *state = &source_states[source];
+    if (!state->pending && !state->inflight) {
+        state->pending = true;
+        state->result = 1;
+        queued = true;
+    }
+    rss_lock_release();
+#if defined(__ZEPHYR__)
+    if (queued) k_sem_give(&request_sem);
+#else
+    (void)queued;
+#endif
+    return 0;
 }
 
-int papermono_rss_status(void)
+int papermono_rss_status_source(size_t source)
 {
-	return 0;
+    int result;
+    rss_lock_take();
+    rss_registry_ensure_locked();
+    result = source < source_count ? source_states[source].result : -ENOENT;
+    rss_lock_release();
+    return result;
 }
 
+int papermono_rss_request(void) { return papermono_rss_request_source(0U); }
+int papermono_rss_status(void) { return papermono_rss_status_source(0U); }
+
+#if !defined(__ZEPHYR__)
 void papermono_rss_test_set_cache_dir(const char *directory)
 {
-	if (directory == NULL) {
-		rss_host_cache_directory[0] = '\0';
-	} else {
-		(void)snprintf(rss_host_cache_directory,
-			       sizeof(rss_host_cache_directory), "%s",
-			       directory);
-	}
-	index_loaded = false;
-	memset(&snapshot, 0, sizeof(snapshot));
-	memset(&staging, 0, sizeof(staging));
+    (void)snprintf(rss_host_cache_directory, sizeof(rss_host_cache_directory), "%s",
+                   directory != NULL ? directory : ".");
+    memset(source_states, 0, sizeof(source_states));
+    source_count = 0U;
+    registry_initialized = registry_checked = registry_persisted = false;
+    registry_generation = revision_serial = 0U;
+    memset(&staging, 0, sizeof(staging));
 }
 
 void papermono_rss_test_reset(void)
 {
-	index_loaded = false;
-	memset(&snapshot, 0, sizeof(snapshot));
-	memset(&staging, 0, sizeof(staging));
+    for (size_t i = 0U; i < source_count; ++i) {
+        memset(&source_states[i].feed, 0, sizeof(source_states[i].feed));
+        source_states[i].index_loaded = false;
+    }
+    memset(&staging, 0, sizeof(staging));
 }
 
-/* Simulates one fetch+parse+cache-write cycle without the network. */
+int papermono_rss_test_ingest_source(size_t source, const char *xml, size_t length)
+{
+    struct rss_fetch_job job;
+    rss_registry_ensure_locked();
+    if (source >= source_count) return -ENOENT;
+    rss_job_copy_locked(source, &job);
+    const int ret = rss_cache_store(&job, xml, length, 1700000000, false);
+    if (rss_job_current_locked(&job)) {
+        source_states[source].result = ret;
+        source_states[source].pending = false;
+        source_states[source].inflight = false;
+    }
+    return ret;
+}
+
 int papermono_rss_test_ingest(const char *xml, size_t length)
 {
-	return rss_cache_store(xml, length, 1700000000, false);
+    return papermono_rss_test_ingest_source(0U, xml, length);
 }
 
-/* Simulates a reboot: the RAM index is dropped and re-read from the SD cache. */
 int papermono_rss_test_load(void)
 {
-	int ret;
-
-	index_loaded = false;
-	memset(&snapshot, 0, sizeof(snapshot));
-	memset(&staging, 0, sizeof(staging));
-	rss_lock_take();
-	ret = rss_ensure_index();
-	rss_lock_release();
-	return ret;
+    rss_registry_ensure_locked();
+    if (source_count == 0U) return -ENOENT;
+    memset(&source_states[0].feed, 0, sizeof(source_states[0].feed));
+    source_states[0].index_loaded = false;
+    memset(&staging, 0, sizeof(staging));
+    return rss_ensure_index(&source_states[0]);
 }
-
-#endif /* __ZEPHYR__ */
+#endif

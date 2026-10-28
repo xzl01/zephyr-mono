@@ -241,3 +241,32 @@ offset  size  field
 - 内容验证和提交在存储 worker 中执行。
 - 完成后只调用 `papermono_ui_request_content_refresh()` 投递 UI 消息，不直接
   访问 LVGL 或 SSD1677。
+
+
+## RSS 订阅源
+
+`GET /api/v1/rss/sources` 与 `PUT /api/v1/rss/sources` 均需
+`X-PaperMono-Session`。地址可能包含私有订阅令牌，不通过未配对接口返回。
+
+GET 返回 `max_sources`、`generation` 和 `sources`。每源是稳定 `id`、`name`、`url`：
+
+```json
+{"max_sources":4,"generation":1,"sources":[{"id":"gold","name":"金价","url":"http://rss.example/gold.xml"}]}
+```
+
+PUT 提交完整列表；新增、修改、移除与排序均通过同一原子保存接口完成：
+
+```json
+{"sources":[{"id":"gold","name":"金价","url":"http://rss.example/gold.xml"}]}
+```
+
+允许 `{"sources":[]}`。最多 4 源，ID 最多 15 字节、名称最多 47 UTF-8 字节、URL 最多
+191 字节。名称支持原始 UTF-8 及合法 JSON Unicode 转义；拒绝 NUL、非法代理项和控制字符。
+只支持可解析的 `http://` 地址，不支持 HTTPS、userinfo 或片段。重复 ID/地址被拒绝。
+
+成功返回 `200 {"ok":true}`，写入并校验 SD 注册表后才替换运行配置。失败保留原列表：
+未配对 `401`；其它请求占用或读取时配置变化 `409`；格式/校验错误 `400`；请求超过
+4096 B `413`；流式请求超过期限 `408`；TF 未就绪或存储失败 `503`。未完成的未授权、
+过大请求会直接关闭连接，停止发送数据的请求在 30 秒截止后关闭；只有进入最终回调时
+才返回上述 JSON 错误。授权在首块绑定请求客户端，后续块不重新使用已被 HTTP 栈清除
+的头。终止、过大、超时请求清理私有地址缓冲，并由 HTTP 栈释放占用后接收新请求。
