@@ -7,19 +7,25 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 
 HERE = Path(__file__).resolve().parents[1]
 REPO = HERE.parents[1]
-PAGES = ["settings", "sleep", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-password",
+VOICE_PAGES = ["remote-voice", "remote-voice-streaming", "remote-voice-error"]
+PAGES = ["settings", "sleep", "sleep-weather", "sleep-weather-extreme",
+         "sleep-weather-flat", "sleep-no-weather", "sleep-no-date",
+         "sleep-reading", "sleep-reading-home", "sleep-reading-rss",
+         "sleep-reading-record", "sleep-reading-empty",
+         "sleep-tomorrow", "sleep-tomorrow-empty", "sleep-blank", "wifi-scan", "wifi-list", "wifi-list-2", "wifi-password",
          "wifi-symbols", "wifi-63chars", "wifi-connecting", "wifi-failure",
          "wifi-scan-failure", "wifi-empty", "wifi-forget",
-         "home", "launcher-1", "launcher-2", "library", "weread", "calendar",
+         "home", "home-populated", "launcher-1", "launcher-2", "library", "library-populated", "weread", "calendar",
          "news", "news-detail", "news-empty", "news-error", "news-syncing",
          "news-cached-error", "article-long",
          "news-ai", "news-four-sources", "news-no-sources", "news-table",
          "news-table-wide", "news-table-long", "news-table-after",
          "news-table-dense",
-         "tasks", "notes", "info", "content-center", "remote", "remote-pairing",
+         "tasks", "tasks-populated", "notes", "notes-populated", "info", "content-center", "remote", "remote-pairing",
          "remote-passkey", "remote-media", "remote-presentation", "remote-mouse",
          "tools", "system",
          "system-unformatted", "power", "confirm-sleep", "confirm-shutdown",
@@ -51,10 +57,16 @@ def digest(paths):
 
 
 def main():
-    pages = sys.argv[1:] or PAGES
-    unknown = set(pages) - set(PAGES)
+    # Matches PAPERMONO_BLE_MIC's current default-y firmware configuration.
+    # The override retains the supported three-tab build for comparison.
+    mic = os.environ.get("PAPERMONO_PREVIEW_BLE_MIC", "1")
+    if mic not in {"0", "1"}:
+        raise SystemExit("PAPERMONO_PREVIEW_BLE_MIC must be 0 or 1")
+    available = PAGES + (VOICE_PAGES if mic == "1" else [])
+    pages = sys.argv[1:] or available
+    unknown = set(pages) - set(available)
     if unknown:
-        raise SystemExit(f"Unknown fixture(s): {sorted(unknown)}; choose {PAGES}")
+        raise SystemExit(f"Unknown fixture(s): {sorted(unknown)}; choose {available}; voice fixtures require PAPERMONO_PREVIEW_BLE_MIC=1")
     lvgl = Path(os.environ.get("LVGL", str(REPO.parent / "modules/lib/gui/lvgl"))).resolve()
     if not (lvgl / "lvgl.h").is_file():
         raise SystemExit("LVGL source missing; set LVGL to your LVGL 9.x checkout")
@@ -69,15 +81,16 @@ def main():
         directory.mkdir(parents=True, exist_ok=True)
     snapshot = build / "papermono_ui_snapshot.c"
     snapshot.write_bytes((REPO / "src/papermono_ui.c").read_bytes())
-    manifest_paths = [snapshot, HERE / "lv_conf.h", REPO / "include/papermono/content_server.h",
-                      REPO / "include/papermono/wifi_input.h"]
+    manifest_paths = [snapshot, HERE / "lv_conf.h"]
+    manifest_paths += sorted((REPO / "include/papermono").glob("*.h"))
     manifest_paths += list((REPO / "src/generated").glob("*.c"))
     manifest_paths += [REPO / f"src/papermono_{module}.c" for module in MODULES]
-    manifest_paths += [p for p in HERE.rglob("*") if p.is_file()]
+    manifest_paths += [p for p in HERE.rglob("*")
+                       if p.is_file() and "__pycache__" not in p.parts]
     revision = subprocess.run(["git", "-C", str(lvgl), "rev-parse", "HEAD"],
                               capture_output=True, text=True)
     manifest = "Synthetic content, hardware and Wi-Fi; real UI + native LVGL I1, 480x800; LVGL heap 65536 bytes\n"
-    manifest += f"repo: {REPO}\nlvgl: {lvgl}\nlvgl revision: {revision.stdout.strip() or 'unknown'}\nfixtures: {' '.join(pages)}\n"
+    manifest += f"repo: {REPO}\nlvgl: {lvgl}\nlvgl revision: {revision.stdout.strip() or 'unknown'}\nfixtures: {' '.join(pages)}\nBLE microphone UI: {'enabled' if mic == '1' else 'disabled'}\n"
     manifest += "\n".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p}" for p in manifest_paths)
     (out / "SOURCES.txt").write_text(manifest + "\n")
     run([sys.executable, HERE / "scripts/patch_ui.py", snapshot, build / "papermono_ui_preview.c"])
@@ -111,6 +124,7 @@ def main():
             stamp.write_text(key)
         objects.append(target)
     print(f"LVGL: {len(sources)} translation units (content-addressed compile cache)", flush=True)
+    ui_flags = flags + (["-DCONFIG_PAPERMONO_BLE_MIC=1"] if mic == "1" else [])
     real = [REPO / f"src/papermono_{module}.c" for module in MODULES]
     real += sorted((REPO / "src/generated").glob("*.c"))
     real += [HERE / "scripts/zephyr_host.c", HERE / "scripts/fs_host.c",
@@ -119,11 +133,14 @@ def main():
     for index, source in enumerate(real):
         target = obj / f"real_{index}_{source.stem}.o"
         warnings = ["-Wall", "-Wextra"] if source.name == "papermono_ui_preview.c" else ["-w"]
-        run(cc + flags + warnings + ["-c", source, "-o", target])
+        run(cc + ui_flags + warnings + ["-c", source, "-o", target])
         objects.append(target)
     run(cc + ["-o", build / "preview"] + objects + ["-lm"])
-    env = dict(os.environ, PAPERMONO_PREVIEW_FS=str(fsroot))
     for page in pages:
+        # Preserve each synthetic filesystem and prevent seeded books/events in
+        # one screenshot from silently populating a later empty-state fixture.
+        fixture_fs = Path(tempfile.mkdtemp(prefix=f"{page}-", dir=fsroot))
+        env = dict(os.environ, PAPERMONO_PREVIEW_FS=str(fixture_fs))
         run([build / "preview", page, build / f"{page}.pbm"], env=env, timeout=30)
         run([sys.executable, HERE / "scripts/pbm_to_png.py", build / f"{page}.pbm", out / f"{page}.png", page])
     run([sys.executable, HERE / "scripts/verify.py", out] + pages)

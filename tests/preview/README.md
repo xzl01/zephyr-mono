@@ -16,6 +16,9 @@ source checkout (normally the workspace's `../modules/lib/gui/lvgl`):
 bash tests/preview/build.sh
 # Or a subset:
 bash tests/preview/build.sh settings wifi-list wifi-symbols wifi-63chars
+# Four-tab production voice UI is enabled by default. Compare the supported
+# no-microphone build (voice fixtures are unavailable in this variant):
+PAPERMONO_PREVIEW_BLE_MIC=0 bash tests/preview/build.sh remote-mouse
 # Optional dependency / artifact overrides:
 LVGL=/path/to/lvgl OUT=/absolute/path/to/artifacts PYTHON=python3 CC=cc \
   bash tests/preview/build.sh
@@ -23,8 +26,11 @@ LVGL=/path/to/lvgl OUT=/absolute/path/to/artifacts PYTHON=python3 CC=cc \
 
 PNG files are directly in `tmp/wifi-preview/`; the executable, UI snapshot,
 PBMs, temporary host filesystem and content-addressed LVGL object cache are
-in its `build/` subdirectory. `SOURCES.txt` records snapshot/config/header/asset
-hashes. Existing output is not deleted; only the requested fixture names are
+in its `build/` subdirectory. Each fixture gets a newly created, separate host
+filesystem under `build/fs/`, so imported sample books or events cannot leak
+into a later empty-state fixture. These small synthetic filesystem snapshots
+are retained with the other artifacts. `SOURCES.txt` records
+snapshot/config/header/asset hashes and the microphone UI compile option. Existing output is not deleted; only the requested fixture names are
 replaced. Run one build per output directory at a time. A changed shared UI
 at the end of a build prints a reminder to rebuild.
 
@@ -51,12 +57,53 @@ The default run also covers the existing Field Notes shell and storage flow:
 `notes`, `info`, `content-center`, `remote`, `remote-pairing`, `remote-passkey`,
 `remote-media`, `remote-presentation`, `remote-mouse`, `tools`, `system`,
 `system-unformatted`, `power`, `confirm-sleep`, `confirm-shutdown`,
-`confirm-ble`, `confirm-reset` and `confirm-format` (42 fixtures total).
+`confirm-ble`, `confirm-reset` and `confirm-format`.
 Remote fixtures cover an idle link, pairing in progress, a synthetic six-digit
-passkey, and all three modes on a secured link. These render the production
-page within the same 64 KiB LVGL heap; they do not exercise a Bluetooth stack.
-Content pages use the host filesystem, initially empty. The unformatted-card
-fixture injects a mount error into the host filesystem shim and reaches the
+passkey, and the media, presentation and mouse modes on a secured link. By
+default `CONFIG_PAPERMONO_BLE_MIC` is also defined, matching its current
+firmware default-y configuration: all remote screenshots then use four tabs.
+`PAPERMONO_PREVIEW_BLE_MIC=0` preserves the three-tab variant and excludes voice
+fixtures. These render the production page within the same 64 KiB LVGL heap;
+they do not exercise a Bluetooth stack, PDM capture, ADPCM encoding or a host
+receiver.
+
+Additional fixtures cover the current standby summaries and representative real
+portable-model content:
+
+| Name | Synthetic input, rendered and parsed by production code |
+| --- | --- |
+| `home-populated` | Three TXT files, a loaded real reader page, upcoming ICS events, tasks and notes |
+| `library-populated` | Three imported TXT files, including a long Chinese book title |
+| `tasks-populated` | Three imported JSON tasks, including a long title and a completed item |
+| `notes-populated` | Two imported Markdown notes, including a long title |
+| `remote-voice` | Secured host has not subscribed; production waiting guidance |
+| `remote-voice-streaming` | Subscribed synthetic voice worker in STREAMING phase |
+| `remote-voice-error` | Subscribed synthetic voice worker reports `-EIO` |
+| `sleep` | Default quote summary with valid date and synthetic weather |
+| `sleep-weather` | Eight moderate synthetic temperature samples |
+| `sleep-weather-extreme` | Eight samples spanning −40 to 60 °C for chart containment |
+| `sleep-weather-flat` | Eight equal samples for a zero-range chart |
+| `sleep-no-weather` | Invalid weather snapshot with hourly summary selected |
+| `sleep-no-date` | Unavailable synthetic RTC; no fabricated date |
+| `sleep-reading` | Imported TXT and real reader page; active Library captures its latest progress for standby |
+| `sleep-reading-home` | Real second reader page, actual Library close and arena erase, then cached page/percent/bar on standby |
+| `sleep-reading-rss` | Same close path followed by a full RSS body load into the reused arena; standby retains cached progress |
+| `sleep-reading-record` | Same recent-book record without a loaded page; progress remains unknown |
+| `sleep-reading-empty` | Reading summary with no books or recent record |
+| `sleep-tomorrow` | An imported ICS event on the day after the fixed preview date |
+| `sleep-tomorrow-empty` | Tomorrow summary with no event |
+| `sleep-blank` | Deliberately blank summary band |
+
+The default build has 73 fixtures; disabling microphone UI leaves 70. Populated
+content is authored demo material and is imported through the real content-store
+transaction API. Calendar/tasks/notes use the real portable parsers and organizer;
+reader progress comes from the real page reader and in-memory Settings shim,
+not a hand-written percentage. The existing unqualified `home`, `library`,
+`tasks` and `notes` fixtures remain empty states. All host files are confined to
+the selected artifact directory; no real TF card, host documents or persistent
+settings are touched.
+
+The unformatted-card fixture injects a mount error into the host filesystem shim and reaches the
 real portable storage model; it never formats or accesses a host disk.
 Confirmation fixtures render the real production page without executing its
 destructive action. Dates, network state and measurements remain synthetic.
@@ -75,7 +122,7 @@ Every preview process initializes the real portable modules/router, runs the
 assertion runner **before** selecting its screenshot fixture, then resets test
 state and renders that fixture. A failed assertion prints its condition and
 snapshot line and exits **1** without writing the requested PBM. The runner is
-independent of `assert`/`NDEBUG`; there is no screenshot-only bypass. The 12
+independent of `assert`/`NDEBUG`; there is no screenshot-only bypass. The
 Wi-Fi fixtures remain available alongside the neighboring Field Notes pages.
 
 Coverage uses production hit rectangles and actual keyboard hit testing:
@@ -100,6 +147,10 @@ Coverage uses production hit rectangles and actual keyboard hit testing:
 - Paging/layer changes advance the input epoch and mark a layout transition;
   failed display refresh leaves the guard set and successful refresh releases
   it. `process_event` drops a stale-epoch touch but accepts a current-epoch key.
+- Reading standby fixtures assert the real page number, percentage and progress
+  bar after Library closes, including a full RSS body overwriting its old arena.
+  Active Library captures fresh progress; a recent-book record without a loaded
+  page keeps the unknown-progress hint and omits the bar.
 
 The stub records **API calls separately from accepted synthetic requests** and
 supports return/state injection. It matches demo SSID/password arguments during

@@ -10,6 +10,8 @@
 int preview_init(void);
 int preview_run_assertions(void);
 int preview_render_fixture(const char *name, lv_obj_t *screen);
+size_t preview_fixed_line_count(void);
+size_t preview_fixed_line_capacity(void);
 
 #define WIDTH 480
 #define HEIGHT 800
@@ -88,6 +90,15 @@ int main(int argc, char **argv)
 		fprintf(stderr, "preview: %s render failed: %d\n", argv[1], ret);
 		return 1;
 	}
+	/* A full pool silently omits the next line in production. Keep a measured
+	 * margin for every rendered state, including all six remote controls.
+	 */
+	if (preview_fixed_line_count() >= preview_fixed_line_capacity()) {
+		fprintf(stderr, "preview: fixed line capacity exhausted\n");
+		return 1;
+	}
+	fprintf(stderr, "%s: fixed lines=%zu/%zu\n", argv[1],
+		preview_fixed_line_count(), preview_fixed_line_capacity());
 	for (unsigned i = 0; i < 4; ++i) {
 		lv_tick_inc(16);
 		lv_timer_handler();

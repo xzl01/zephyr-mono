@@ -72,9 +72,9 @@ enum detail_setting_index {
 	DETAIL_SETTING_RESET, DETAIL_SETTING_POWER,
 };
 static const struct papermono_rect detail_setting_rects[] = {
-	{22,162,436,56}, {22,222,436,56}, {22,282,436,56},
-	{22,342,436,56}, {22,434,436,56}, {22,494,436,56},
-	{22,586,436,56}, {22,646,436,56},
+	{22,162,436,56}, {22,218,436,56}, {22,274,436,88},
+	{22,362,436,56}, {22,456,436,56}, {22,512,436,56},
+	{22,608,436,56}, {22,664,436,56},
 };
 /* The settings page and its event dispatch index this table by
  * enum detail_setting_index, so a missing or extra row silently shifts every
@@ -83,6 +83,19 @@ static const struct papermono_rect detail_setting_rects[] = {
 _Static_assert(sizeof(detail_setting_rects) / sizeof(detail_setting_rects[0]) ==
 		DETAIL_SETTING_POWER + 1U,
 	"detail_setting_rects must have one row per detail_setting_index");
+
+/* Keep the five frontlight markers below both title and value, inside the
+ * same row that receives taps and swipes. Width is the first-to-last centre.
+ */
+static inline struct papermono_rect papermono_ui_frontlight_track(void)
+{
+	const struct papermono_rect *row =
+		&detail_setting_rects[DETAIL_SETTING_FRONTLIGHT];
+
+	return (struct papermono_rect) {
+		row->x + 18, row->y + 68, row->width - 52, 1,
+	};
+}
 
 static const struct papermono_interaction_region navigation_regions[] = {
 	{ { 0, UI_NAV_TOP, 160, PAPERMONO_UI_HEIGHT - UI_NAV_TOP },

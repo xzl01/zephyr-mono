@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 
-/* THESIS: Extend the approved Field Notes paper interface to every device page.
+/* THESIS: A paper index for everyday reading and device tasks.
  * OWN-WORLD: White I1 paper, black serif 48px titles and 24px primary text,
- * 40px empty-state titles, 16px metadata, ruled lists, original outline icons and square action buttons.
+ * 40px empty states, 16px section labels, open app icons and square actions.
  * STORY: Read local content, see actual device state, and operate familiar
  * controls with explicit confirmation and a consistent way back.
- * FIRST VIEWPORT: 22px side margins; brand/date at 18px, title at 58px,
- * rule at 116px, content from 148px, return footer from 724px. Reader keeps
- * its approved quiet chrome. Visible geometry also drives hit testing.
- * FORM: Approved reference series field-notes-expanded/field-notes-remaining;
+ * FIRST VIEWPORT: Home keeps its 148px clock and three ruled content areas;
+ * date and voltage share a baseline. Apps use an open 3x3 index; list titles
+ * get two lines. Settings separate frontlight text from its five markers.
+ * FORM: Code-led refinement of the approved Field Notes and standby pages;
  * fixed 480x800 portrait Zephyr/LVGL, no gray, motion or simulated live data.
  * FINISH: unreviewed and undocumented is unfinished; this build ends with the
  * finish review, the verdict, DESIGN.md, and every shipping raster carrying
@@ -59,12 +59,14 @@
 #include <papermono/rss_table.h>
 #include <papermono/settings.h>
 #include <papermono/status_led.h>
+#include <papermono/standby_date.h>
 #include <papermono/sync.h>
 #include <papermono/touch_gesture.h>
 #include <papermono/touchpad.h>
 #include <papermono/ui.h>
 #include <papermono/ui_layout.h>
 #include <papermono/weather.h>
+#include <papermono/weather_plot.h>
 #include <papermono/weread.h>
 #include <papermono/wifi_input.h>
 
@@ -344,11 +346,12 @@ static union papermono_app_arena app_arena PAPERMONO_LARGE_BSS;
 #define library_state (app_arena.library)
 #define news_body_text (app_arena.news_body)
 
-/* The only Library state that survives leaving the app: the home tile shows
- * the last read percentage without keeping the 44 KB reader session resident.
+/* The only Library state that survives leaving the app: home and standby show
+ * the last reading progress without keeping the 44 KB reader session resident.
  */
 struct library_progress {
 	char book_id[PAPERMONO_CONTENT_ID_LENGTH + 1U];
+	uint32_t page_number;
 	uint8_t percent;
 	bool valid;
 };
@@ -430,7 +433,7 @@ static bool deferred_touch_valid;
 K_MSGQ_DEFINE(ui_events, sizeof(struct papermono_app_event), 12, 4);
 #endif
 
-#define UI_FIXED_LINE_CAPACITY 96U
+#define UI_FIXED_LINE_CAPACITY 64U
 static lv_point_precise_t ui_fixed_line_points[UI_FIXED_LINE_CAPACITY][2];
 static size_t ui_fixed_line_count;
 
@@ -547,15 +550,15 @@ static const char *media_status_token(enum papermono_media_state state)
 {
 	switch (state) {
 	case PAPERMONO_MEDIA_READY:
-		return "OK";
+		return "就绪";
 	case PAPERMONO_MEDIA_EMPTY:
-		return "EMPTY";
+		return "空卡";
 	case PAPERMONO_MEDIA_REMOVED:
-		return "NONE";
+		return "无卡";
 	case PAPERMONO_MEDIA_UNFORMATTED:
-		return "FS";
+		return "未格式化";
 	case PAPERMONO_MEDIA_ERROR:
-		return "ERR";
+		return "错误";
 	case PAPERMONO_MEDIA_UNINITIALIZED:
 	default:
 		return "--";
@@ -564,26 +567,27 @@ static const char *media_status_token(enum papermono_media_state state)
 
 static void format_connectivity_status(char *status, size_t status_size)
 {
-	const char *wifi_status = "--";
-	const char *ble_status = "--";
+	const char *wifi_status = "未连";
+	const char *ble_status = "未连";
 	const char *tf_status = media_status_token(
 		papermono_content_store_media_state());
 
 	#if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 	struct papermono_content_server_state network;
 	papermono_content_server_get_state(&network);
-	wifi_status = network.station_connected ? "LAN" :
-		network.ap_enabled ? "AP" :
-		network.station_connecting ? "..." : "--";
+	wifi_status = network.station_connected ? "已连" :
+		network.ap_enabled ? "热点" :
+		network.station_connecting ? "连接中" : "未连";
 	#endif
 	#if defined(CONFIG_PAPERMONO_BLE_HID)
 	struct papermono_hid_state bluetooth;
 	papermono_hid_get_state(&bluetooth);
-	ble_status = bluetooth.connected ? "LINK" :
-		bluetooth.advertising ? "ADV" :
-		bluetooth.initialized ? "ON" : "--";
+	ble_status = bluetooth.connected ?
+		(bluetooth.secured ? "已连" : "配对中") :
+		bluetooth.advertising ? "待连" :
+		bluetooth.initialized ? "就绪" : "关闭";
 	#endif
-	(void)snprintf(status, status_size, "W:%s  B:%s  T:%s",
+	(void)snprintf(status, status_size, "Wi-Fi %s · BLE %s · TF %s",
 		wifi_status, ble_status, tf_status);
 }
 
@@ -608,8 +612,8 @@ static void make_header(lv_obj_t *screen, const char *title)
 	lv_obj_set_size(label, 216, 24);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 	label = make_label(screen, title, &papermono_heading_48, ink);
-	lv_obj_set_pos(label, 22, 58);
-	lv_obj_set_size(label, 436, 54);
+	lv_obj_set_pos(label, 22, 52);
+	lv_obj_set_size(label, 436, 58);
 	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 	(void)make_ink_shape(screen, 22, 116, 436, 1, ink, 0);
 }
@@ -651,7 +655,7 @@ static lv_obj_t *detail_row(lv_obj_t *screen, const struct papermono_rect *rect,
 	set_box_style(row, paper, 0, 0);
 	(void)make_ink_shape(row, 0, rect->height - 1, rect->width, 1, ink, 0);
 	if (selected) {
-		(void)make_ink_shape(row, 0, 10, 4, rect->height - 26, ink, 0);
+		(void)make_ink_shape(row, 0, 22, 6, 6, ink, 0);
 	}
 	(void)detail_text(row, title, 14, 10, rect->width - (arrow ? 52 : 28), 34, true);
 	if (meta != NULL && meta[0] != '\0') {
@@ -751,7 +755,19 @@ static void detail_number(lv_obj_t *screen, const char *value, int32_t x, int32_
 
 static void detail_section(lv_obj_t *screen, int32_t y, const char *title)
 {
-	(void)detail_text(screen, title, 22, y, 436, 30, true);
+	(void)detail_text(screen, title, 22, y, 436, 24, false);
+}
+
+/* A long content title gets two real lines, while its status remains a
+ * separate metadata lane. Ellipsis belongs to the final visible line.
+ */
+static void detail_list_text(lv_obj_t *row, const char *title, const char *meta,
+	int32_t x, int32_t width)
+{
+	lv_obj_t *label = detail_text(row, title, x, 6, width, 64, true);
+
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	(void)detail_text(row, meta, x, 76, width, 24, false);
 }
 
 static void detail_value(lv_obj_t *screen, int32_t y, const char *key, const char *value)
@@ -901,7 +917,7 @@ static int render_home(void *context, lv_obj_t *screen)
 	const struct papermono_rect *calendar = &home_regions[HOME_REGION_CALENDAR].rect;
 	const struct papermono_rect *tasks = &home_regions[HOME_REGION_TASKS].rect;
 	lv_obj_t *label;
-	char status[48];
+	char status[96];
 	char battery[16];
 	const int recent_ret = papermono_reader_recent(&recent_book);
 	/* Read the cached progress, not library_state: the Library working set
@@ -920,10 +936,11 @@ static int render_home(void *context, lv_obj_t *screen)
 	lv_obj_set_style_text_letter_space(label, 1, LV_PART_MAIN);
 	label = make_chinese_label(screen, status);
 	lv_obj_set_pos(label, 184, 12);
-	lv_obj_set_size(label, 274, 22);
+	lv_obj_set_size(label, 274, 44);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 	label = make_chinese_label(screen, battery);
-	lv_obj_set_pos(label, 352, 38);
+	lv_obj_set_pos(label, 352, 66);
 	lv_obj_set_size(label, 106, 22);
 	lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 
@@ -953,7 +970,7 @@ static int render_home(void *context, lv_obj_t *screen)
 	}
 
 	(void)make_ink_shape(screen, reader->x, reader->y, reader->width, 1, ink, 0);
-	label = make_label(screen, recent_ret == 0 ? "继续阅读" : "打开书库", &papermono_reading_24, ink);
+	label = make_chinese_label(screen, recent_ret == 0 ? "继续阅读" : "打开书库");
 	lv_obj_set_pos(label, reader->x, reader->y + 18);
 	make_chevron(screen, reader->x + reader->width - 12, reader->y + 20);
 	/* An outlined text spine, not a fabricated book-cover image. */
@@ -995,7 +1012,7 @@ static int render_home(void *context, lv_obj_t *screen)
 	const bool have_event = snapshot.rtc_valid &&
 		papermono_organizer_get_next_event(&now, &next_event) == 0;
 	(void)make_ink_shape(screen, calendar->x, calendar->y, calendar->width, 1, ink, 0);
-	label = make_label(screen, "下一日程", &papermono_reading_24, ink);
+	label = make_chinese_label(screen, "下一日程");
 	lv_obj_set_pos(label, calendar->x, calendar->y + 18);
 	make_chevron(screen, calendar->x + calendar->width - 12, calendar->y + 20);
 	if (have_event) {
@@ -1003,10 +1020,10 @@ static int render_home(void *context, lv_obj_t *screen)
 		label = make_chinese_label(screen, "");
 		lv_label_set_text_fmt(label, "%02u:%02u", next_event.start.hour, next_event.start.minute);
 		lv_obj_set_pos(label, calendar->x + 24, calendar->y + 66);
-		label = make_chinese_label(screen, next_event.title);
-		lv_obj_set_pos(label, calendar->x + 128, calendar->y + 66);
+		label = make_label(screen, next_event.title, &papermono_reading_24, ink);
+		lv_obj_set_pos(label, calendar->x + 128, calendar->y + 60);
 		lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-		lv_obj_set_size(label, calendar->width - 128, 24);
+		lv_obj_set_size(label, calendar->width - 128, 34);
 		/* Keep tomorrow's event distinguishable from today's. */
 		if (next_event.start.year != now.year || next_event.start.month != now.month ||
 		    next_event.start.day != now.day) {
@@ -1021,7 +1038,7 @@ static int render_home(void *context, lv_obj_t *screen)
 	}
 
 	(void)make_ink_shape(screen, tasks->x, tasks->y, tasks->width, 1, ink, 0);
-	label = make_label(screen, "待办", &papermono_reading_24, ink);
+	label = make_chinese_label(screen, "待办");
 	lv_obj_set_pos(label, tasks->x, tasks->y + 18);
 	make_chevron(screen, tasks->x + tasks->width - 12, tasks->y + 20);
 	size_t visible_tasks = 0;
@@ -1067,7 +1084,6 @@ static void render_launcher_item(lv_obj_t *screen,
 	if (app == NULL) {
 		return;
 	}
-	(void)make_outline_shape(screen, rect->x, rect->y, rect->width, rect->height, 1, 0);
 	lv_obj_t *image = lv_image_create(screen);
 	lv_image_set_src(image, icons[item->motif]);
 	lv_obj_set_style_image_recolor(image, ink, LV_PART_MAIN);
@@ -1129,33 +1145,48 @@ static int render_content_center(void *context, lv_obj_t *screen)
 	char text[192];
 	papermono_content_server_get_state(&state);
 	(void)detail_text(screen, "在浏览器中管理内容", 22, 132, 436, 24, false);
-	detail_section(screen, 168, "首次配网");
-	(void)snprintf(text, sizeof(text), "网络：%s\n密码：%s",
-		state.ap_enabled ? state.ap_ssid : "接入点未启用",
-		state.ap_enabled ? state.ap_password : "--");
-	(void)detail_text(screen, text, 22, 208, 436, 52, false);
-	(void)detail_text(screen, state.ap_enabled ? "192.168.4.1" : "接入点已关闭",
-		22, 266, 436, 38, true);
-	(void)detail_text(screen, state.ap_verified ? "接口自检通过" :
-		state.ap_enabled ? "正在验证接入点" : "", 22, 308, 436, 24, false);
-	(void)make_ink_shape(screen, 22, 346, 436, 1, ink, 0);
-	detail_section(screen, 362, "浏览器会话");
-	if (state.client_paired) {
-		(void)detail_text(screen, "本地会话已建立", 22, 406, 436, 34, true);
-		(void)detail_text(screen, "浏览器刷新会自动恢复", 22, 446, 436, 24, false);
+	/* Lead with the address that is usable now. AP credentials are a
+	 * connection detail rather than the first step for an already joined LAN.
+	 */
+	const char *address = state.station_connected && state.station_ipv4[0] ?
+		state.station_ipv4 : state.ap_enabled ? "192.168.4.1" : NULL;
+	detail_section(screen, 168, "设备地址");
+	if (address != NULL) {
+		detail_number(screen, address, 22, 198, 436);
 	} else {
-		(void)detail_text(screen, "打开设备地址，输入一次性配对码", 22, 402, 436, 24, false);
-		detail_number(screen, state.pairing_code, 22, 430, 436);
+		(void)detail_text(screen, state.station_connected ? "等待获取地址" :
+			state.station_connecting ? "正在连接网络" : "尚未连接网络",
+			22, 204, 436, 38, true);
 	}
-	(void)make_ink_shape(screen, 22, 498, 436, 1, ink, 0);
-	detail_section(screen, 512, "局域网");
-	(void)snprintf(text, sizeof(text), "%s\n内容版本：%u",
-		state.station_connected ? (state.station_ipv4[0] ? state.station_ipv4 : "等待 DHCP 地址") :
-		state.station_connecting ? "正在连接" : "未连接", state.content_generation);
-	(void)detail_text(screen, text, 22, 552, 436, 68, state.station_connected);
-	(void)make_ink_shape(screen, 22, 630, 436, 1, ink, 0);
-	detail_section(screen, 642, "管理范围");
-	(void)detail_text(screen, "书籍 · 日历 · 待办 · 便签", 22, 680, 436, 24, false);
+	(void)detail_text(screen, state.station_connected && state.station_ipv4[0] ?
+		"在同一局域网的浏览器中打开此地址。" : state.ap_enabled ?
+		"先连接下方设备热点，再打开此地址。" :
+		"在设置中连接 Wi-Fi，获取本地设备地址。", 22, 268, 436, 48, false);
+	(void)make_ink_shape(screen, 22, 326, 436, 1, ink, 0);
+	detail_section(screen, 342, "浏览器会话");
+	if (state.client_paired) {
+		(void)detail_text(screen, "本地会话已建立", 22, 380, 436, 34, true);
+		(void)detail_text(screen, "浏览器刷新会自动恢复", 22, 422, 436, 24, false);
+	} else {
+		(void)detail_text(screen, "打开设备地址，输入一次性配对码", 22, 380, 436, 24, false);
+		detail_number(screen, state.pairing_code, 22, 414, 436);
+	}
+	(void)make_ink_shape(screen, 22, 492, 436, 1, ink, 0);
+	detail_section(screen, 508, "连接方式");
+	if (state.ap_enabled) {
+		(void)snprintf(text, sizeof(text), "热点：%s\n密码：%s",
+			state.ap_ssid, state.ap_password);
+	} else {
+		(void)snprintf(text, sizeof(text), "%s\n设备热点已关闭",
+			state.station_connected ? "Wi-Fi 已连接" :
+			state.station_connecting ? "Wi-Fi 正在连接" : "Wi-Fi 未连接");
+	}
+	(void)detail_text(screen, text, 22, 542, 436, 68, false);
+	(void)snprintf(text, sizeof(text), "内容版本：%u", state.content_generation);
+	(void)detail_text(screen, text, 22, 616, 436, 24, false);
+	(void)make_ink_shape(screen, 22, 648, 436, 1, ink, 0);
+	detail_section(screen, 664, "管理范围");
+	(void)detail_text(screen, "书籍 · 日历 · 待办 · 便签", 22, 692, 436, 24, false);
 #else
 	detail_empty(screen, &papermono_icon_content, "内容中心未启用", "当前固件未包含本地 HTTP 服务。");
 #endif
@@ -1677,6 +1708,7 @@ static void library_capture_progress(const struct library_ui_state *state)
 	}
 	(void)snprintf(library_progress.book_id,
 		sizeof(library_progress.book_id), "%s", state->reader.book.id);
+	library_progress.page_number = state->reader.page_number;
 	library_progress.percent = state->page.approximate_percent;
 	library_progress.valid = true;
 }
@@ -1733,8 +1765,7 @@ static int render_library_list(struct library_ui_state *state, lv_obj_t *screen)
 		lv_obj_t *item = detail_row(screen, &rect, "", NULL, index == state->selected, true);
 		(void)make_outline_shape(item, 18, 18, 30, 62, 1, 0);
 		(void)make_ink_shape(item, 24, 18, 1, 62, ink, 0);
-		(void)detail_text(item, state->books[index].title, 68, 10, 326, 34, true);
-		(void)detail_text(item, text, 68, 54, 340, 24, false);
+		detail_list_text(item, state->books[index].title, text, 68, 326);
 	}
 	(void)snprintf(text, sizeof(text), "%02u / %02u · 轻触打开\n%s",
 		(unsigned)(first / 5 + 1), (unsigned)((state->book_count + 4) / 5),
@@ -2632,9 +2663,8 @@ static int render_tasks(void *context, lv_obj_t *screen)
 		(void)papermono_interaction_grid_cell_rect(&detail_list_grid, row, &rect);
 		lv_obj_t *item = detail_row(screen, &rect, "", NULL, false, false);
 		make_checkbox(item, 12, 15, task.done);
-		(void)detail_text(item, task.title, 50, 10, 372, 34, true);
 		(void)snprintf(text, sizeof(text), task.done ? "已完成" : "%s · 优先级 %d", task.due[0] ? task.due : "无截止日期", task.priority);
-		(void)detail_text(item, text, 50, 54, 372, 24, false);
+		detail_list_text(item, task.title, text, 50, 372);
 	}
 	(void)snprintf(text, sizeof(text), "%02u / %02u · 轻触勾选", (unsigned)(ui->task_first / 5 + 1), (unsigned)((count + 4) / 5));
 	make_footer(screen, text);
@@ -2738,8 +2768,7 @@ static int render_notes(void *context, lv_obj_t *screen)
 			(void)snprintf(text, sizeof(text), "%s%s", favorite ? "已收藏 · " : "", read ? "已读" : "未读");
 			lv_obj_t *item = detail_row(screen, &rect, "", NULL, false, true);
 			detail_image_at(item, &papermono_icon_document_small, 12, 12);
-			(void)detail_text(item, note_view.title, 64, 10, 330, 34, true);
-			(void)detail_text(item, text, 64, 54, 348, 24, false);
+			detail_list_text(item, note_view.title, text, 64, 330);
 		}
 	}
 	make_footer(screen, "轻触打开 · 长按收藏");
@@ -3980,7 +4009,7 @@ static int render_power(void *context, lv_obj_t *screen)
 			confirmation == CONFIRM_RESET_BLE ? "确认清除配对？" :
 			confirmation == CONFIRM_FORMAT_TF ? "格式化 TF 卡？" :
 			"恢复默认设置？";
-		const char *body = confirmation == CONFIRM_SLEEP ? "屏幕将保留当前画面。\n触摸或电源键唤醒。" :
+		const char *body = confirmation == CONFIRM_SLEEP ? "屏幕将保留当前画面。\n按电源键唤醒。" :
 			confirmation == CONFIRM_SHUTDOWN ? "设备将完全关机。\n仅可通过电源键重新启动。" :
 			confirmation == CONFIRM_RESET_WIFI ? "将清除已保存的网络配置。\n内容文件不会删除。" :
 			confirmation == CONFIRM_RESET_BLE ? "将删除已保存的蓝牙主机。\n内容文件不会删除。" :
@@ -3998,7 +4027,7 @@ static int render_power(void *context, lv_obj_t *screen)
 		detail_confirmation(screen, icon, title, body, action, "取消可返回上一页");
 		return 0;
 	}
-	detail_power_option(screen, &detail_sleep_rect, &papermono_icon_sleep, "立即休眠", "保留当前墨水屏画面。\n触摸或电源键唤醒。");
+	detail_power_option(screen, &detail_sleep_rect, &papermono_icon_sleep, "立即休眠", "保留当前墨水屏画面。\n按电源键唤醒。");
 	detail_power_option(screen, &detail_shutdown_rect, &papermono_icon_power, "完全关机", "关闭系统电源。\n使用电源键重新启动。");
 	detail_section(screen, 580, power_last_error < 0 ? "电源操作已取消" : "自动休眠");
 	if (power_last_error < 0) (void)snprintf(text, sizeof(text), "上次操作未执行（%d）。\n松开屏幕后重试。", power_last_error);
@@ -4072,8 +4101,8 @@ static int render_settings(void *context, lv_obj_t *screen)
 	char value[96];
 	make_header(screen, "设置");
 	detail_section(screen, 134, "日常偏好");
-	detail_section(screen, 402, "连接");
-	detail_section(screen, 554, "设备");
+	detail_section(screen, 430, "连接");
+	detail_section(screen, 580, "设备");
 	const char *titles[] = {"自动休眠", "时间格式", "前光亮度", "休眠屏摘要",
 		"Wi-Fi 网络", "清除蓝牙配对", "恢复默认设置", "电源选项"};
 	/* The loop below walks detail_setting_rects and indexes titles with the
@@ -4085,7 +4114,10 @@ static int render_settings(void *context, lv_obj_t *screen)
 	for (size_t i = 0; i < ARRAY_SIZE(detail_setting_rects); ++i) {
 		const struct papermono_rect *rect = &detail_setting_rects[i];
 		(void)detail_text(screen, titles[i], rect->x, rect->y + 10, i <= 3 ? 254 : 398, 34, true);
-		(void)make_ink_shape(screen, rect->x, rect->y + rect->height - 1, rect->width, 1, ink, 0);
+		if (i != DETAIL_SETTING_POWER) {
+			(void)make_ink_shape(screen, rect->x, rect->y + rect->height - 1,
+				rect->width, 1, ink, 0);
+		}
 		if (i != DETAIL_SETTING_FRONTLIGHT) make_chevron(screen, 443, rect->y + 20);
 		value[0] = '\0';
 		if (i == DETAIL_SETTING_SLEEP) {
@@ -4099,12 +4131,17 @@ static int render_settings(void *context, lv_obj_t *screen)
 			lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
 		}
 	}
-	(void)make_ink_shape(screen, 40, 316, 384, 1, ink, 0);
+	const struct papermono_rect track = papermono_ui_frontlight_track();
+	(void)make_ink_shape(screen, track.x, track.y, track.width, 1, ink, 0);
 	for (int i = 0; i < 5; ++i) {
-		(void)make_outline_shape(screen, 34 + i * 96, 310, 12, 12, 1, 6);
-		if ((int)prefs->frontlight_percent / 25 == i) (void)make_ink_shape(screen, 34 + i * 96, 310, 12, 12, ink, 6);
+		const int32_t x = track.x + i * (track.width / 4) - 6;
+		(void)make_outline_shape(screen, x, track.y - 6, 12, 12, 1, 6);
+		if ((int)prefs->frontlight_percent / 25 == i) {
+			(void)make_ink_shape(screen, x, track.y - 6, 12, 12, ink, 6);
+		}
 	}
-	(void)detail_text(screen, "长按后确认", 306, 620, 130, 24, false);
+	(void)detail_text(screen, "长按后确认", 306,
+		detail_setting_rects[DETAIL_SETTING_RESET].y + 15, 130, 24, false);
 	make_footer(screen, settings_last_error < 0 ? "恢复默认设置失败 · 未更改" :
 		frontlight_last_error < 0 ? "前光调整失败 · 未保存" : "轻触修改 · 前光长按关闭");
 	return 0;
@@ -5365,6 +5402,9 @@ static bool sleep_weather(char *value, size_t value_size, char *meta,
 static bool sleep_next_event(const struct papermono_ui_snapshot *snapshot,
 	char *out, size_t size)
 {
+	if (!snapshot->rtc_valid) {
+		return false;
+	}
 	const struct papermono_calendar_time now = {
 		.year = (int16_t)(snapshot->time.tm_year + 1900),
 		.month = (uint8_t)(snapshot->time.tm_mon + 1),
@@ -5387,6 +5427,78 @@ static bool sleep_next_event(const struct papermono_ui_snapshot *snapshot,
 			event.start.minute, event.title);
 	}
 	return true;
+}
+
+static void sleep_reading_summary(lv_obj_t *screen)
+{
+	struct papermono_content_entry recent;
+	/* Only Library owns this arena while active. After leaving it, News may
+	 * have replaced the reader session with article text; use the snapshot.
+	 */
+	if (app_router.current == PAPERMONO_APP_LIBRARY) {
+		library_capture_progress(&library_state);
+	}
+	const bool have_book = papermono_reader_recent(&recent) == 0;
+	const bool have_progress = have_book && library_progress.valid &&
+		strcmp(library_progress.book_id, recent.id) == 0;
+	lv_obj_t *label;
+	char text[96];
+
+	(void)sleep_label(screen, "阅读进度", &papermono_cjk_16, 22, 432, 436, false);
+	label = detail_text(screen, have_book ? recent.title : "尚未开始阅读",
+		22, 464, 436, 64, true);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	if (have_progress) {
+		const unsigned int progress = MIN(library_progress.percent, 100);
+
+		(void)snprintf(text, sizeof(text), "第 %u 页 · %u%%",
+			(unsigned int)(library_progress.page_number + 1), progress);
+		(void)sleep_label(screen, text, &papermono_cjk_16, 22, 546, 436, false);
+		(void)make_ink_shape(screen, 22, 598, 436, 1, ink, 0);
+		if (progress > 0U) {
+			(void)make_ink_shape(screen, 22, 596,
+				MAX(1U, 436U * progress / 100U), 4, ink, 0);
+		}
+	} else {
+		(void)sleep_label(screen, have_book ? "已有阅读记录 · 唤醒后从书库继续" :
+			"从内容中心导入书籍后开始阅读。", &papermono_cjk_16,
+			22, 546, 436, false);
+	}
+}
+
+static void sleep_tomorrow_summary(lv_obj_t *screen,
+	const struct papermono_ui_snapshot *snapshot)
+{
+	struct papermono_calendar_time tomorrow;
+	struct papermono_calendar_event event;
+	char text[64];
+
+	(void)sleep_label(screen, "明日预告", &papermono_cjk_16, 22, 432, 436, false);
+	if (!snapshot->rtc_valid || papermono_standby_tomorrow(
+		snapshot->time.tm_year + 1900, snapshot->time.tm_mon + 1,
+		snapshot->time.tm_mday, &tomorrow) < 0) {
+		(void)sleep_label(screen, "校时后显示明日安排", &papermono_reading_24,
+			22, 478, 436, false);
+		return;
+	}
+	(void)snprintf(text, sizeof(text), "%02u月%02u日", tomorrow.month, tomorrow.day);
+	(void)sleep_label(screen, text, &papermono_cjk_16, 22, 464, 436, false);
+	const bool have_event = papermono_organizer_get_next_event(&tomorrow, &event) == 0 &&
+		event.start.year == tomorrow.year && event.start.month == tomorrow.month &&
+		event.start.day == tomorrow.day;
+	lv_obj_t *label = detail_text(screen, have_event ? event.title : "明日暂无日程",
+		22, 496, 436, 64, true);
+
+	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	if (have_event) {
+		if (event.start.all_day) {
+			(void)snprintf(text, sizeof(text), "全天");
+		} else {
+			(void)snprintf(text, sizeof(text), "%02u:%02u",
+				event.start.hour, event.start.minute);
+		}
+		(void)sleep_label(screen, text, &papermono_cjk_16, 22, 574, 436, false);
+	}
 }
 
 static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
@@ -5488,6 +5600,9 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 		(void)snprintf(source, sizeof(source), "—《%s》", quote->book);
 		(void)sleep_label(screen, source, &papermono_cjk_16, 258, 548, 200,
 			true);
+	} else if (prefs->sleep_summary == PAPERMONO_SLEEP_SUMMARY_QUOTE) {
+		(void)sleep_label(screen, "校时后显示每日摘抄", &papermono_reading_24,
+			22, 464, 436, false);
 	}
 	if (prefs->sleep_summary == PAPERMONO_SLEEP_SUMMARY_HOURLY_WEATHER) {
 		struct papermono_weather weather;
@@ -5495,17 +5610,22 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 		papermono_weather_get(&weather);
 		(void)sleep_label(screen, "未来 8 段", &papermono_cjk_16, 22, 432,
 			200, false);
-		if (weather.valid && weather.hourly_count > 1U) {
-			char label[32];
-			const int base = 560;
+		const uint8_t count = MIN(weather.hourly_count, ARRAY_SIZE(weather.hourly_temp));
+		if (weather.valid && count > 1U) {
+			char label[64];
+			int minimum = weather.hourly_temp[0];
+			int maximum = minimum;
 			int previous_x = -1;
-			int previous_y = base;
+			int previous_y = 0;
 
-			for (uint8_t index = 0U; index < weather.hourly_count;
-			     ++index) {
-				const int x = 26 + (int)index *
-					(412 / (weather.hourly_count - 1U));
-				const int y = base - weather.hourly_temp[index] * 3;
+			for (uint8_t index = 1U; index < count; ++index) {
+				minimum = MIN(minimum, weather.hourly_temp[index]);
+				maximum = MAX(maximum, weather.hourly_temp[index]);
+			}
+			for (uint8_t index = 0U; index < count; ++index) {
+				const int x = 26 + (int)index * 412 / (count - 1U);
+				const int y = papermono_weather_plot_y(weather.hourly_temp[index],
+					minimum, maximum, 478, 82);
 
 				if (index > 0U) {
 					(void)make_fixed_line(screen, previous_x,
@@ -5519,13 +5639,21 @@ static void render_sleep_screen(lv_obj_t *screen, bool shutdown)
 			(void)sleep_label(screen, label, &papermono_cjk_16, 22, 576,
 				80, false);
 			(void)snprintf(label, sizeof(label), "%d 度",
-				weather.hourly_temp[weather.hourly_count - 1U]);
-			(void)sleep_label(screen, label, &papermono_cjk_16, 380, 576,
+				weather.hourly_temp[count - 1U]);
+			(void)sleep_label(screen, label, &papermono_cjk_16, 378, 576,
 				80, true);
+			(void)snprintf(label, sizeof(label), "范围 %d 至 %d 度", minimum, maximum);
+			(void)sleep_label(screen, label, &papermono_cjk_16, 22, 614, 436, false);
 		} else {
-			(void)sleep_label(screen, "天气数据尚未同步", &papermono_cjk_16,
+			(void)sleep_label(screen, weather.valid ? "当前来源未提供逐时预报" :
+				"天气数据尚未同步", &papermono_cjk_16,
 				22, 470, 400, false);
 		}
+	}
+	if (prefs->sleep_summary == PAPERMONO_SLEEP_SUMMARY_READING) {
+		sleep_reading_summary(screen);
+	} else if (prefs->sleep_summary == PAPERMONO_SLEEP_SUMMARY_TOMORROW) {
+		sleep_tomorrow_summary(screen, &snapshot);
 	}
 	(void)make_ink_shape(screen, 22, 664, 436, 1, ink, 0);
 	{

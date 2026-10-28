@@ -4,7 +4,9 @@
 Run from the repository root. These deterministic 96px, binary-opacity assets keep
 the launcher inexpensive: one LVGL image instead of many objects per icon.
 """
+import argparse
 from pathlib import Path
+import re
 from PIL import Image, ImageDraw
 
 
@@ -21,48 +23,58 @@ def icon(kind):
         d.rectangle(bounds, outline=ink, width=width)
 
     if kind == "library":
-        box((10, 18, 25, 83)); box((29, 8, 49, 83)); box((53, 26, 66, 83))
-        d.polygon([(70, 32), (80, 29), (94, 78), (84, 81)], outline=ink, width=3)
-        line([(12, 34), (23, 34)]); line([(32, 69), (46, 69)])
+        box((14, 24, 30, 80)); box((36, 14, 56, 80)); box((62, 22, 80, 80))
+        line([(17, 37), (27, 37)], 2); line([(39, 65), (53, 65)], 2)
+        line([(65, 36), (77, 36)], 2)
+        line([(10, 85), (86, 85)])
     elif kind == "weread":
-        d.polygon([(8, 22), (27, 18), (45, 24), (45, 77), (27, 71), (8, 75)], fill=ink)
-        d.polygon([(51, 24), (69, 18), (88, 22), (88, 75), (69, 71), (51, 77)], fill=ink)
-        line([(8, 81), (28, 77), (48, 83), (69, 77), (88, 81)])
+        line([(12, 22), (28, 16), (48, 24), (68, 16), (84, 22),
+              (84, 76), (68, 72), (48, 80), (28, 72), (12, 76), (12, 22)])
+        line([(48, 24), (48, 80)])
+        for y in (36, 49, 62):
+            line([(22, y), (28, y-2), (38, y+2)], 2)
+            line([(58, y+2), (68, y-2), (74, y)], 2)
     elif kind == "calendar":
         box((15, 20, 81, 84)); line([(15, 37), (81, 37)])
         for x in (29, 48, 67):
             d.rounded_rectangle((x-4, 10, x+4, 29), radius=4, outline=ink, width=3)
     elif kind == "tasks":
         for y in (19, 45, 71):
-            box((10, y, 26, y+16), 2); line([(37, y+8), (86, y+8)], 2)
-        line([(14, 25), (18, 29), (31, 15)], 3)
+            box((12, y, 30, y+18)); line([(40, y+9), (84, y+9)], 2)
+        line([(17, 27), (21, 31), (26, 23)])
     elif kind == "notes":
-        for y in (20, 32, 44, 56, 68):
-            line([(13, y), (83, y)], 2)
-        line([(13, 80), (66, 80)], 2)
-        d.polygon([(72, 73), (85, 73), (72, 86)], fill=ink)
+        line([(18, 12), (62, 12), (80, 30), (80, 84), (18, 84), (18, 12)])
+        line([(62, 12), (62, 30), (80, 30)])
+        for y in (44, 56, 68):
+            line([(29, y), (68, y)], 2)
     elif kind == "remote":
         d.rounded_rectangle((29, 7, 67, 89), radius=6, outline=ink, width=3)
         d.ellipse((37, 17, 59, 39), outline=ink, width=3)
         for y in (52, 65, 78):
             d.ellipse((46, y-2, 50, y+2), fill=ink)
     elif kind == "content":
-        # Local transfer symbol; a cloud would falsely imply cloud storage.
-        box((13, 17, 83, 78)); line([(13, 67), (83, 67)], 2)
-        line([(48, 58), (48, 30)]); line([(34, 44), (48, 30), (62, 44)])
-        line([(34, 85), (62, 85)]); line([(48, 78), (48, 85)])
+        # Local import/export tray; no cloud storage is implied.
+        line([(14, 58), (14, 82), (82, 82), (82, 58),
+              (66, 58), (60, 68), (36, 68), (30, 58), (14, 58)])
+        line([(34, 16), (34, 48)])
+        line([(24, 38), (34, 48), (44, 38)])
+        line([(64, 48), (64, 16)])
+        line([(54, 26), (64, 16), (74, 26)])
     elif kind == "info":
-        box((21, 14, 87, 72)); box((9, 26, 75, 85))
-        d.ellipse((19, 40, 31, 52), fill=ink)
-        d.rectangle((16, 57, 34, 67), fill=ink)
-        for y in (44, 56, 67):
-            line([(42, y), (65, y)], 2)
+        line([(24, 14), (84, 14), (84, 72)])
+        box((12, 24, 74, 84))
+        d.ellipse((24, 36, 42, 54), outline=ink, width=2)
+        d.rectangle((32, 40, 34, 42), fill=ink)
+        line([(33, 46), (33, 50)], 2)
+        for y in (40, 52):
+            line([(50, y), (64, y)], 2)
+        for y in (66, 76):
+            line([(24, y), (64, y)], 2)
     elif kind == "tools":
-        d.polygon([(11, 12), (24, 16), (34, 29), (30, 34), (80, 81),
-                   (85, 76), (35, 29), (29, 17), (16, 8)], outline=ink, width=3)
-        d.polygon([(67, 10), (57, 20), (56, 33), (10, 79), (17, 86),
-                   (63, 40), (77, 39), (88, 27), (77, 31), (67, 21)],
-                  outline=ink, width=3)
+        line([(61, 13), (73, 11), (69, 23), (77, 31), (87, 27),
+              (85, 39), (77, 47), (65, 47), (31, 81), (24, 84),
+              (13, 73), (16, 66), (50, 32), (50, 23), (61, 13)])
+        d.ellipse((20, 68, 29, 77), outline=ink, width=2)
     elif kind == "settings":
         for y, x in ((23, 34), (48, 65), (73, 42)):
             line([(12, y), (84, y)])
@@ -109,18 +121,31 @@ def icon(kind):
             box((13,y-5,23,y+5),2); line([(34,y),(84,y)],3)
     elif kind == "return":
         line([(77,48),(19,48),(40,27)],4); line([(19,48),(40,69)],4)
+    else:
+        raise ValueError(f"Unknown icon: {kind}")
     return image
 
 
-if __name__ == "__main__":
+def generate(output_dir, check=False):
     base = ("library", "weread", "calendar", "tasks", "notes", "remote",
             "content", "info", "tools", "settings", "power", "sleep", "bookmark", "document",
             "wifi", "bluetooth", "restore")
     small = ("book", "headphones", "bookmark", "settings", "sun", "toc", "return", "library", "document", "info")
     focal = ("library", "weread", "calendar", "tasks", "document", "bookmark", "wifi")
     variants = [(kind, "", 96) for kind in base] + [(kind, "_small", 48) for kind in small] + [(kind, "_focal", 176) for kind in focal]
+    mismatches = []
     for kind, suffix, size in variants:
         name = "papermono_icon_" + kind + suffix
+        path = output_dir / (name + ".c")
+        existing = path.read_text(encoding="utf-8") if path.exists() else None
+        # Existing assets retain their license. Wi-Fi focal was introduced under
+        # GPL; the other original geometric icons are MIT. Never relicense them.
+        license_id = "GPL-3.0-only" if name == "papermono_icon_wifi_focal" else "MIT"
+        if existing is not None:
+            match = re.match(r"/\* SPDX-License-Identifier: ([^*\n]+) \*/\n", existing)
+            if not match:
+                raise ValueError(f"Missing SPDX license header: {path}")
+            license_id = match.group(1)
         # A8 is supported directly by LVGL's monochrome software renderer.
         # All values are binary (0 or 255); no gray pixels or decoder buffers.
         image = icon(kind).resize((size, size), Image.Resampling.NEAREST)
@@ -129,8 +154,8 @@ if __name__ == "__main__":
                      for r, g, b, a in pixels)
         rows = ["    " + " ".join(f"0x{v:02x}," for v in data[i:i+16])
                 for i in range(0, len(data), 16)]
-        Path("src/generated", name + ".c").write_text(
-            "/* SPDX-License-Identifier: GPL-3.0-only */\n"
+        source = (
+            f"/* SPDX-License-Identifier: {license_id} */\n"
             "/* Generated by scripts/generate_field_notes_assets.py. Original geometry.\n"
             " * A8 storage uses binary opacity only; the display remains one-bit. */\n"
             "#include <lvgl.h>\n"
@@ -140,4 +165,21 @@ if __name__ == "__main__":
             "    .header = { .magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_A8,\n"
             f"                .w = {size}, .h = {size}, .stride = {size} }},\n"
             f"    .data_size = sizeof({name}_map), .data = {name}_map,\n"
-            "};\n", encoding="utf-8")
+            "};\n")
+        if existing != source:
+            if check:
+                mismatches.append(str(path))
+            else:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8")
+    if mismatches:
+        raise SystemExit("Generated icons differ: " + ", ".join(mismatches))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path,
+                        default=Path(__file__).resolve().parents[1] / "src/generated")
+    parser.add_argument("--check", action="store_true", help="verify without writing files")
+    args = parser.parse_args()
+    generate(args.output_dir, args.check)

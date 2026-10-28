@@ -68,12 +68,15 @@ Montserrat Copyright 2011 The Montserrat Project Authors。首页字标使用 LV
 | 176 × 176，空状态焦点符号（7 个） | `library_focal`、`weread_focal`、`calendar_focal`、`tasks_focal`、`document_focal`、`bookmark_focal`、`wifi_focal` |
 
 各尺寸从同一原创几何图形以最近邻方式生成。图标不描摹参考图中的栅格图像；
-现有 33 个素材保留文件头的 MIT 标识；本轮新增的 Wi-Fi 焦点素材使用
-GPL-3.0-only。此次只增加新素材，没有改写原有素材的许可标识。
+现有 33 个素材保留文件头的 MIT 标识；Wi-Fi 焦点素材使用 GPL-3.0-only。
+后续重绘保留各文件的已有许可标识，生成器遇到缺少 SPDX 文件头的既有文件会报错。
 
 图像格式为 LVGL A8，stride 等于各图标宽度，每个像素仅有 0 或 255 透明度，以支持实际
 单色软件渲染路径；这不是 1 bpp 存储，也不是灰阶素材。运行时重着色为黑色，
 固件屏幕仍为 I1。重新生成需要 Pillow，普通固件构建使用检入的 C 数据。
+`python3 scripts/generate_field_notes_assets.py --check` 只读核对检入数据；
+`--output-dir <目录>` 可生成独立副本，也能与 `--check` 合用。默认生成保持相同内容的
+文件不被改写；主机测试覆盖重复生成、只读检查、篡改检测与混合许可保留。
 
 ## Phosphor cat 图标（已弃用）
 

@@ -44,6 +44,12 @@ cc -std=c17 -Wall -Wextra -Werror \
 	src/papermono_frontlight.c \
 	-o "$build_dir/test_frontlight"
 "$build_dir/test_frontlight"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_weather_plot.c -o "$build_dir/test_weather_plot"
+"$build_dir/test_weather_plot"
+cc -std=c17 -Wall -Wextra -Werror -Iinclude \
+	tests/host/test_standby_date.c -o "$build_dir/test_standby_date"
+"$build_dir/test_standby_date"
 cc -std=c17 -Wall -Wextra -Werror \
 	-Iinclude \
 	tests/host/test_status_led.c \

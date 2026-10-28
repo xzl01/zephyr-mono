@@ -1,0 +1,28 @@
+{
+  "base_commit": "5c0174eae0e07e7b9f1634fcf12c13254224b1dc",
+  "native_preview_scenarios": 56,
+  "synthetic_states": true,
+  "lvgl_pool_bytes": 65536,
+  "maximum_observed_host_lvgl_peak_bytes": 45808,
+  "line_pool_capacity": 64,
+  "maximum_observed_lines": 19,
+  "internal_dram_used_bytes": 338520,
+  "internal_dram_total_bytes": 399108,
+  "firmware_sha256": "83d880329fa25b7efc6a23dd10d4356a099ea3fe74feea3a9dac04af12893f2e",
+  "target_flashing_performed": false,
+  "physical_hardware_acceptance": false,
+  "no_microphone_preview_scenarios": 3,
+  "launcher_host_lvgl_used_before": 15648,
+  "launcher_host_lvgl_used_after": 13400,
+  "default_mic_preview_passed": true,
+  "no_mic_preview_passed": true,
+  "host_regressions_passed": true,
+  "firmware_build_passed": true,
+  "initial_review_disposition": "fix",
+  "review_fixes": [
+    "Power and sleep confirmation wake hints match supported physical-key wake",
+    "Refresh DESIGN.md and illustrative sidecar from current source geometry"
+  ],
+  "fix_verdict": "ship",
+  "fix_verdict_scope": "two material findings resolved; not physical hardware acceptance"
+}

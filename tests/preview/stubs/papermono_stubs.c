@@ -20,6 +20,9 @@
 #include <zephyr/drivers/sensor.h>
 
 #include <papermono/weather.h>
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+#include <papermono/ble_mic.h>
+#endif
 #include <papermono/rss.h>
 
 #include <papermono/content_server.h>
@@ -323,6 +326,39 @@ void papermono_hid_get_state(struct papermono_hid_state *state)
 	/* Demo fixture: link idle but ready (host bonded, not currently driving). */
 	*state = preview_hid_state;
 }
+
+/* ----------------------------------------------------- synthetic voice UI */
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+static struct papermono_ble_mic_state preview_mic_state = {
+	.initialized = true, .connected = true, .secured = true,
+};
+
+void preview_mic_set_state(const struct papermono_ble_mic_state *state)
+{
+	preview_mic_state = *state;
+}
+
+int papermono_ble_mic_init(void) { return 0; }
+int papermono_ble_mic_request_start(void)
+{
+	if (!preview_mic_state.initialized) return -ENODEV;
+	if (!preview_mic_state.connected) return -ENOTCONN;
+	if (!preview_mic_state.secured || !preview_mic_state.subscribed) return -EACCES;
+	preview_mic_state.phase = PAPERMONO_BLE_MIC_STARTING;
+	return 0;
+}
+int papermono_ble_mic_request_stop(void)
+{
+	preview_mic_state.phase = PAPERMONO_BLE_MIC_IDLE;
+	preview_mic_state.streaming = false;
+	return 0;
+}
+void papermono_ble_mic_abort(void) { (void)papermono_ble_mic_request_stop(); }
+void papermono_ble_mic_get_state(struct papermono_ble_mic_state *state)
+{
+	if (state != NULL) *state = preview_mic_state;
+}
+#endif
 
 /* ------------------------------------------------------------ Wi-Fi / sync */
 
@@ -654,23 +690,35 @@ int papermono_power_acknowledge_wakeup(enum papermono_wakeup_cause cause)
 	return 0;
 }
 
-/* Synthetic weather for the standby fixture: no network on the host. */
+/* Synthetic weather variants for standby layout only: no host network. */
+static struct papermono_weather preview_weather;
+
+void preview_weather_fixture(const char *name)
+{
+	memset(&preview_weather, 0, sizeof(preview_weather));
+	if (strcmp(name, "sleep-no-weather") == 0) return;
+	preview_weather.valid = true;
+	preview_weather.current_temp = 18;
+	preview_weather.weather_code = 116;
+	preview_weather.hourly_count = 8;
+	for (uint8_t i = 0U; i < 8U; ++i) {
+		preview_weather.hourly_temp[i] = (int8_t)(18 + (i % 3));
+	}
+	if (strcmp(name, "sleep-weather-extreme") == 0) {
+		static const int8_t temperatures[] = {-40, -20, 0, 15, 30, 45, 60, -40};
+		memcpy(preview_weather.hourly_temp, temperatures, sizeof(temperatures));
+		preview_weather.current_temp = temperatures[0];
+	} else if (strcmp(name, "sleep-weather-flat") == 0) {
+		for (uint8_t i = 0U; i < 8U; ++i) preview_weather.hourly_temp[i] = 18;
+	}
+	preview_weather.updated_at = 1789000000;
+}
+
 int papermono_weather_init(void) { return 0; }
 int papermono_weather_request(void) { return 0; }
 void papermono_weather_get(struct papermono_weather *state)
 {
-	if (state == NULL) {
-		return;
-	}
-	memset(state, 0, sizeof(*state));
-	state->valid = true;
-	state->current_temp = 18;
-	state->weather_code = 116;
-	state->hourly_count = 8;
-	for (uint8_t index = 0U; index < 8U; ++index) {
-		state->hourly_temp[index] = (int8_t)(18 + (index % 3));
-	}
-	state->updated_at = 1789000000;
+	if (state != NULL) *state = preview_weather;
 }
 
 /* Synthetic per-source RSS indexes and SD bodies; no host feed is contacted. */

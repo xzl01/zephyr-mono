@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 
 GLUE = r'''
+size_t preview_fixed_line_count(void) { return ui_fixed_line_count; }
+size_t preview_fixed_line_capacity(void) { return ARRAY_SIZE(ui_fixed_line_points); }
+
 
 /* Native preview test/fixture glue. UI above is a byte-for-byte snapshot.
  * Same translation unit grants access to actual private event/render/close
@@ -26,6 +29,11 @@ void preview_wifi_set_state(const struct papermono_wifi_state *state);
 void preview_display_result(int result);
 void preview_fs_mount_result(int result);
 void preview_hid_set_state(const struct papermono_hid_state *state);
+void preview_weather_fixture(const char *name);
+extern bool papermono_preview_rtc_ready;
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+void preview_mic_set_state(const struct papermono_ble_mic_state *state);
+#endif
 void preview_rss_set_index(const struct papermono_rss_feed *feed);
 void preview_rss_request_result_set(int result);
 void preview_rss_status_set(int status);
@@ -102,6 +110,19 @@ static bool preview_has_text(lv_obj_t *root, const char *text)
 	}
 	for (uint32_t i = 0U; i < lv_obj_get_child_count(root); ++i) {
 		if (preview_has_text(lv_obj_get_child(root, i), text)) return true;
+	}
+	return false;
+}
+
+static bool preview_has_box(lv_obj_t *root, int32_t x, int32_t y,
+	int32_t width, int32_t height)
+{
+	for (uint32_t i = 0U; i < lv_obj_get_child_count(root); ++i) {
+		lv_obj_t *child = lv_obj_get_child(root, i);
+		if (lv_obj_get_x(child) == x && lv_obj_get_y(child) == y &&
+		    lv_obj_get_width(child) == width && lv_obj_get_height(child) == height) {
+			return true;
+		}
 	}
 	return false;
 }
@@ -778,16 +799,204 @@ int preview_init(void)
 		PAPERMONO_APP_HOME);
 }
 
+/* Seed synthetic documents through the real import/parser/reader APIs. The
+ * host filesystem and in-memory Settings store are the only stand-ins. */
+static int preview_import(enum papermono_content_kind kind, const char *name,
+	const char *text, unsigned repetitions)
+{
+	struct papermono_content_transaction transaction;
+	const size_t length = strlen(text);
+	PREVIEW_CHECK(papermono_content_store_import_begin(&transaction, kind,
+		name, length * repetitions, false, 0) == 0);
+	for (unsigned i = 0; i < repetitions; ++i) {
+		const int ret = papermono_content_store_import_write(&transaction,
+			(const uint8_t *)text, length);
+		if (ret < 0) {
+			(void)papermono_content_store_import_abort(&transaction);
+			return ret;
+		}
+	}
+	return papermono_content_store_import_commit(&transaction);
+}
+
+static int preview_find_reading_book(const struct papermono_content_entry *entry,
+	void *context)
+{
+	if (strstr(entry->path, "在安静的纸页") == NULL) return 0;
+	*(struct papermono_content_entry *)context = *entry;
+	return 1;
+}
+
+static struct {
+	uint32_t page_number;
+	uint8_t percent;
+	bool loaded;
+} preview_reading_progress;
+
+static int preview_seed_content(const char *name)
+{
+	const bool home = strcmp(name, "home-populated") == 0;
+	const bool closed_reading = strcmp(name, "sleep-reading-home") == 0 ||
+		strcmp(name, "sleep-reading-rss") == 0;
+	const bool reading = home || (strncmp(name, "sleep-reading", 13) == 0 &&
+		strcmp(name, "sleep-reading-empty") != 0);
+	const bool books = reading || strcmp(name, "library-populated") == 0;
+	const bool calendar = home || strcmp(name, "sleep-tomorrow") == 0;
+	const bool tasks = home || strcmp(name, "tasks-populated") == 0;
+	const bool notes = home || strcmp(name, "notes-populated") == 0;
+	memset(&preview_reading_progress, 0, sizeof(preview_reading_progress));
+	memset(&library_progress, 0, sizeof(library_progress));
+	if (!books && !calendar && !tasks && !notes) return 0;
+	PREVIEW_CHECK(papermono_content_store_unmount() == 0);
+	PREVIEW_CHECK(papermono_content_store_mount() == 0);
+	if (books) {
+		static const char passage[] =
+			"这是用于界面预览的合成阅读资料。城市在清晨慢慢醒来，"
+			"纸页上的文字留下一段安静的时间。读者可以在这里暂停，"
+			"记下一个想法，再沿着下一行继续前行。\n"
+			"书名、文件大小、页码和近似进度由真实内容模型计算，"
+			"这些示例不代表用户的书籍或阅读历史。\n\n";
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_TXT,
+			"在安静的纸页之间继续一场关于城市与阅读的漫游.txt",
+			passage, 12) == 0);
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_TXT,
+			"山居手记.txt", passage, 6) == 0);
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_TXT,
+			"阅读片段.txt", passage, 4) == 0);
+	}
+	if (calendar) {
+		static const char agenda[] =
+			"BEGIN:VCALENDAR\r\n"
+			"BEGIN:VEVENT\r\nUID:preview-tomorrow\r\n"
+			"DTSTART:20261001T093000\r\n"
+			"SUMMARY:与设计伙伴一起整理下一版纸面界面的阅读与操作细节\r\n"
+			"END:VEVENT\r\nEND:VCALENDAR\r\n";
+		static const char today[] =
+			"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:preview-today\r\n"
+			"DTSTART:20260930T103000\r\nSUMMARY:设计复盘与阅读计划\r\n"
+			"END:VEVENT\r\nEND:VCALENDAR\r\n";
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_ICS,
+			"preview-tomorrow.ics", agenda, 1) == 0);
+		if (home) PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_ICS,
+			"preview-today.ics", today, 1) == 0);
+	}
+	if (tasks) {
+		static const char list[] =
+			"[{\"id\":\"preview-1\",\"title\":\"整理本周阅读笔记并为下一次交流准备一份简洁清楚的提纲\","
+			"\"due\":\"2026-10-01\",\"priority\":2,\"done\":false},"
+			"{\"id\":\"preview-2\",\"title\":\"给桌边的植物浇水\",\"priority\":1,\"done\":false},"
+			"{\"id\":\"preview-3\",\"title\":\"完成今日阅读\",\"priority\":1,\"done\":true}]";
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_TASKS,
+			"tasks-v1.json", list, 1) == 0);
+	}
+	if (notes) {
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_NOTE, "preview-notes.md",
+			"# 从一张纸出发整理今天看到的细节以及想要继续探索的问题\n\n这是合成便签，用于验证长标题和元数据的分行。\n", 1) == 0);
+		PREVIEW_CHECK(preview_import(PAPERMONO_CONTENT_NOTE, "preview-notes-short.md",
+			"# 书桌旁的随记\n\n留出一段安静阅读的时间。\n", 1) == 0);
+	}
+	PREVIEW_CHECK(papermono_organizer_reload() == 0);
+	if (calendar) PREVIEW_CHECK(papermono_organizer_calendar_count() == (home ? 2U : 1U));
+	if (tasks) PREVIEW_CHECK(papermono_organizer_task_count() == 3U);
+	if (notes) PREVIEW_CHECK(papermono_organizer_note_count() == 2U);
+	if (reading) {
+		struct papermono_content_entry book = {0};
+		(void)papermono_content_store_scan_books(preview_find_reading_book,
+			&book, NULL);
+		PREVIEW_CHECK(book.id[0] != '\0');
+		PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_LIBRARY) == 0);
+		PREVIEW_CHECK(papermono_reader_open(&library_state.reader, &book) == 0);
+		library_state.mode = LIBRARY_MODE_READER;
+		struct papermono_content_entry recent;
+		PREVIEW_CHECK(papermono_reader_recent(&recent) == 0);
+		PREVIEW_CHECK(strcmp(recent.id, book.id) == 0);
+		if (strcmp(name, "sleep-reading-record") != 0) {
+			PREVIEW_CHECK(papermono_reader_read_page(&library_state.reader,
+				library_state.page_text, sizeof(library_state.page_text),
+				&library_state.page) == 0);
+			if (closed_reading) {
+				PREVIEW_CHECK(papermono_reader_next(&library_state.reader) == 0);
+				PREVIEW_CHECK(papermono_reader_read_page(&library_state.reader,
+					library_state.page_text, sizeof(library_state.page_text),
+					&library_state.page) == 0);
+				PREVIEW_CHECK(library_state.reader.page_number > 0U);
+			}
+			PREVIEW_CHECK(library_state.reader.page_loaded);
+			PREVIEW_CHECK(library_state.page.approximate_percent > 0 &&
+				library_state.page.approximate_percent < 100);
+			preview_reading_progress.page_number = library_state.reader.page_number;
+			preview_reading_progress.percent = library_state.page.approximate_percent;
+			preview_reading_progress.loaded = true;
+		}
+		PREVIEW_CHECK(!library_progress.valid);
+		if (home || closed_reading) {
+			/* Actual routing calls Library's registered on_close, captures the
+			 * small snapshot, and erases the old reader working set. */
+			PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
+			PREVIEW_CHECK(preview_zeroed(&app_arena, sizeof(app_arena)));
+			PREVIEW_CHECK(library_progress.valid);
+			PREVIEW_CHECK(library_progress.page_number == preview_reading_progress.page_number);
+			PREVIEW_CHECK(library_progress.percent == preview_reading_progress.percent);
+		}
+		if (strcmp(name, "sleep-reading-rss") == 0) {
+			static char reused_body[PAPERMONO_RSS_BODY_MAX + 1U];
+			struct papermono_rss_feed feed = {.valid = true, .count = 1U};
+			memset(reused_body, 'R', sizeof(reused_body) - 1U);
+			reused_body[sizeof(reused_body) - 1U] = '\0';
+			preview_rss_defaults();
+			preview_rss_set_index(&feed);
+			preview_rss_body_fail_set(false);
+			preview_rss_body_text_set(reused_body);
+			PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+			PREVIEW_CHECK(news_body_load(0U) == PAPERMONO_RSS_BODY_MAX);
+			PREVIEW_CHECK(news_body_text[0] == 'R');
+			PREVIEW_CHECK(library_progress.page_number == preview_reading_progress.page_number);
+			PREVIEW_CHECK(library_progress.percent == preview_reading_progress.percent);
+		}
+	}
+	return 0;
+}
+
 int preview_render_fixture(const char *name, lv_obj_t *screen)
 {
 	int ret;
 	preview_wifi_fixture(name);
-	if (strcmp(name, "sleep") == 0) {
+	preview_weather_fixture(name);
+	papermono_preview_rtc_ready = true;
+	PREVIEW_CHECK(preview_seed_content(name) == 0);
+	if (strcmp(name, "sleep") == 0 || strncmp(name, "sleep-", 6) == 0) {
+		papermono_preview_rtc_ready = strcmp(name, "sleep-no-date") != 0;
+		enum papermono_sleep_summary summary = PAPERMONO_SLEEP_SUMMARY_QUOTE;
+		if (strncmp(name, "sleep-weather", 13) == 0 || strcmp(name, "sleep-no-weather") == 0)
+			summary = PAPERMONO_SLEEP_SUMMARY_HOURLY_WEATHER;
+		else if (strncmp(name, "sleep-reading", 13) == 0) summary = PAPERMONO_SLEEP_SUMMARY_READING;
+		else if (strncmp(name, "sleep-tomorrow", 14) == 0) summary = PAPERMONO_SLEEP_SUMMARY_TOMORROW;
+		else if (strcmp(name, "sleep-blank") == 0) summary = PAPERMONO_SLEEP_SUMMARY_BLANK;
+		PREVIEW_CHECK(papermono_settings_set_sleep_summary(summary) == 0);
 		memset(&wifi_ui, 0, sizeof(wifi_ui));
 		lv_obj_clean(screen);
 		ui_fixed_line_count = 0U;
 		set_box_style(screen, paper, 0, 0);
 		render_sleep_screen(screen, false);
+		if (summary == PAPERMONO_SLEEP_SUMMARY_READING) {
+			lv_obj_update_layout(screen);
+			if (preview_reading_progress.loaded) {
+				char expected[64];
+				(void)snprintf(expected, sizeof(expected), "第 %u 页 · %u%%",
+					(unsigned)(preview_reading_progress.page_number + 1U),
+					(unsigned)preview_reading_progress.percent);
+				PREVIEW_CHECK(preview_has_text(screen, expected));
+				PREVIEW_CHECK(preview_has_box(screen, 22, 598, 436, 1));
+				PREVIEW_CHECK(preview_has_box(screen, 22, 596,
+					MAX(1U, 436U * preview_reading_progress.percent / 100U), 4));
+				PREVIEW_CHECK(library_progress.page_number == preview_reading_progress.page_number);
+				PREVIEW_CHECK(library_progress.percent == preview_reading_progress.percent);
+			} else {
+				PREVIEW_CHECK(preview_has_text(screen, strcmp(name, "sleep-reading-record") == 0 ?
+					"已有阅读记录 · 唤醒后从书库继续" : "尚未开始阅读"));
+				PREVIEW_CHECK(!preview_has_box(screen, 22, 598, 436, 1));
+			}
+		}
 		return 0;
 	}
 	clock_label = NULL;
@@ -811,6 +1020,26 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 			REMOTE_MODE_PRESENTATION : strcmp(name, "remote-mouse") == 0 ?
 			REMOTE_MODE_MOUSE : REMOTE_MODE_MEDIA;
 		ret = papermono_app_router_open(&app_router, PAPERMONO_APP_REMOTE);
+#if defined(CONFIG_PAPERMONO_BLE_MIC)
+		if (strncmp(name, "remote-voice", 12) == 0) {
+			struct papermono_ble_mic_state mic = {
+				.initialized = true, .connected = true, .secured = true,
+			};
+			if (strcmp(name, "remote-voice-streaming") == 0) {
+				mic.subscribed = true;
+				mic.phase = PAPERMONO_BLE_MIC_STREAMING;
+				mic.streaming = true;
+				mic.sessions = 1U;
+				mic.session_ms = 2400U;
+				mic.session_bytes = 19200U;
+			} else if (strcmp(name, "remote-voice-error") == 0) {
+				mic.subscribed = true;
+				mic.last_error = -EIO;
+			}
+			preview_mic_set_state(&mic);
+			remote_state.mode = REMOTE_MODE_VOICE;
+		}
+#endif
 		return ret < 0 ? ret : papermono_app_router_render(&app_router, screen);
 	}
 	if (strncmp(name, "news", 4) == 0 || strcmp(name, "article-long") == 0) {
@@ -911,13 +1140,17 @@ int preview_render_fixture(const char *name, lv_obj_t *screen)
 		enum papermono_app_id app;
 	} pages[] = {
 		{"home", PAPERMONO_APP_HOME},
+		{"home-populated", PAPERMONO_APP_HOME},
 		{"launcher-1", PAPERMONO_APP_LAUNCHER},
 		{"launcher-2", PAPERMONO_APP_LAUNCHER},
 		{"library", PAPERMONO_APP_LIBRARY},
+		{"library-populated", PAPERMONO_APP_LIBRARY},
 		{"weread", PAPERMONO_APP_WEREAD},
 		{"calendar", PAPERMONO_APP_CALENDAR},
 		{"tasks", PAPERMONO_APP_TASKS},
+		{"tasks-populated", PAPERMONO_APP_TASKS},
 		{"notes", PAPERMONO_APP_NOTES},
+		{"notes-populated", PAPERMONO_APP_NOTES},
 		{"info", PAPERMONO_APP_INFO},
 		{"content-center", PAPERMONO_APP_CONTENT},
 		{"remote", PAPERMONO_APP_REMOTE},
