@@ -52,7 +52,8 @@ at the end of a build prints a reminder to rebuild.
 | `wifi-forget` | Destructive-action confirmation |
 
 The default run also covers the existing Field Notes shell and storage flow:
-`home`, `launcher-1`, `launcher-2`, `library`, `weread`, `calendar`, `tasks`,
+`home`, `launcher-1`, `launcher-2`, `library`, `weread`, `calendar`, `news`,
+`news-detail`, `news-empty`, `news-error`, `article-long`, `tasks`,
 `notes`, `info`, `content-center`, `remote`, `remote-pairing`, `remote-passkey`,
 `remote-media`, `remote-presentation`, `remote-mouse`, `tools`, `system`,
 `system-unformatted`, `power`, `confirm-sleep`, `confirm-shutdown`,
@@ -84,14 +85,16 @@ portable-model content:
 | `sleep-weather-flat` | Eight equal samples for a zero-range chart |
 | `sleep-no-weather` | Invalid weather snapshot with hourly summary selected |
 | `sleep-no-date` | Unavailable synthetic RTC; no fabricated date |
-| `sleep-reading` | Imported TXT, real reader open/read-page and recent-book Settings record |
+| `sleep-reading` | Imported TXT and real reader page; active Library captures its latest progress for standby |
+| `sleep-reading-home` | Real second reader page, actual Library close and arena erase, then cached page/percent/bar on standby |
+| `sleep-reading-rss` | Same close path followed by a full RSS body load into the reused arena; standby retains cached progress |
 | `sleep-reading-record` | Same recent-book record without a loaded page; progress remains unknown |
 | `sleep-reading-empty` | Reading summary with no books or recent record |
 | `sleep-tomorrow` | An imported ICS event on the day after the fixed preview date |
 | `sleep-tomorrow-empty` | Tomorrow summary with no event |
 | `sleep-blank` | Deliberately blank summary band |
 
-The default build has 56 fixtures; disabling microphone UI leaves 53. Populated
+The default build has 73 fixtures; disabling microphone UI leaves 70. Populated
 content is authored demo material and is imported through the real content-store
 transaction API. Calendar/tasks/notes use the real portable parsers and organizer;
 reader progress comes from the real page reader and in-memory Settings shim,
@@ -144,6 +147,10 @@ Coverage uses production hit rectangles and actual keyboard hit testing:
 - Paging/layer changes advance the input epoch and mark a layout transition;
   failed display refresh leaves the guard set and successful refresh releases
   it. `process_event` drops a stale-epoch touch but accepts a current-epoch key.
+- Reading standby fixtures assert the real page number, percentage and progress
+  bar after Library closes, including a full RSS body overwriting its old arena.
+  Active Library captures fresh progress; a recent-book record without a loaded
+  page keeps the unknown-progress hint and omits the bar.
 
 The stub records **API calls separately from accepted synthetic requests** and
 supports return/state injection. It matches demo SSID/password arguments during

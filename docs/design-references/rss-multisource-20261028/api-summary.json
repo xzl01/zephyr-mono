@@ -1,0 +1,17 @@
+{
+  "source_count_before": 2,
+  "operations": [
+    "add",
+    "edit",
+    "remove-own-test-source"
+  ],
+  "source_count_after": 2,
+  "generation_before": 1,
+  "generation_after": 4,
+  "incomplete_stream_release_s": 10.04,
+  "incomplete_stream_bytes": 0,
+  "holder_recovered": true,
+  "uptime_ms": 179001,
+  "image_sha256": "a632cb86811f5390b469c43b0d7e91693c8981a1d0d00af2931b014f79884eb8",
+  "timeout_layer": "HTTP idle timeout closed incomplete request; application 30s hard deadline covered by host tests"
+}

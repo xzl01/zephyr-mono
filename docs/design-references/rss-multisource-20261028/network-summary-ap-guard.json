@@ -1,0 +1,118 @@
+{
+  "persistent": [
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88178,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88207,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88291,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88379,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88477,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88502,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88593,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88618,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88711,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    },
+    {
+      "status": 200,
+      "will_close": false,
+      "uptime_ms": 88814,
+      "touch_errors": 0
+    },
+    {
+      "status": 401,
+      "will_close": false
+    }
+  ],
+  "paced_short": [
+    200,
+    401,
+    200,
+    401,
+    200,
+    401,
+    200,
+    401,
+    200,
+    401,
+    200,
+    401
+  ]
+}

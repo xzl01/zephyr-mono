@@ -1,0 +1,27 @@
+{
+  "image_sha256": "a02757560980dcc3ca137a578c939f0f03a387d77c3736bd75f70f2280e5768e",
+  "normal_pairing_succeeded": true,
+  "failed_stage": "first authenticated GET /api/v1/rss/sources before any PUT",
+  "rss_mutex_owner_count": [
+    0,
+    0
+  ],
+  "request_mutex_owner_count": [
+    0,
+    0
+  ],
+  "http_thread": "pending in kernel poll",
+  "current_thread": "wifi_task_handle",
+  "fatal_reason": 0,
+  "original_esf": "0x3fca3eb0",
+  "original_bsa": "0x3fca3ee4",
+  "exception_cause": 28,
+  "exception_address": "0x2c",
+  "fault_pc": "0x4209f29d",
+  "fault_function": "ieee80211_hostap_attach+0x111",
+  "caller_function": "wifi_softap_start",
+  "instruction": "l32i.n a5, a2, 44",
+  "allocation_observation": "selected beacon slot NULL before later NULL check; heap-vs-buffer-quota unproven",
+  "user_observation": "UI unresponsive",
+  "recovery": "same image JTAG boot verified; NVS and TF not erased"
+}

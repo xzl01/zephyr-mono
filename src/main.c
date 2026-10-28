@@ -38,6 +38,7 @@
 #endif
 #include <papermono/ui.h>
 #include <papermono/weather.h>
+#include <papermono/rss.h>
 #include <papermono/status_led.h>
 #if defined(CONFIG_PAPERMONO_CONTENT_SERVER)
 #include <papermono/content_server.h>
@@ -478,6 +479,9 @@ int main(void)
 	} else {
 #if defined(CONFIG_PAPERMONO_WEATHER)
 		(void)papermono_weather_init();
+#endif
+#if defined(CONFIG_PAPERMONO_RSS)
+		(void)papermono_rss_init();
 #endif
 		struct papermono_content_server_state state;
 

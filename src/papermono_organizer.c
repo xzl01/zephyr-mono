@@ -55,8 +55,13 @@ struct organizer_data {
 	int last_error;
 };
 
+/* Reload builds the new calendar/tasks/notes directly in `organizer` while
+ * holding organizer_lock. Every reader (home "next event", HTTP state export,
+ * BLE overlay import) takes the same lock, so the swap is still atomic even
+ * though the second 89 KB staging copy is gone. The sleep screen keeps its
+ * scheduling data: `organizer` itself is never freed, only rebuilt.
+ */
 static struct organizer_data organizer PAPERMONO_ORGANIZER_BSS;
-static struct organizer_data organizer_staging PAPERMONO_ORGANIZER_BSS;
 static char parse_buffer[PAPERMONO_METADATA_FILE_LIMIT + 1U]
 	PAPERMONO_ORGANIZER_BSS;
 static struct organizer_overlay overlay;
@@ -221,22 +226,44 @@ static void sort_events(struct papermono_calendar *calendar)
 
 int papermono_organizer_reload(void)
 {
-	memset(&organizer_staging, 0, sizeof(organizer_staging));
-	int ret = papermono_content_store_scan_all(load_content,
-		&organizer_staging, NULL);
+	const int64_t started_ms = k_uptime_get();
+	size_t events;
+	size_t tasks;
+	size_t notes;
+	int last_error;
+	int ret;
 
-	if (ret < 0 && ret != -ENODEV) {
-		organizer_staging.last_error = ret;
-	}
-	sort_events(&organizer_staging.calendar);
+	/* The scan reads SD through the content store; holding organizer_lock
+	 * across it is deliberate. Readers block for the duration of the scan
+	 * instead of observing a half-cleared calendar, and the previous
+	 * double-buffer (organizer_staging) is no longer needed. No path takes
+	 * content_lock before organizer_lock, so the nesting is safe.
+	 */
 	k_mutex_lock(&organizer_lock, K_FOREVER);
-	organizer = organizer_staging;
+	memset(&organizer, 0, sizeof(organizer));
+	ret = papermono_content_store_scan_all(load_content, &organizer, NULL);
+	if (ret < 0 && ret != -ENODEV) {
+		organizer.last_error = ret;
+	}
+	sort_events(&organizer.calendar);
+	events = organizer.calendar.count;
+	tasks = organizer.task_list.count;
+	notes = organizer.note_count;
+	last_error = organizer.last_error;
 	k_mutex_unlock(&organizer_lock);
-	LOG_INF("Organizer loaded: events=%zu tasks=%zu notes=%zu error=%d",
-		organizer_staging.calendar.count,
-		organizer_staging.task_list.count, organizer_staging.note_count,
-		organizer_staging.last_error);
-	return ret < 0 ? ret : organizer_staging.last_error;
+
+	LOG_INF("Organizer loaded: events=%zu tasks=%zu notes=%zu error=%d (%lld ms)",
+		events, tasks, notes, last_error,
+		(long long)(k_uptime_get() - started_ms));
+	/* The host logging shim compiles LOG_INF() away, so keep the measured
+	 * values explicitly consumed for -Wunused-but-set-variable builds.
+	 */
+	(void)events;
+	(void)tasks;
+	(void)notes;
+	(void)last_error;
+	(void)started_ms;
+	return ret < 0 ? ret : last_error;
 }
 
 int papermono_organizer_init(void)

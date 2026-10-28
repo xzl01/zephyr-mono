@@ -7,6 +7,7 @@ The fakes assert that no driver/NVS call runs while server_lock is held.
 """
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -103,8 +104,8 @@ static int papermono_settings_clear_wifi(void) {
  memset(&preferences, 0, sizeof(preferences)); return 0;
 }
 static void papermono_ui_request_background_refresh(void) { assert(!lock_depth); ++refreshes; }
-static int k_work_submit_to_queue(struct k_work_q *q, struct k_work *w) { (void)q; (void)w; ++scheduled; return 1; }
-static int k_work_reschedule_for_queue(struct k_work_q *q, struct k_work_delayable *w, int d) { (void)q; (void)w; (void)d; ++scheduled; return 1; }
+static int k_work_submit_to_queue(struct k_work_q *q, struct k_work *w) { assert(q==&wifi_work_queue); (void)w; ++scheduled; return 1; }
+static int k_work_reschedule_for_queue(struct k_work_q *q, struct k_work_delayable *w, int d) { assert(q==&wifi_work_queue); (void)w; (void)d; ++scheduled; return 1; }
 static int k_work_cancel_delayable(struct k_work_delayable *w) { (void)w; return 0; }
 static int64_t k_uptime_get(void) { return now; }
 static void schedule_station_retry(void) { assert(!lock_depth); ++retries; }
@@ -207,7 +208,261 @@ int main(void) {
 '''
 
 
+LIFECYCLE_PREFIX = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <papermono/content_server.h>
+#define K_FOREVER 0
+#define K_MSEC(x) (x)
+#define ARG_UNUSED(x) (void)(x)
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#define LOG_INF(...) ((void)0)
+#define LOG_WRN(...) ((void)0)
+#define LOG_ERR(...) ((void)0)
+#define WIFI_SECURITY_TYPE_PSK 1
+#define WIFI_FREQ_BAND_2_4_GHZ 0
+#define NET_REQUEST_WIFI_AP_ENABLE 1
+#define NET_REQUEST_WIFI_AP_DISABLE 2
+#define NET_REQUEST_WIFI_IFACE_STATUS 3
+#define WIFI_MODE_AP 1
+#define NET_EVENT_WIFI_SCAN_RESULT 10
+#define NET_EVENT_WIFI_SCAN_DONE 11
+#define NET_EVENT_WIFI_AP_ENABLE_RESULT 12
+#define NET_EVENT_WIFI_AP_DISABLE_RESULT 13
+#define NET_EVENT_WIFI_CONNECT_RESULT 14
+#define NET_EVENT_WIFI_DISCONNECT_RESULT 15
+typedef int k_timeout_t;
+struct k_work { int unused; };
+struct k_work_delayable { bool pending; int64_t due; };
+struct k_work_q { int unused; };
+struct net_if { int unused; };
+struct wifi_status { int status; };
+struct wifi_scan_result { int unused; };
+struct wifi_iface_status { int iface_mode; uint8_t channel; size_t ssid_len; char ssid[33]; };
+struct net_mgmt_event_callback { void *info; size_t info_length; };
+struct wifi_connect_req_params { const uint8_t *ssid, *psk; size_t ssid_length, psk_length; int security, channel, band; };
+struct papermono_preferences { bool wifi_configured; };
+static struct papermono_preferences preferences;
+static struct papermono_wifi_state wifi_state;
+static struct papermono_content_server_state server_state;
+static struct net_if sta, ap;
+static struct k_work_q wifi_work_queue;
+static struct k_work_delayable enable_ap_work, disable_ap_work, ap_health_work,
+ station_retry_work, scan_timeout_work;
+static int server_lock, lock_depth, ap_starts, ap_stops, refreshes, normalized, status_queries;
+static bool paused, ap_enabling, scan_inflight, connect_during_status, associate_during_status;
+static struct wifi_iface_status reported_ap;
+static uint8_t ap_retry_shift, station_retry_shift, ap_health_failures, wifi_command_phase;
+static int64_t now;
+static void k_mutex_lock(int *mutex, int timeout) {
+ (void)mutex; (void)timeout; assert(!lock_depth); ++lock_depth;
+}
+static void k_mutex_unlock(int *mutex) { (void)mutex; assert(lock_depth==1); --lock_depth; }
+static bool wifi_is_paused(void) { return paused; }
+static struct net_if *net_if_get_wifi_sta(void) { return &sta; }
+static struct net_if *net_if_get_wifi_sap(void) { return &ap; }
+static const struct papermono_preferences *papermono_settings_get(void) { return &preferences; }
+static int k_work_reschedule_for_queue(struct k_work_q *queue,
+ struct k_work_delayable *work, int delay) {
+ assert(queue==&wifi_work_queue); work->pending=true; work->due=now+delay; return 0;
+}
+static int k_work_cancel_delayable(struct k_work_delayable *work) { work->pending=false; return 0; }
+static int configure_ap_address(struct net_if *iface) { assert(iface==&ap && !lock_depth); return 0; }
+static void normalize_provisioning_radio(bool ap_only) { (void)ap_only; assert(!lock_depth); ++normalized; }
+static void wifi_event(struct net_mgmt_event_callback *callback, uint64_t event, struct net_if *iface);
+static int net_mgmt(int request, struct net_if *iface, void *data, size_t size) {
+ assert(!lock_depth && iface==&ap); (void)size;
+ if(request==NET_REQUEST_WIFI_AP_ENABLE) {
+  const struct wifi_connect_req_params *config=data;
+  assert(config->channel==AP_CHANNEL); ++ap_starts;
+ } else if(request==NET_REQUEST_WIFI_IFACE_STATUS) {
+  *(struct wifi_iface_status *)data=reported_ap; ++status_queries;
+  if(connect_during_status) {
+   connect_during_status=false;
+   struct wifi_status result={0}; struct net_mgmt_event_callback callback={&result,sizeof(result)};
+   wifi_event(&callback,NET_EVENT_WIFI_CONNECT_RESULT,&sta);
+  }
+  if(associate_during_status) { associate_during_status=false; server_state.station_connecting=true; }
+ } else { assert(request==NET_REQUEST_WIFI_AP_DISABLE); ++ap_stops; }
+ return 0;
+}
+static int start_ap_dhcp(struct net_if *iface) { assert(iface==&ap && !lock_depth); return 0; }
+static int net_dhcpv4_server_stop(struct net_if *iface) { assert(iface==&ap); return 0; }
+static void scan_add_locked(const void *result) { (void)result; assert(false); }
+static void finish_scan_locked(int error) { (void)error; assert(false); }
+static void papermono_ui_request_background_refresh(void) { assert(!lock_depth); ++refreshes; }
+'''
+
+LIFECYCLE_MAIN = r'''
+static void clean(void) {
+ memset(&wifi_state,0,sizeof(wifi_state)); memset(&server_state,0,sizeof(server_state));
+ memset(&enable_ap_work,0,sizeof(enable_ap_work)); memset(&disable_ap_work,0,sizeof(disable_ap_work));
+ memset(&ap_health_work,0,sizeof(ap_health_work)); memset(&station_retry_work,0,sizeof(station_retry_work));
+ memset(&scan_timeout_work,0,sizeof(scan_timeout_work));
+ preferences.wifi_configured=true; paused=ap_enabling=scan_inflight=false;
+ connect_during_status=associate_during_status=false;
+ ap_retry_shift=station_retry_shift=ap_health_failures=wifi_command_phase=0;
+ ap_starts=ap_stops=refreshes=normalized=status_queries=0; now=0; assert(!lock_depth);
+ snprintf(server_state.ap_ssid,sizeof(server_state.ap_ssid),"fixture-ap");
+ reported_ap=(struct wifi_iface_status){.iface_mode=WIFI_MODE_AP,.channel=AP_CHANNEL};
+ snprintf(reported_ap.ssid,sizeof(reported_ap.ssid),"fixture-ap"); reported_ap.ssid_len=strlen(reported_ap.ssid);
+}
+static void event(uint64_t kind, int result) {
+ struct wifi_status status={result};
+ struct net_mgmt_event_callback callback={&status,sizeof(status)};
+ const bool is_ap=kind==NET_EVENT_WIFI_AP_ENABLE_RESULT || kind==NET_EVENT_WIFI_AP_DISABLE_RESULT;
+ wifi_event(&callback,kind,is_ap?&ap:&sta);
+}
+static void run(struct k_work_delayable *work) {
+ assert(work->pending); now=work->due; work->pending=false;
+ if(work==&enable_ap_work) enable_ap_worker(NULL);
+ else if(work==&ap_health_work) verify_ap_worker(NULL);
+ else { assert(work==&disable_ap_work); disable_ap(NULL); }
+}
+int main(void) {
+ /* Router unreachable: the real failed-connect event still queues recovery
+  * on the private Wi-Fi queue and the normal worker starts the setup AP. */
+ clean(); event(NET_EVENT_WIFI_CONNECT_RESULT,-EIO);
+ assert(enable_ap_work.pending && station_retry_work.pending);
+ assert(enable_ap_work.due==AP_RETRY_INITIAL_MS);
+ run(&enable_ap_work); assert(ap_starts==1 && ap_enabling && normalized==1);
+ event(NET_EVENT_WIFI_AP_ENABLE_RESULT,0);
+ assert(server_state.ap_enabled && !ap_enabling && ap_health_work.pending);
+
+ /* STA recovers before the AP job runs: cancel the queued job, and also
+  * reject a callback already dequeued when cancellation raced it. */
+ clean(); schedule_recovery_ap(); assert(enable_ap_work.pending);
+ event(NET_EVENT_WIFI_CONNECT_RESULT,0);
+ assert(server_state.station_connected && !enable_ap_work.pending);
+ enable_ap_worker(NULL); assert(!ap_starts && !ap_enabling);
+
+ /* AP startup can already be in flight when STA finishes. The later AP
+  * success event must supply the handoff the STA event could not schedule. */
+ clean(); enable_ap_worker(NULL); assert(ap_enabling && !server_state.ap_enabled);
+ event(NET_EVENT_WIFI_CONNECT_RESULT,0);
+ assert(server_state.station_connected && !disable_ap_work.pending);
+ event(NET_EVENT_WIFI_AP_ENABLE_RESULT,0);
+ assert(server_state.ap_enabled && !ap_enabling && disable_ap_work.pending);
+ assert(disable_ap_work.due==AP_HANDOFF_DELAY_MS && !ap_health_work.pending);
+ run(&disable_ap_work); assert(ap_stops==1);
+ event(NET_EVENT_WIFI_AP_DISABLE_RESULT,0);
+ assert(!server_state.ap_enabled && !enable_ap_work.pending);
+
+ /* The same late AP success after a failed STA attempt keeps provisioning
+  * and verifies its radio instead of scheduling a handoff. */
+ clean(); enable_ap_worker(NULL); assert(ap_enabling);
+ event(NET_EVENT_WIFI_CONNECT_RESULT,-EIO);
+ event(NET_EVENT_WIFI_AP_ENABLE_RESULT,0);
+ assert(server_state.ap_enabled && ap_health_work.pending && !disable_ap_work.pending);
+ run(&ap_health_work);
+ assert(server_state.ap_verified && !ap_stops && !disable_ap_work.pending);
+
+ /* Recovery must also wait for an association attempt to settle, then a
+  * failed-connect event restores the initial setup path normally. */
+ clean(); schedule_recovery_ap(); server_state.station_connecting=true;
+ run(&enable_ap_work); assert(!ap_starts && !ap_enabling);
+ schedule_recovery_ap(); assert(!enable_ap_work.pending);
+ event(NET_EVENT_WIFI_CONNECT_RESULT,-EIO);
+ assert(enable_ap_work.pending); run(&enable_ap_work); assert(ap_starts==1);
+
+ /* The reservation guard also sees a Wi-Fi command started after queuing.
+  * Explicit reset/startup calls keep their separate command semantics. */
+ clean(); schedule_recovery_ap(); wifi_state.request_busy=true;
+ run(&enable_ap_work); assert(!ap_starts && !ap_enabling);
+ assert(enable_ap(false)==0 && ap_starts==1 && ap_enabling);
+
+ /* A queued AP handoff must not tear down the only live network once STA
+  * disconnects, including a callback cancellation could not recall. */
+ clean(); server_state.ap_enabled=true;
+ event(NET_EVENT_WIFI_CONNECT_RESULT,0);
+ assert(disable_ap_work.pending && disable_ap_work.due==AP_HANDOFF_DELAY_MS);
+ event(NET_EVENT_WIFI_DISCONNECT_RESULT,-ECONNRESET);
+ assert(!disable_ap_work.pending && !server_state.station_connected);
+ assert(server_state.ap_enabled && station_retry_work.pending && !enable_ap_work.pending);
+ disable_ap(NULL); assert(!ap_stops && server_state.ap_enabled);
+
+ /* A healthy STA still completes normal handoff, without scheduling an AP
+  * restart on the subsequent real AP_STOP notification. */
+ clean(); server_state.ap_enabled=true;
+ event(NET_EVENT_WIFI_CONNECT_RESULT,0); run(&disable_ap_work);
+ assert(ap_stops==1); event(NET_EVENT_WIFI_AP_DISABLE_RESULT,0);
+ assert(!server_state.ap_enabled && !enable_ap_work.pending);
+
+ clean(); server_state.ap_enabled=true; event(NET_EVENT_WIFI_CONNECT_RESULT,0);
+ wifi_state.request_busy=true; run(&disable_ap_work);
+ assert(!ap_stops && server_state.ap_enabled);
+
+ /* APSTA may use the router's channel until the planned handoff. A good
+  * STA cancels health work and even a dequeued stale check cannot restart AP. */
+ clean(); server_state.ap_enabled=true; reported_ap.channel=11;
+ wifi_reschedule(&ap_health_work,K_MSEC(AP_HEALTH_DELAY_MS));
+ event(NET_EVENT_WIFI_CONNECT_RESULT,0); assert(!ap_health_work.pending);
+ for(unsigned i=0U;i<AP_HEALTH_MAX_FAILURES;++i) verify_ap_worker(NULL);
+ assert(!status_queries && !ap_stops && !ap_health_failures && !ap_health_work.pending);
+ assert(disable_ap_work.pending);
+
+ /* While association is in progress, defer the channel check and its
+  * failure counter. Once association fails, verification/recovery resumes. */
+ clean(); server_state.ap_enabled=true; server_state.station_connecting=true;
+ reported_ap.channel=11; ap_health_failures=AP_HEALTH_MAX_FAILURES-1U;
+ verify_ap_worker(NULL);
+ assert(ap_health_work.pending && ap_health_work.due==AP_HEALTH_DELAY_MS);
+ assert(!status_queries && !ap_stops && ap_health_failures==AP_HEALTH_MAX_FAILURES-1U);
+ event(NET_EVENT_WIFI_CONNECT_RESULT,-EIO); run(&ap_health_work);
+ assert(status_queries==1 && ap_stops==1);
+ event(NET_EVENT_WIFI_AP_DISABLE_RESULT,0);
+ assert(enable_ap_work.pending); run(&enable_ap_work); assert(ap_starts==1);
+
+ /* An association/result can arrive during the driver status query. The
+  * second state check must discard that stale unhealthy status as well. */
+ clean(); server_state.ap_enabled=true; reported_ap.channel=11;
+ ap_health_failures=AP_HEALTH_MAX_FAILURES-1U; connect_during_status=true;
+ verify_ap_worker(NULL);
+ assert(status_queries==1 && !ap_stops && !ap_health_work.pending);
+ assert(ap_health_failures==AP_HEALTH_MAX_FAILURES-1U && disable_ap_work.pending);
+ clean(); server_state.ap_enabled=true; reported_ap.channel=11;
+ ap_health_failures=AP_HEALTH_MAX_FAILURES-1U; associate_during_status=true;
+ verify_ap_worker(NULL);
+ assert(status_queries==1 && !ap_stops && ap_health_work.pending);
+ assert(ap_health_failures==AP_HEALTH_MAX_FAILURES-1U);
+
+ clean(); server_state.ap_enabled=true; verify_ap_worker(NULL);
+ assert(server_state.ap_verified && !ap_stops && !ap_health_work.pending);
+
+ /* Paused radio work remains inert in both directions. */
+ clean(); schedule_recovery_ap(); paused=true; run(&enable_ap_work);
+ assert(!ap_starts && !ap_enabling);
+ clean(); server_state.ap_enabled=true; event(NET_EVENT_WIFI_CONNECT_RESULT,0);
+ paused=true; run(&disable_ap_work); assert(!ap_stops);
+ puts("wifi lifecycle: queued recovery/handoff cancellation, execution guards, failed-router recovery and pause: PASS");
+ return 0;
+}
+'''
+
+
 class WifiBackendTests(unittest.TestCase):
+    def test_actual_ap_lifecycle(self):
+        constants = ("AP_CHANNEL", "AP_RETRY_INITIAL_MS", "AP_RETRY_MAX_MS", "AP_RETRY_MAX_SHIFT",
+                     "STA_RETRY_INITIAL_MS", "STA_RETRY_MAX_MS", "STA_RETRY_MAX_SHIFT",
+                     "AP_HANDOFF_DELAY_MS", "AP_HEALTH_DELAY_MS", "AP_HEALTH_MAX_FAILURES")
+        defines = "\n".join(re.search(r"^#define " + name + r" .+$", SOURCE, re.M).group()
+                            for name in constants) + "\n"
+        names = ("wifi_reschedule", "schedule_station_retry", "enable_ap", "schedule_recovery_ap",
+                 "enable_ap_worker", "verify_ap_worker", "disable_ap", "wifi_event")
+        code = defines + LIFECYCLE_PREFIX + "\n".join(function(name) for name in names) + LIFECYCLE_MAIN
+        with tempfile.TemporaryDirectory(prefix="papermono-wifi-lifecycle-") as directory:
+            source = Path(directory) / "lifecycle.c"
+            executable = Path(directory) / "lifecycle-test"
+            source.write_text(code)
+            subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "include"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_actual_c_backend(self):
         names = ["wifi_reschedule", "wipe_wifi_secret", "connect_station", "scan_security",
                  "scan_add_locked", "finish_scan_locked", "scan_wifi_worker", "scan_timeout_worker",
@@ -225,7 +480,22 @@ class WifiBackendTests(unittest.TestCase):
             subprocess.run([str(executable)], check=True)
 
     def test_no_system_queue_or_direct_http_nvs(self):
-        self.assertNotIn("k_work_reschedule(&", SOURCE)
+        # Wi-Fi transitions and NVS must use their dedicated queue. The RSS
+        # deadline is the only system-queue exception: its callback only checks
+        # short state and shuts down a socket, leaving cleanup to HTTP ABORT.
+        system_calls = re.finditer(
+            r"\bk_work_(?:reschedule|schedule|submit)\s*\(\s*([^,)]+)", SOURCE)
+        for call in system_calls:
+            with self.subTest(system_work=call.group(1).strip()):
+                self.assertEqual(call.group(1).strip(), "&rss_request_timeout",
+                                 "Wi-Fi work must stay on wifi_work_queue")
+        self.assertIn("k_work_reschedule_for_queue(&wifi_work_queue", function("wifi_reschedule"))
+        deadline = function("rss_request_timeout_worker")
+        self.assertIn("K_NO_WAIT", deadline)
+        self.assertNotIn("K_FOREVER", deadline)
+        for forbidden in ("papermono_settings_", "net_mgmt(", "papermono_content_store_",
+                          "papermono_ui_", "papermono_rss_sources_replace", "k_msleep("):
+            self.assertNotIn(forbidden, deadline)
         self.assertNotIn("papermono_settings_set_wifi", function("wifi_handler"))
         self.assertNotIn("net_mgmt(", function("papermono_content_server_connect_wifi"))
         self.assertNotIn("net_mgmt(", function("papermono_content_server_scan_wifi"))
