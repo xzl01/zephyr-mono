@@ -220,3 +220,4 @@ cc -std=c17 -Wall -Wextra -Werror -Iinclude \
 	tests/host/test_rss.c src/papermono_rss.c \
 	-o "$build_dir/test_rss"
 "$build_dir/test_rss"
+python3 tests/host/test_rss_refresh.py

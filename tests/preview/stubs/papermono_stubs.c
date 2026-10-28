@@ -679,6 +679,8 @@ static struct papermono_rss_feed preview_rss;
 static int preview_rss_request_result;
 static bool preview_rss_body_fail;
 static unsigned preview_rss_request_count;
+static unsigned preview_rss_body_load_count;
+static const char *preview_rss_body_text;
 
 void preview_rss_set_index(const struct papermono_rss_feed *feed)
 {
@@ -697,6 +699,11 @@ void preview_rss_request_result_set(int result)
 void preview_rss_body_fail_set(bool fail) { preview_rss_body_fail = fail; }
 
 unsigned preview_rss_requests(void) { return preview_rss_request_count; }
+
+unsigned preview_rss_body_loads(void) { return preview_rss_body_load_count; }
+
+/* Test text has static storage and is cleared before capturing fixtures. */
+void preview_rss_body_text_set(const char *text) { preview_rss_body_text = text; }
 
 int papermono_rss_init(void) { return 0; }
 
@@ -719,9 +726,14 @@ int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
 	static const char ending[] = "——正文结束";
 	size_t used = 0U;
 
+	++preview_rss_body_load_count;
 	if (preview_rss_body_fail || buffer == NULL || capacity == 0U ||
 	    index >= preview_rss.count) {
 		return -ENOENT;
+	}
+	if (preview_rss_body_text != NULL) {
+		(void)snprintf(buffer, capacity, "%s", preview_rss_body_text);
+		return (int)strlen(buffer);
 	}
 	if (index != 0U) {
 		(void)snprintf(buffer, capacity, "短文只有一页。");

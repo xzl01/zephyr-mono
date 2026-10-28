@@ -35,9 +35,11 @@ struct papermono_rss_feed {
 
 int papermono_rss_init(void);
 void papermono_rss_get(struct papermono_rss_feed *out);
-/* Fetches now (called when the news page opens). Keeps the SD cache warm. */
+/* Refreshes on every news-page open, regardless of cache age or RTC validity.
+ * Async: cached content stays readable; queued/in-flight requests coalesce.
+ */
 int papermono_rss_request(void);
-/* 0 when idle, 1 while fetching, a negative errno after the last failure. */
+/* 0 when idle, 1 while queued/fetching, a negative errno after the last failure. */
 int papermono_rss_status(void);
 
 /* Loads the full body of an item into `buffer` (NUL terminated). Returns the

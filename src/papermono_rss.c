@@ -51,10 +51,9 @@ LOG_MODULE_REGISTER(papermono_rss, LOG_LEVEL_INF);
 /* Largest feed body / all bodies kept on the SD card, per the public header. */
 #define RSS_BODY_LIMIT ((size_t)PAPERMONO_RSS_BODY_MAX)
 #define RSS_BODIES_TOTAL_MAX (256U * 1024U)
-/* The cache is refreshed only when the news page is opened and is older than
- * this; there is no background polling.
+/* Every news-page open checks the source; the SD cache remains readable while
+ * that request runs. There is no background polling or cache-age gate.
  */
-#define RSS_CACHE_FRESH_SECONDS (30U * 60U)
 #define RSS_FETCH_ATTEMPTS 3U
 #define RSS_FETCH_RETRY_MS 20000U
 #define RSS_IPV4_WAIT_MS 30000U
@@ -1725,7 +1724,6 @@ static char rss_host_cache_directory[160] = ".";
 
 #if defined(__ZEPHYR__)
 static K_MUTEX_DEFINE(rss_lock);
-static int64_t last_fetch_uptime_ms;
 
 static inline void rss_lock_take(void)
 {
@@ -2475,9 +2473,6 @@ static int rss_cache_commit(const struct papermono_rss_feed *feed,
 	}
 	snapshot = *feed;
 	index_loaded = true;
-#if defined(__ZEPHYR__)
-	last_fetch_uptime_ms = k_uptime_get();
-#endif
 	rss_lock_release();
 	return 0;
 }
@@ -3025,28 +3020,21 @@ static int64_t rss_wall_clock(void)
 	return now > 1600000000 ? (int64_t)now : 0;
 }
 
-static bool rss_cache_fresh_locked(void)
+static void rss_fetch_complete(int result)
 {
-	const int64_t now = rss_wall_clock();
-
-	if (!snapshot.valid) {
-		return false;
+	atomic_set(&last_result, result);
+	atomic_set(&fetch_busy, 0);
+	if (result == 0) {
+		/* CONTENT_CHANGED reloads a body opened from the previous cache;
+		 * a plain redraw would only update its title/index metadata.
+		 */
+		papermono_ui_request_content_refresh();
+	} else {
+		/* Include pre-fetch failures so an empty page cannot remain on
+		 * "syncing" after the worker has stopped.
+		 */
+		papermono_ui_request_background_refresh();
 	}
-	if (snapshot.updated_at > 0) {
-		if (now == 0) {
-			/* The RTC is not calibrated, so the age is unknown; trust
-			 * the card cache instead of refetching on every boot.
-			 */
-			return true;
-		}
-		return now >= snapshot.updated_at &&
-		       now - snapshot.updated_at <
-			       (int64_t)RSS_CACHE_FRESH_SECONDS;
-	}
-	/* Without a cache timestamp, use the uptime of this boot's fetch. */
-	return last_fetch_uptime_ms != 0 &&
-	       k_uptime_get() - last_fetch_uptime_ms <
-		       (int64_t)RSS_CACHE_FRESH_SECONDS * 1000;
 }
 
 static bool rss_wait_ipv4(void)
@@ -3088,19 +3076,11 @@ static void rss_worker(void *a, void *b, void *c)
 	RSS_LOG_INF("RSS worker started (SD cache, fetch on demand)");
 	for (;;) {
 		int loaded;
-		bool fresh = false;
 		int ret = -EIO;
 
 		(void)k_sem_take(&request_sem, K_FOREVER);
-		if (!atomic_cas(&fetch_busy, 0, 1)) {
-			continue;
-		}
-		atomic_set(&last_result, 1);
 		rss_lock_take();
 		loaded = rss_ensure_index();
-		if (loaded >= 0) {
-			fresh = rss_cache_fresh_locked();
-		}
 		rss_lock_release();
 		if (loaded == 1) {
 			papermono_ui_request_background_refresh();
@@ -3111,34 +3091,29 @@ static void rss_worker(void *a, void *b, void *c)
 			 */
 			if (sd_retries < 15U) {
 				++sd_retries;
-				atomic_set(&fetch_busy, 0);
+				/* Keep the queued/in-flight reservation through SD retry
+				 * delays so repeated opens cannot enqueue a second fetch.
+				 */
 				k_msleep(2000);
 				k_sem_give(&request_sem);
 				continue;
 			}
 			RSS_LOG_WRN("RSS skipped: SD cache is not available");
-			atomic_set(&last_result, -ENODEV);
-			atomic_set(&fetch_busy, 0);
+			sd_retries = 0U;
+			rss_fetch_complete(-ENODEV);
 			continue;
 		}
 		sd_retries = 0U;
-		if (fresh) {
-			RSS_LOG_INF("RSS cache is fresh; not fetching");
-			atomic_set(&fetch_busy, 0);
-			continue;
-		}
 		(void)snprintf(url, sizeof(url), "%s",
 			       papermono_settings_get()->rss_url);
 		if (url[0] == '\0' || strncmp(url, "http://", 7U) != 0) {
 			RSS_LOG_WRN("RSS URL is not a plain http:// URL");
-			atomic_set(&last_result, -EINVAL);
-			atomic_set(&fetch_busy, 0);
+			rss_fetch_complete(-EINVAL);
 			continue;
 		}
 		if (!rss_wait_ipv4()) {
 			RSS_LOG_WRN("RSS fetch skipped: IPv4 is not ready");
-			atomic_set(&last_result, -ENETDOWN);
-			atomic_set(&fetch_busy, 0);
+			rss_fetch_complete(-ENETDOWN);
 			continue;
 		}
 		for (uint8_t attempt = 0U; attempt < RSS_FETCH_ATTEMPTS;
@@ -3157,15 +3132,11 @@ static void rss_worker(void *a, void *b, void *c)
 				k_msleep(RSS_FETCH_RETRY_MS);
 			}
 		}
-		atomic_set(&last_result, ret);
-		if (ret == 0) {
-			papermono_ui_request_background_refresh();
-		} else {
+		if (ret != 0) {
 			RSS_LOG_WRN("RSS refresh failed (%d); the next news-page open will retry",
 				    ret);
-			papermono_ui_request_background_refresh();
 		}
-		atomic_set(&fetch_busy, 0);
+		rss_fetch_complete(ret);
 	}
 }
 
@@ -3196,17 +3167,13 @@ int papermono_rss_status(void)
 
 int papermono_rss_request(void)
 {
-	bool needs_work;
-
-	rss_lock_take();
-	needs_work = !index_loaded || !rss_cache_fresh_locked();
-	rss_lock_release();
-	if (!needs_work) {
+	/* Reserve before waking the worker, so both pending and active requests
+	 * coalesce. Cached content and wall-clock validity never suppress a fetch.
+	 */
+	if (!atomic_cas(&fetch_busy, 0, 1)) {
 		return 0;
 	}
-	if (atomic_get(&fetch_busy) != 0) {
-		return 0;
-	}
+	atomic_set(&last_result, 1);
 	k_sem_give(&request_sem);
 	return 0;
 }

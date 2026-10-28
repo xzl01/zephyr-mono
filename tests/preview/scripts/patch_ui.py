@@ -30,6 +30,8 @@ void preview_rss_set_index(const struct papermono_rss_feed *feed);
 void preview_rss_request_result_set(int result);
 void preview_rss_body_fail_set(bool fail);
 unsigned preview_rss_requests(void);
+unsigned preview_rss_body_loads(void);
+void preview_rss_body_text_set(const char *text);
 
 #define PREVIEW_CHECK(condition) do { \
 	if (!(condition)) { \
@@ -329,7 +331,23 @@ int preview_run_assertions(void)
 	preview_rss_set_index(&news_feed);
 	preview_rss_body_fail_set(false);
 	preview_rss_request_result_set(0);
+	const unsigned rss_requests_before_open = preview_rss_requests();
 	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_open + 1U);
+	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	PREVIEW_CHECK(news_ui.feed.count == 8U && !news_ui.detail);
+	/* Drawing and system refreshes must not start more network work. A
+	 * genuine exit/reopen does request an update even with a valid index. */
+	event = (struct papermono_app_event) {
+		.type = PAPERMONO_APP_EVENT_REFRESH,
+		.source = PAPERMONO_APP_EVENT_SOURCE_SYSTEM,
+	};
+	PREVIEW_CHECK(process_event(&event) == 0);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_open + 1U);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_HOME) == 0);
+	PREVIEW_CHECK(papermono_app_router_open(&app_router, PAPERMONO_APP_NEWS) == 0);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_open + 2U);
 	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
 	PREVIEW_CHECK(news_ui.feed.count == 8U && !news_ui.detail);
 	struct papermono_rect news_row;
@@ -375,6 +393,31 @@ int preview_run_assertions(void)
 	PREVIEW_CHECK(news_event(NULL, &event, &command) == 0);
 	PREVIEW_CHECK(news_ui.body_page == 0U);
 	PREVIEW_CHECK(render_current(PAPERMONO_REFRESH_AUTO) == 0);
+	/* The page may be reading cached text when its entry-triggered fetch
+	 * completes. An ordinary redraw keeps that SD body cached; an actual
+	 * content update must replace both its title and visible text. */
+	const unsigned rss_body_reads_before_update = preview_rss_body_loads();
+	preview_rss_body_text_set("同步后的最新正文。");
+	event = (struct papermono_app_event) {
+		.type = PAPERMONO_APP_EVENT_REFRESH,
+		.source = PAPERMONO_APP_EVENT_SOURCE_SYSTEM,
+	};
+	PREVIEW_CHECK(process_event(&event) == 0);
+	PREVIEW_CHECK(preview_rss_body_loads() == rss_body_reads_before_update);
+	PREVIEW_CHECK(strstr(news_body_text, "——正文结束") != NULL);
+	(void)snprintf(news_feed.items[0].title,
+		sizeof(news_feed.items[0].title), "已更新资讯");
+	preview_rss_set_index(&news_feed);
+	event.type = PAPERMONO_APP_EVENT_CONTENT_CHANGED;
+	PREVIEW_CHECK(process_event(&event) == 0);
+	PREVIEW_CHECK(preview_rss_body_loads() == rss_body_reads_before_update + 1U);
+	PREVIEW_CHECK(strcmp(news_body_text, "同步后的最新正文。") == 0);
+	PREVIEW_CHECK(strcmp(news_ui.feed.items[0].title, "已更新资讯") == 0);
+	event.type = PAPERMONO_APP_EVENT_REFRESH;
+	PREVIEW_CHECK(process_event(&event) == 0);
+	PREVIEW_CHECK(preview_rss_body_loads() == rss_body_reads_before_update + 1U);
+	PREVIEW_CHECK(preview_rss_requests() == rss_requests_before_open + 2U);
+	preview_rss_body_text_set(NULL);
 	/* Tap leaves the article; a missing SD body must render the error page,
 	 * not crash or keep a stale buffer. */
 	event = preview_tap(&news_body_rect);
