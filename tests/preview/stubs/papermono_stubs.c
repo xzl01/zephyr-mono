@@ -673,79 +673,125 @@ void papermono_weather_get(struct papermono_weather *state)
 	state->updated_at = 1789000000;
 }
 
-/* Synthetic RSS index and SD body cache. The index mirrors the production
- * struct; bodies are generated on demand, so no host file is read. */
-static struct papermono_rss_feed preview_rss;
-static int preview_rss_request_result;
-static int preview_rss_status_value;
-static bool preview_rss_body_fail;
+/* Synthetic per-source RSS indexes and SD bodies; no host feed is contacted. */
+struct preview_rss_source_state {
+	struct papermono_rss_feed feed;
+	uint32_t revision;
+	int request_result;
+	int status;
+	bool body_fail;
+	const char *body_text;
+};
+static struct preview_rss_source_state preview_rss_states[PAPERMONO_RSS_SOURCE_MAX];
+static struct papermono_rss_source preview_rss_sources[PAPERMONO_RSS_SOURCE_MAX] = {
+	{"gold", "金价", "http://example.test/gold.xml"},
+	{"ai", "AI 资讯", "http://example.test/ai.xml"},
+};
+static size_t preview_rss_source_count = 2U;
+static uint32_t preview_rss_generation = 1U;
 static unsigned preview_rss_request_count;
 static unsigned preview_rss_body_load_count;
-static const char *preview_rss_body_text;
 
+size_t papermono_rss_source_count(void) { return preview_rss_source_count; }
+uint32_t papermono_rss_sources_generation(void) { return preview_rss_generation; }
+int papermono_rss_source_get(size_t source, struct papermono_rss_source *out)
+{
+	if (source >= preview_rss_source_count || out == NULL) return -ENOENT;
+	*out = preview_rss_sources[source];
+	return 0;
+}
+int papermono_rss_sources_replace(const struct papermono_rss_source *sources, size_t count)
+{
+	struct preview_rss_source_state old_states[PAPERMONO_RSS_SOURCE_MAX];
+	struct papermono_rss_source old_sources[PAPERMONO_RSS_SOURCE_MAX];
+	const size_t old_count = preview_rss_source_count;
+
+	if (count > PAPERMONO_RSS_SOURCE_MAX) return -EINVAL;
+	memcpy(old_states, preview_rss_states, sizeof(old_states));
+	memcpy(old_sources, preview_rss_sources, sizeof(old_sources));
+	memset(preview_rss_states, 0, sizeof(preview_rss_states));
+	memset(preview_rss_sources, 0, sizeof(preview_rss_sources));
+	for (size_t i = 0U; i < count; ++i) {
+		preview_rss_sources[i] = sources[i];
+		for (size_t j = 0U; j < old_count; ++j) {
+			if (strcmp(sources[i].id, old_sources[j].id) == 0 &&
+			    strcmp(sources[i].url, old_sources[j].url) == 0) {
+				preview_rss_states[i] = old_states[j];
+				break;
+			}
+		}
+	}
+	preview_rss_source_count = count;
+	++preview_rss_generation;
+	return 0;
+}
+void preview_rss_defaults(void)
+{
+	const struct papermono_rss_source sources[] = {
+		{"gold", "金价", "http://example.test/gold.xml"},
+		{"ai", "AI 资讯", "http://example.test/ai.xml"},
+	};
+	(void)papermono_rss_sources_replace(sources, 2U);
+}
+void preview_rss_set_source_index(size_t source, const struct papermono_rss_feed *feed)
+{
+	if (source >= PAPERMONO_RSS_SOURCE_MAX) return;
+	if (feed == NULL) memset(&preview_rss_states[source].feed, 0,
+		sizeof(preview_rss_states[source].feed));
+	else preview_rss_states[source].feed = *feed;
+	++preview_rss_states[source].revision;
+}
 void preview_rss_set_index(const struct papermono_rss_feed *feed)
 {
-	if (feed == NULL) {
-		memset(&preview_rss, 0, sizeof(preview_rss));
-	} else {
-		preview_rss = *feed;
-	}
+	preview_rss_set_source_index(0U, feed);
 }
-
-void preview_rss_request_result_set(int result)
-{
-	preview_rss_request_result = result;
-}
-
-void preview_rss_status_set(int status) { preview_rss_status_value = status; }
-
-void preview_rss_body_fail_set(bool fail) { preview_rss_body_fail = fail; }
-
+void preview_rss_request_result_set(int result) { preview_rss_states[0].request_result = result; }
+void preview_rss_status_set(int status) { preview_rss_states[0].status = status; }
+void preview_rss_source_status_set(size_t source, int status) { preview_rss_states[source].status = status; }
+void preview_rss_body_fail_set(bool fail) { preview_rss_states[0].body_fail = fail; }
+void preview_rss_body_text_set(const char *text) { preview_rss_states[0].body_text = text; }
+void preview_rss_source_body_set(size_t source, const char *text) { preview_rss_states[source].body_text = text; }
 unsigned preview_rss_requests(void) { return preview_rss_request_count; }
-
 unsigned preview_rss_body_loads(void) { return preview_rss_body_load_count; }
-
-/* Test text has static storage and is cleared before capturing fixtures. */
-void preview_rss_body_text_set(const char *text) { preview_rss_body_text = text; }
-
 int papermono_rss_init(void) { return 0; }
-
-int papermono_rss_status(void) { return preview_rss_status_value; }
-
-int papermono_rss_request(void)
+uint32_t papermono_rss_revision(size_t source)
 {
+	return source < preview_rss_source_count ? preview_rss_states[source].revision : 0U;
+}
+int papermono_rss_status_source(size_t source)
+{
+	return source < preview_rss_source_count ? preview_rss_states[source].status : -ENOENT;
+}
+int papermono_rss_request_source(size_t source)
+{
+	if (source >= preview_rss_source_count) return -ENOENT;
 	++preview_rss_request_count;
-	if (preview_rss_request_result == 0) {
-		preview_rss_status_value = 1;
-	}
-	return preview_rss_request_result;
+	if (preview_rss_states[source].request_result == 0) preview_rss_states[source].status = 1;
+	return preview_rss_states[source].request_result;
 }
-
-void papermono_rss_get(struct papermono_rss_feed *state)
+void papermono_rss_get_source(size_t source, struct papermono_rss_feed *state)
 {
-	if (state != NULL) *state = preview_rss;
+	if (state == NULL) return;
+	if (source < preview_rss_source_count) *state = preview_rss_states[source].feed;
+	else memset(state, 0, sizeof(*state));
 }
-
-int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
+int papermono_rss_body_load_source(size_t source, size_t index, char *buffer, size_t capacity)
 {
 	static const char sentence[] = "纸页资讯正文用于验证分页行为。";
 	static const char ending[] = "——正文结束";
 	size_t used = 0U;
 
 	++preview_rss_body_load_count;
-	if (preview_rss_body_fail || buffer == NULL || capacity == 0U ||
-	    index >= preview_rss.count) {
-		return -ENOENT;
-	}
-	if (preview_rss_body_text != NULL) {
-		(void)snprintf(buffer, capacity, "%s", preview_rss_body_text);
+	if (source >= preview_rss_source_count || preview_rss_states[source].body_fail ||
+	    buffer == NULL || capacity == 0U || index >= preview_rss_states[source].feed.count) return -ENOENT;
+	if (preview_rss_states[source].body_text != NULL) {
+		(void)snprintf(buffer, capacity, "%s", preview_rss_states[source].body_text);
 		return (int)strlen(buffer);
 	}
 	if (index != 0U) {
 		(void)snprintf(buffer, capacity, "短文只有一页。");
 		return (int)strlen(buffer);
 	}
-	/* About three 19-line pages, with a recognisable final line. */
 	while (used + sizeof(sentence) - 1U < capacity - 1U && used < 2600U) {
 		memcpy(buffer + used, sentence, sizeof(sentence) - 1U);
 		used += sizeof(sentence) - 1U;
@@ -756,4 +802,11 @@ int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
 	}
 	buffer[used] = '\0';
 	return (int)used;
+}
+int papermono_rss_status(void) { return papermono_rss_status_source(0U); }
+int papermono_rss_request(void) { return papermono_rss_request_source(0U); }
+void papermono_rss_get(struct papermono_rss_feed *out) { papermono_rss_get_source(0U, out); }
+int papermono_rss_body_load(size_t index, char *buffer, size_t capacity)
+{
+	return papermono_rss_body_load_source(0U, index, buffer, capacity);
 }

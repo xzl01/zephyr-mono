@@ -47,8 +47,11 @@ PREFIX = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #define net_in_addr in_addr
 #define zsock_addrinfo addrinfo
+#define zsock_timeval timeval
+#define RSS_MIN(a,b) ((a) < (b) ? (a) : (b))
 #define NET_ADDR_PREFERRED 1
 static char log_message[128];
 #define RSS_LOG_INF(...) ((void)snprintf(log_message, sizeof(log_message), __VA_ARGS__))
@@ -58,10 +61,17 @@ static struct net_if station, ap;
 static struct net_if *station_iface, *default_iface;
 static int bind_error, connect_error, socket_error;
 static int sockets, binds, connects, closes, dns_calls;
+static int timeout_sets, recv_timeout_sets, send_timeout_sets, fail_timeout_at;
+static int timeout_error, send_error, recv_error, dns_frees;
+static int send_calls, recv_calls;
+static int64_t now_ms, expected_deadline, recv_timeout_ms, send_timeout_ms, smallest_timeout;
+static int64_t dns_delay_ms, connect_delay_ms, send_delay_ms, recv_delay_ms;
+static size_t send_chunk, recv_chunk, sent_total;
 static bool bound;
 static size_t received;
 static const char *http_response;
 static char sent_request[512];
+static int64_t k_uptime_get(void) { return now_ms; }
 static struct net_if *net_if_get_wifi_sta(void) { return station_iface; }
 static struct net_if *net_if_get_default(void) { return default_iface; }
 static const struct in_addr *net_if_ipv4_get_global_addr(struct net_if *iface, int state) {
@@ -79,6 +89,20 @@ static int zsock_socket(int family, int type, int protocol) {
     ++sockets;
     if (socket_error) { errno = socket_error; return -1; }
     return 7;
+}
+static int zsock_setsockopt(int sock, int level, int option, const void *value, socklen_t length) {
+    const struct zsock_timeval *timeout = value;
+    assert(sock == 7 && level == SOL_SOCKET && length == sizeof(*timeout));
+    assert(timeout->tv_usec >= 0 && timeout->tv_usec < 1000000);
+    int64_t milliseconds = timeout->tv_sec * 1000LL + timeout->tv_usec / 1000;
+    assert(milliseconds > 0 && milliseconds <= 10000);
+    assert(milliseconds <= expected_deadline - now_ms);
+    ++timeout_sets;
+    if (timeout_sets == fail_timeout_at) { errno = timeout_error; return -1; }
+    if (milliseconds < smallest_timeout) smallest_timeout = milliseconds;
+    if (option == SO_RCVTIMEO) { recv_timeout_ms = milliseconds; ++recv_timeout_sets; }
+    else { assert(option == SO_SNDTIMEO); send_timeout_ms = milliseconds; ++send_timeout_sets; }
+    return 0;
 }
 static int zsock_bind(int sock, const struct sockaddr *address, socklen_t length) {
     const struct sockaddr_in *local = (const struct sockaddr_in *)address;
@@ -99,22 +123,39 @@ static int zsock_connect(int sock, const struct sockaddr *address, socklen_t len
     inet_pton(AF_INET, "192.168.100.122", &expected);
     assert(sock == 7 && length == sizeof(*remote));
     assert(bound && binds == 1);
+    assert(recv_timeout_sets == 1 && send_timeout_sets == 1);
     assert(remote->sin_addr.s_addr == expected.s_addr && ntohs(remote->sin_port) == 8080);
     ++connects;
+    now_ms += connect_delay_ms;
     if (connect_error) { errno = connect_error; return -1; }
     return 0;
 }
 static int zsock_close(int sock) { assert(sock == 7); ++closes; return 0; }
 static ssize_t zsock_send(int sock, const void *buffer, size_t size, int flags) {
     assert(sock == 7 && bound && connects == 1 && !connect_error && flags == 0);
-    assert(size < sizeof(sent_request));
-    memcpy(sent_request, buffer, size); sent_request[size] = '\0';
+    assert(send_timeout_sets >= 2);
+    ++send_calls;
+    now_ms += send_delay_ms < send_timeout_ms ? send_delay_ms : send_timeout_ms;
+    if (send_error || (send_delay_ms && send_delay_ms >= send_timeout_ms)) {
+        errno = send_error ? send_error : EAGAIN; return -1;
+    }
+    if (send_chunk && size > send_chunk) size = send_chunk;
+    assert(sent_total + size < sizeof(sent_request));
+    memcpy(sent_request + sent_total, buffer, size); sent_total += size;
+    sent_request[sent_total] = '\0';
     return (ssize_t)size;
 }
 static ssize_t zsock_recv(int sock, void *buffer, size_t size, int flags) {
     assert(sock == 7 && bound && connects == 1 && flags == 0);
+    assert(recv_timeout_sets > recv_calls + 1);
+    ++recv_calls;
+    now_ms += recv_delay_ms < recv_timeout_ms ? recv_delay_ms : recv_timeout_ms;
+    if (recv_error || (recv_delay_ms && recv_delay_ms >= recv_timeout_ms)) {
+        errno = recv_error ? recv_error : EAGAIN; return -1;
+    }
     size_t available = strlen(http_response) - received;
     if (size > 17) size = 17; /* Fragment headers and body across reads. */
+    if (recv_chunk && size > recv_chunk) size = recv_chunk;
     if (size > available) size = available;
     memcpy(buffer, http_response + received, size); received += size;
     return (ssize_t)size;
@@ -126,13 +167,14 @@ static int zsock_getaddrinfo(const char *host, const char *port,
     assert(strcmp(host, "feed.test") == 0 && strcmp(port, "8080") == 0);
     assert(hints->ai_family == AF_INET && hints->ai_socktype == SOCK_STREAM);
     ++dns_calls;
+    now_ms += dns_delay_ms;
     dns_address.sin_family = AF_INET; dns_address.sin_port = htons(8080);
     inet_pton(AF_INET, "192.168.100.122", &dns_address.sin_addr);
     dns_result.ai_addr = (struct sockaddr *)&dns_address;
     *result = &dns_result;
     return 0;
 }
-static void zsock_freeaddrinfo(struct addrinfo *result) { assert(result == &dns_result); }
+static void zsock_freeaddrinfo(struct addrinfo *result) { assert(result == &dns_result); ++dns_frees; }
 '''
 
 MAIN = r'''
@@ -144,6 +186,13 @@ static void clean(void) {
     station_iface = &station; default_iface = &ap;
     bind_error = connect_error = socket_error = 0;
     sockets = binds = connects = closes = dns_calls = 0;
+    timeout_sets = recv_timeout_sets = send_timeout_sets = fail_timeout_at = 0;
+    send_calls = recv_calls = dns_frees = 0;
+    timeout_error = ENOPROTOOPT; send_error = recv_error = 0;
+    now_ms = 5000; expected_deadline = now_ms + 30000;
+    recv_timeout_ms = send_timeout_ms = 0; smallest_timeout = 10000;
+    dns_delay_ms = connect_delay_ms = send_delay_ms = recv_delay_ms = 0;
+    send_chunk = recv_chunk = sent_total = 0;
     bound = false; received = 0; sent_request[0] = log_message[0] = '\0';
     http_response = "HTTP/1.1 200 OK\r\nContent-Type: application/rss+xml\r\n\r\n<rss>latest</rss>";
 }
@@ -193,7 +242,77 @@ int main(void) {
     http_response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n<rss>\r\nC\r\nlatest</rss>\r\n0\r\n\r\n";
     assert(fetch(url, "<rss>latest</rss>") == 0);
     assert(binds == 1 && connects == 1 && closes == 1);
-    puts("RSS HTTP network: STA source binding, cleanup, DNS and response bytes: PASS");
+
+    /* Reaching the caller's fixed response capacity keeps the established
+     * truncated-feed policy; time limits do not require a larger buffer. */
+    clean();
+    char large_response[512];
+    const char *header = "HTTP/1.1 200 OK\r\n\r\n";
+    memcpy(large_response, header, strlen(header));
+    memset(large_response + strlen(header), 'x', sizeof(large_response) - strlen(header) - 1);
+    large_response[sizeof(large_response) - 1] = '\0';
+    http_response = large_response;
+    char bounded_response[128];
+    size_t offset = 0, length = 0; bool truncated = false;
+    assert(rss_http_get(url, bounded_response, sizeof(bounded_response),
+                        &offset, &length, &truncated) == 0);
+    assert(truncated && offset == strlen(header));
+    assert(length == sizeof(bounded_response) - 1 - offset && closes == 1);
+
+    /* Both options are mandatory before connect: a platform/configuration
+     * without timeout support must fail safely, never leave an unbounded socket. */
+    for (int fail_at = 1; fail_at <= 2; ++fail_at) {
+        clean(); fail_timeout_at = fail_at;
+        assert(fetch(url, NULL) == -ENOPROTOOPT);
+        assert(closes == 1 && !binds && !connects && !send_calls && !recv_calls);
+    }
+    clean(); fail_timeout_at = 3; timeout_error = EINVAL;
+    assert(fetch(url, NULL) == -EINVAL);
+    assert(connects == 1 && closes == 1 && !send_calls && !recv_calls);
+    clean(); fail_timeout_at = 4; timeout_error = EINVAL;
+    assert(fetch(url, NULL) == -EINVAL);
+    assert(connects == 1 && closes == 1 && send_calls == 1 && !recv_calls);
+
+    /* Kernel idle timeouts surface as EAGAIN on these blocking sockets. */
+    clean(); recv_delay_ms = 11000;
+    assert(fetch(url, NULL) == -ETIMEDOUT);
+    assert(now_ms == 15000 && recv_calls == 1 && closes == 1);
+    clean(); send_delay_ms = 11000;
+    assert(fetch(url, NULL) == -ETIMEDOUT);
+    assert(now_ms == 15000 && send_calls == 1 && !recv_calls && closes == 1);
+    clean(); recv_error = ECONNRESET;
+    assert(fetch(url, NULL) == -ECONNRESET && closes == 1);
+
+    /* Small, ongoing progress cannot keep a source in front of other queued
+     * sources forever. Remaining total budget also shortens the final idle wait. */
+    clean(); recv_chunk = 1; recv_delay_ms = 9000;
+    assert(fetch(url, NULL) == -ETIMEDOUT);
+    assert(now_ms == expected_deadline && received == 3 && recv_calls == 4);
+    assert(smallest_timeout == 3000 && closes == 1);
+    clean(); send_chunk = 1; send_delay_ms = 9000;
+    assert(fetch(url, NULL) == -ETIMEDOUT);
+    assert(now_ms == expected_deadline && sent_total == 3 && send_calls == 4);
+    assert(smallest_timeout == 3000 && !recv_calls && closes == 1);
+    clean(); recv_error = EINTR; recv_delay_ms = 1000;
+    assert(fetch(url, NULL) == -ETIMEDOUT);
+    assert(now_ms == expected_deadline && closes == 1);
+
+    /* DNS and connect consume the same total budget. A late result must not
+     * enter HTTP send/receive or leak the resolver result/socket. */
+    clean(); dns_delay_ms = 30000;
+    assert(fetch("http://feed.test:8080/feed.xml", NULL) == -ETIMEDOUT);
+    assert(dns_calls == 1 && dns_frees == 1 && !sockets && !connects);
+    clean(); connect_delay_ms = 30000;
+    assert(fetch(url, NULL) == -ETIMEDOUT);
+    assert(connects == 1 && closes == 1 && !send_calls && !recv_calls);
+    clean(); connect_delay_ms = 30000; connect_error = EIO;
+    assert(fetch(url, NULL) == -ETIMEDOUT && closes == 1);
+
+    /* The real Gold feed takes about six seconds to fill the bounded buffer. */
+    clean(); recv_delay_ms = 1000;
+    assert(fetch(url, "<rss>latest</rss>") == 0);
+    assert(now_ms < expected_deadline && closes == 1);
+    puts("RSS HTTP network: STA source, idle/total deadlines, cleanup, DNS and response bytes: PASS");
     return 0;
 }
 '''
@@ -202,10 +321,10 @@ int main(void) {
 class RssNetworkTests(unittest.TestCase):
     def test_actual_http_client(self):
         defines = "\n".join(re.search(r"^#define " + name + r" .+$", SOURCE, re.MULTILINE).group(0)
-                            for name in ("RSS_HOST_MAX", "RSS_PATH_MAX"))
+                            for name in ("RSS_HOST_MAX", "RSS_PATH_MAX", "RSS_HTTP_IDLE_TIMEOUT_MS", "RSS_HTTP_TOTAL_TIMEOUT_MS"))
         url_structure = re.search(r"^struct rss_url \{.*?^\};", SOURCE, re.MULTILINE | re.DOTALL).group(0)
         names = ("rss_iface", "rss_mem_find", "rss_url_parse", "rss_contains_ci", "rss_http_status",
-                 "rss_dechunk", "rss_bind_source", "rss_http_get")
+                 "rss_dechunk", "rss_socket_timeout", "rss_bind_source", "rss_http_get")
         # rss_iface returns a pointer rather than one of the extracted scalar types.
         iface = re.search(r"^static struct net_if \*rss_iface\(void\)\n\{.*?^\}",
                           SOURCE, re.MULTILINE | re.DOTALL).group(0)

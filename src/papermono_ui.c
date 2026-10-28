@@ -56,6 +56,7 @@
 #include <papermono/quotes.h>
 #include <papermono/reader.h>
 #include <papermono/rss.h>
+#include <papermono/rss_table.h>
 #include <papermono/settings.h>
 #include <papermono/status_led.h>
 #include <papermono/sync.h>
@@ -209,6 +210,12 @@ static size_t launcher_page;
 #define NEWS_VISIBLE_ITEMS 8U
 struct news_ui_state {
 	struct papermono_rss_feed feed;
+	struct papermono_rss_source sources[PAPERMONO_RSS_SOURCE_MAX];
+	size_t source_count;
+	size_t source_index;
+	uint32_t sources_generation;
+	bool sources_loaded;
+	bool source_needs_refresh;
 	size_t list_first;
 	size_t selected;
 	uint16_t body_page;
@@ -221,10 +228,52 @@ struct news_ui_state {
 	size_t body_index;
 	int body_length;
 	bool body_loaded;
+	uint32_t body_revision;
+	char body_source_id[PAPERMONO_RSS_SOURCE_ID_MAX + 1U];
 	/* Wrapped height in pixels, kept for the line-aligned page count. */
 	int32_t body_height;
 };
 static struct news_ui_state news_ui PAPERMONO_LARGE_BSS;
+/* Only the current article is indexed. The original body remains in the
+ * shared arena; cells/paragraphs become NUL-terminated views into that buffer.
+ * These bounded indexes live in PSRAM, never in the small internal heap. */
+#define NEWS_DOC_BLOCK_MAX 256U
+#define NEWS_DOC_ROW_MAX 4096U
+#define NEWS_DOC_PAGE_MAX 4096U
+struct news_doc_block {
+	uint32_t offset;
+	uint32_t length;
+	uint16_t first_row;
+	uint16_t row_count;
+	uint16_t columns;
+	uint16_t headers;
+	uint32_t lines;
+	bool table;
+};
+struct news_doc_row {
+	uint32_t offset;
+	uint32_t length;
+	uint16_t columns;
+	bool header;
+};
+struct news_flow_cursor {
+	uint16_t block;
+	uint16_t group;
+	uint16_t row;
+	uint32_t line;
+};
+static struct {
+	struct news_doc_block blocks[NEWS_DOC_BLOCK_MAX];
+	struct news_doc_row rows[NEWS_DOC_ROW_MAX];
+	struct news_flow_cursor pages[NEWS_DOC_PAGE_MAX];
+	struct { uint32_t row, group, lines; } line_cache[32];
+	uint16_t block_count;
+	uint16_t row_count;
+	uint8_t line_cache_next;
+	bool ready;
+	bool tables;
+	bool text_fallback;
+} news_doc PAPERMONO_LARGE_BSS;
 /* One article at a time, up to PAPERMONO_RSS_BODY_MAX. The buffer itself is
  * part of the app arena below: it is only live while the News app is open.
  * Static text keeps LVGL from duplicating the whole body in its 64 KiB heap;
@@ -2932,7 +2981,100 @@ static void news_body_clear(void)
 	news_ui.body_index = SIZE_MAX;
 	news_ui.body_length = -ENOENT;
 	news_ui.body_loaded = false;
+	news_ui.body_revision = 0U;
+	news_ui.body_source_id[0] = '\0';
 	news_body_text[0] = '\0';
+	news_doc.ready = false;
+	news_doc.tables = false;
+	news_doc.text_fallback = false;
+}
+
+static void news_reset_view(void)
+{
+	news_ui.list_first = 0U;
+	news_ui.selected = 0U;
+	news_ui.body_page = 0U;
+	news_ui.body_pages = 1U;
+	news_ui.detail = false;
+	news_ui.last_error = 0;
+	news_body_clear();
+}
+
+/* Resolve registry reordering by stable identity. A render may update this
+ * snapshot, but only entry/input/content-change handling schedules a fetch. */
+static void news_sources_sync(void)
+{
+	uint32_t generation = papermono_rss_sources_generation();
+	struct papermono_rss_source previous = {0};
+
+	if (news_ui.sources_loaded && generation == news_ui.sources_generation) {
+		return;
+	}
+	if (news_ui.source_index < news_ui.source_count) {
+		previous = news_ui.sources[news_ui.source_index];
+	}
+	for (unsigned attempt = 0U; attempt < 3U; ++attempt) {
+		generation = papermono_rss_sources_generation();
+		news_ui.source_count = MIN(papermono_rss_source_count(),
+			(size_t)PAPERMONO_RSS_SOURCE_MAX);
+		for (size_t i = 0U; i < news_ui.source_count; ++i) {
+			if (papermono_rss_source_get(i, &news_ui.sources[i]) < 0) {
+				news_ui.source_count = i;
+				break;
+			}
+		}
+		if (generation == papermono_rss_sources_generation()) {
+			break;
+		}
+	}
+	news_ui.sources_generation = generation;
+	news_ui.sources_loaded = true;
+	news_ui.source_index = 0U;
+	for (size_t i = 0U; i < news_ui.source_count; ++i) {
+		if (strcmp(previous.id, news_ui.sources[i].id) == 0) {
+			news_ui.source_index = i;
+			break;
+		}
+	}
+	const bool changed = news_ui.source_count == 0U ||
+		strcmp(previous.id, news_ui.sources[news_ui.source_index].id) != 0 ||
+		strcmp(previous.url, news_ui.sources[news_ui.source_index].url) != 0;
+	if (changed) {
+		news_reset_view();
+		memset(&news_ui.feed, 0, sizeof(news_ui.feed));
+		news_ui.source_needs_refresh = news_ui.source_count > 0U;
+	}
+}
+
+static struct papermono_rect news_source_tab_rect(size_t index)
+{
+	const int32_t left = news_sources_rect.x +
+		(int32_t)(news_sources_rect.width * index / news_ui.source_count);
+	const int32_t right = news_sources_rect.x +
+		(int32_t)(news_sources_rect.width * (index + 1U) / news_ui.source_count);
+
+	return (struct papermono_rect) {left, news_sources_rect.y,
+		right - left, news_sources_rect.height};
+}
+
+static void news_source_tabs(lv_obj_t *screen)
+{
+	if (news_ui.source_count == 0U) {
+		(void)detail_text(screen, "资讯", NEWS_MARGIN_X, NEWS_TITLE_Y,
+			NEWS_TEXT_WIDTH, 30, true);
+		return;
+	}
+	for (size_t i = 0U; i < news_ui.source_count; ++i) {
+		const struct papermono_rect rect = news_source_tab_rect(i);
+		lv_obj_t *label = detail_text(screen, news_ui.sources[i].name,
+			rect.x + 4, rect.y + 4, rect.width - 8, 34, true);
+
+		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+		if (i == news_ui.source_index) {
+			(void)make_ink_shape(screen, rect.x + 12,
+				rect.y + rect.height - 5, rect.width - 24, 3, ink, 0);
+		}
+	}
 }
 
 /* Copies one article from the SD index cache. Returns the byte count or a
@@ -2943,8 +3085,14 @@ static int news_body_load(size_t index)
 	news_ui.body_index = index;
 	news_ui.body_loaded = true;
 	news_body_text[sizeof(news_body_text) - 1U] = '\0';
-	news_ui.body_length = papermono_rss_body_load(index, news_body_text,
-		sizeof(news_body_text));
+	news_ui.body_revision = papermono_rss_revision(news_ui.source_index);
+	(void)snprintf(news_ui.body_source_id, sizeof(news_ui.body_source_id),
+		"%s", news_ui.sources[news_ui.source_index].id);
+	news_doc.ready = false;
+	news_doc.tables = false;
+	news_doc.text_fallback = false;
+	news_ui.body_length = papermono_rss_body_load_source(news_ui.source_index,
+		index, news_body_text, sizeof(news_body_text));
 	if (news_ui.body_length < 0) {
 		news_body_text[0] = '\0';
 	} else {
@@ -2958,7 +3106,9 @@ static int news_body_load(size_t index)
 
 static void news_request_refresh(void)
 {
-	news_ui.last_error = papermono_rss_request();
+	news_ui.source_needs_refresh = false;
+	news_ui.last_error = news_ui.source_count == 0U ? -ENOENT :
+		papermono_rss_request_source(news_ui.source_index);
 	if (news_ui.last_error == -EBUSY) {
 		news_ui.last_error = 0;
 	}
@@ -2967,7 +3117,7 @@ static void news_request_refresh(void)
 static int news_sync_status(void)
 {
 	return news_ui.last_error < 0 ? news_ui.last_error :
-		papermono_rss_status();
+		papermono_rss_status_source(news_ui.source_index);
 }
 
 static const char *news_sync_error_text(int error)
@@ -3003,21 +3153,29 @@ static void news_list_meta_text(char *output, size_t size)
 			news_sync_error_text(status),
 			news_ui.list_first == 0U ? "下拉重试" : "显示缓存");
 	} else {
-		(void)snprintf(output, size, "%s", updated);
+		lv_point_t name_size;
+		const struct papermono_rect tab = news_source_tab_rect(news_ui.source_index);
+		const char *name = news_ui.sources[news_ui.source_index].name;
+
+		lv_text_get_size(&name_size, name, &papermono_reading_24, 0, 0,
+			LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+		/* Keep the selected long name discoverable after a tab label has
+		 * been ellipsized; loading/error feedback retains priority. */
+		if (name_size.x > tab.width - 8) {
+			(void)snprintf(output, size, "%s · %s", name, updated);
+		} else {
+			(void)snprintf(output, size, "%s", updated);
+		}
 	}
 }
 
 static int news_open(void *context)
 {
 	ARG_UNUSED(context);
-	news_ui.list_first = 0U;
-	news_ui.selected = 0U;
-	news_ui.body_page = 0U;
-	news_ui.body_pages = 1U;
-	news_ui.detail = false;
-	news_body_clear();
+	news_sources_sync();
+	news_reset_view();
 	news_request_refresh();
-	papermono_rss_get(&news_ui.feed);
+	papermono_rss_get_source(news_ui.source_index, &news_ui.feed);
 	return 0;
 }
 
@@ -3050,7 +3208,6 @@ static int render_news_list(lv_obj_t *screen)
 	const struct papermono_rss_feed *feed = &news_ui.feed;
 	char meta[96];
 	char pager[24];
-	lv_obj_t *label;
 
 	/* The feed can shrink between refreshes; never leave the index on a
 	 * page that no longer contains an item.
@@ -3062,12 +3219,7 @@ static int render_news_list(lv_obj_t *screen)
 	const size_t page_count = MAX(1U,
 		(feed->count + NEWS_VISIBLE_ITEMS - 1U) / NEWS_VISIBLE_ITEMS);
 
-	/* Headerless index: feed name at the top margin, page counter right. */
-	label = make_label(screen, feed->title[0] ? feed->title : "本地资讯",
-		&papermono_reading_24, ink);
-	lv_obj_set_pos(label, NEWS_MARGIN_X, NEWS_TITLE_Y);
-	lv_obj_set_size(label, NEWS_TEXT_WIDTH, 30);
-	lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+	/* Source tabs occupy the old feed-title band. */
 	news_list_meta_text(meta, sizeof(meta));
 	(void)detail_text(screen, meta, NEWS_MARGIN_X, 56, NEWS_TEXT_WIDTH, 22, false);
 	for (size_t row = 0; row < NEWS_VISIBLE_ITEMS; ++row) {
@@ -3092,6 +3244,382 @@ static int render_news_list(lv_obj_t *screen)
 	return 0;
 }
 
+/* Mixed RSS documents are paged without copying the article or constructing a
+ * whole LVGL table. A page cursor describes only its starting block/row/line. */
+static uint32_t news_text_lines(const char *text, int32_t width)
+{
+	lv_point_t size;
+	const int32_t pitch = papermono_reading_24.line_height + NEWS_LINE_SPACE;
+
+	lv_text_get_size(&size, text, &papermono_reading_24, 0,
+		NEWS_LINE_SPACE, width, LV_TEXT_FLAG_NONE);
+	return (uint32_t)MAX(1, (size.y + NEWS_LINE_SPACE) / pitch);
+}
+
+static const char *news_row_cell(const struct news_doc_row *row, size_t column)
+{
+	const char *text = news_body_text + row->offset;
+	const char *end = text + row->length;
+
+	if (column >= row->columns) return "";
+	while (column-- > 0U && text < end) {
+		const char *separator = memchr(text, '\0', (size_t)(end - text));
+
+		if (separator == NULL) return "";
+		text = separator + 1;
+	}
+	return text <= end ? text : "";
+}
+
+static size_t news_table_groups(const struct news_doc_block *block)
+{
+	return block->columns > 3U ? (block->columns - 1U + 1U) / 2U : 1U;
+}
+
+static size_t news_table_columns(const struct news_doc_block *block,
+	size_t group, size_t columns[3], int32_t widths[3])
+{
+	size_t count;
+
+	if (block->columns <= 3U) {
+		count = MAX(1U, block->columns);
+		for (size_t i = 0U; i < count; ++i) {
+			columns[i] = i;
+			widths[i] = NEWS_TEXT_WIDTH * (int32_t)(i + 1U) / (int32_t)count -
+				NEWS_TEXT_WIDTH * (int32_t)i / (int32_t)count;
+		}
+		return count;
+	}
+	columns[0] = 0U;
+	columns[1] = 1U + group * 2U;
+	count = columns[1] + 1U < block->columns ? 3U : 2U;
+	columns[2] = columns[1] + 1U;
+	widths[0] = NEWS_TEXT_WIDTH / 3;
+	for (size_t i = 1U; i < count; ++i) {
+		widths[i] = (NEWS_TEXT_WIDTH - widths[0]) * (int32_t)i / (int32_t)(count - 1U) -
+			(NEWS_TEXT_WIDTH - widths[0]) * (int32_t)(i - 1U) / (int32_t)(count - 1U);
+	}
+	return count;
+}
+
+static uint32_t news_table_row_lines(const struct news_doc_block *block,
+	const struct news_doc_row *row, size_t group)
+{
+	const uint32_t row_index = (uint32_t)(row - news_doc.rows);
+	size_t columns[3];
+	int32_t widths[3];
+	const size_t count = news_table_columns(block, group, columns, widths);
+	uint32_t lines = 1U;
+
+	/* A very tall cell can span many pages. Measure it once per column
+	 * group, not once for every continuation/header repetition. */
+	for (size_t i = 0U; i < ARRAY_SIZE(news_doc.line_cache); ++i) {
+		if (news_doc.line_cache[i].row == row_index &&
+		    news_doc.line_cache[i].group == group) {
+			return news_doc.line_cache[i].lines;
+		}
+	}
+	for (size_t i = 0U; i < count; ++i) {
+		lines = MAX(lines, news_text_lines(news_row_cell(row, columns[i]),
+			widths[i] - 12));
+	}
+	const size_t slot = news_doc.line_cache_next;
+	news_doc.line_cache[slot].row = row_index;
+	news_doc.line_cache[slot].group = (uint32_t)group;
+	news_doc.line_cache[slot].lines = lines;
+	news_doc.line_cache_next = (uint8_t)((slot + 1U) % ARRAY_SIZE(news_doc.line_cache));
+	return lines;
+}
+
+static void news_draw_text_piece(lv_obj_t *screen, const char *text,
+	int32_t y, uint32_t first_line, uint32_t lines)
+{
+	const int32_t pitch = papermono_reading_24.line_height + NEWS_LINE_SPACE;
+	lv_obj_t *viewport = lv_obj_create(screen);
+
+	lv_obj_set_pos(viewport, NEWS_MARGIN_X, NEWS_BODY_TOP + y);
+	lv_obj_set_size(viewport, NEWS_TEXT_WIDTH, (int32_t)lines * pitch);
+	set_box_style(viewport, paper, 0, 0);
+	lv_obj_t *label = make_label(viewport, "", &papermono_reading_24, ink);
+	lv_obj_set_width(label, NEWS_TEXT_WIDTH);
+	lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_line_space(label, NEWS_LINE_SPACE, LV_PART_MAIN);
+	lv_label_set_text_static(label, text);
+	lv_obj_set_pos(label, 0, -(int32_t)first_line * pitch);
+}
+
+static void news_draw_table_row(lv_obj_t *screen,
+	const struct news_doc_block *block, const struct news_doc_row *row,
+	size_t group, int32_t y, uint32_t first_line, uint32_t lines)
+{
+	size_t columns[3];
+	int32_t widths[3];
+	const size_t count = news_table_columns(block, group, columns, widths);
+	const int32_t pitch = papermono_reading_24.line_height + NEWS_LINE_SPACE;
+	const int32_t height = (int32_t)lines * pitch + 12;
+	lv_obj_t *box = lv_obj_create(screen);
+	int32_t x = 0;
+
+	lv_obj_set_pos(box, NEWS_MARGIN_X, NEWS_BODY_TOP + y);
+	lv_obj_set_size(box, NEWS_TEXT_WIDTH, height);
+	set_box_style(box, paper, 1, 0);
+	for (size_t i = 0U; i < count; ++i) {
+		const char *text = news_row_cell(row, columns[i]);
+		uint32_t offset = first_line;
+		lv_obj_t *viewport = lv_obj_create(box);
+
+		/* Repeat a short row label on continuation pages; a long first
+		 * cell itself continues instead of losing its remaining text. */
+		if (columns[i] == 0U && news_text_lines(text, widths[i] - 12) <= lines) {
+			offset = 0U;
+		}
+		lv_obj_set_pos(viewport, x + 6, 6);
+		lv_obj_set_size(viewport, widths[i] - 12, (int32_t)lines * pitch);
+		set_box_style(viewport, paper, 0, 0);
+		lv_obj_t *label = make_label(viewport, "", &papermono_reading_24, ink);
+		lv_obj_set_width(label, widths[i] - 12);
+		lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+		lv_obj_set_style_text_line_space(label, NEWS_LINE_SPACE, LV_PART_MAIN);
+		lv_label_set_text_static(label, text);
+		lv_obj_set_pos(label, 0, -(int32_t)offset * pitch);
+		x += widths[i];
+		if (i + 1U < count) (void)make_ink_shape(box, x, 0, 1, height, ink, 0);
+	}
+	if (row->header) (void)make_ink_shape(box, 0, height - 2, NEWS_TEXT_WIDTH, 2, ink, 0);
+}
+
+static bool news_flow_same(struct news_flow_cursor a, struct news_flow_cursor b)
+{
+	return a.block == b.block && a.group == b.group &&
+		a.row == b.row && a.line == b.line;
+}
+
+static struct news_flow_cursor news_flow_page(lv_obj_t *screen,
+	struct news_flow_cursor cursor, size_t *shown_group, size_t *shown_groups)
+{
+	const int32_t pitch = papermono_reading_24.line_height + NEWS_LINE_SPACE;
+	const int32_t available = news_page_stride();
+	uint16_t header_block = UINT16_MAX, header_group = UINT16_MAX;
+	int32_t y = 0;
+
+	while (cursor.block < news_doc.block_count) {
+		const struct news_doc_block *block = &news_doc.blocks[cursor.block];
+
+		if (!block->table) {
+			const uint32_t left = block->lines - MIN(cursor.line, block->lines);
+			const uint32_t take = MIN(left, (uint32_t)((available - y) / pitch));
+
+			if (take == 0U) break;
+			if (screen != NULL) news_draw_text_piece(screen,
+				news_body_text + block->offset, y, cursor.line, take);
+			y += (int32_t)take * pitch;
+			cursor.line += take;
+			if (cursor.line < block->lines) break;
+			++cursor.block;
+			cursor.line = 0U;
+			y += MIN(8, available - y);
+			continue;
+		}
+		const size_t groups = news_table_groups(block);
+		if (block->row_count == 0U || cursor.group >= groups) {
+			++cursor.block;
+			cursor.group = cursor.row = 0U;
+			cursor.line = 0U;
+			continue;
+		}
+		if (cursor.row >= block->row_count) {
+			++cursor.group;
+			cursor.row = 0U;
+			cursor.line = 0U;
+			if (cursor.group < groups && y > 0) break;
+			continue;
+		}
+		/* Repeat complete, reasonably sized headers at each vertical page.
+		 * An oversized header is itself fully paged at its original position. */
+		if ((header_block != cursor.block || header_group != cursor.group) &&
+		    cursor.row >= block->headers && block->headers > 0U) {
+			int32_t header_height = 0;
+
+			for (size_t h = 0U; h < block->headers; ++h) {
+				header_height += (int32_t)news_table_row_lines(block,
+					&news_doc.rows[block->first_row + h], cursor.group) * pitch + 12;
+			}
+			if (header_height + pitch + 12 <= available) {
+				if (header_height + pitch + 12 > available - y) break;
+				for (size_t h = 0U; h < block->headers; ++h) {
+					const struct news_doc_row *header = &news_doc.rows[block->first_row + h];
+					const uint32_t lines = news_table_row_lines(block, header, cursor.group);
+
+					if (screen != NULL) news_draw_table_row(screen, block,
+						header, cursor.group, y, 0U, lines);
+					y += (int32_t)lines * pitch + 12;
+				}
+			}
+		}
+		header_block = cursor.block;
+		header_group = cursor.group;
+		if (available - y < pitch + 12) break;
+		const struct news_doc_row *row = &news_doc.rows[block->first_row + cursor.row];
+		const uint32_t row_lines = news_table_row_lines(block, row, cursor.group);
+		const uint32_t left = row_lines - MIN(cursor.line, row_lines);
+		const uint32_t take = MIN(left, (uint32_t)((available - y - 12) / pitch));
+
+		if (take == 0U) break;
+		if (screen != NULL) news_draw_table_row(screen, block, row,
+			cursor.group, y, cursor.line, take);
+		if (shown_group != NULL && groups > 1U) {
+			*shown_group = cursor.group;
+			*shown_groups = groups;
+		}
+		y += (int32_t)take * pitch + 12;
+		cursor.line += take;
+		if (cursor.line < row_lines) break;
+		++cursor.row;
+		cursor.line = 0U;
+	}
+	return cursor;
+}
+
+static void news_document_text_fallback(bool indexed)
+{
+	size_t output = 0U;
+
+	if (indexed) {
+		for (size_t i = 0U; i < news_doc.block_count; ++i) {
+			const struct news_doc_block *block = &news_doc.blocks[i];
+
+			if (!block->table) {
+				memmove(news_body_text + output, news_body_text + block->offset, block->length);
+				output += block->length;
+			} else {
+				for (size_t r = 0U; r < block->row_count; ++r) {
+					const struct news_doc_row *row = &news_doc.rows[block->first_row + r];
+					for (size_t j = 0U; j < row->length; ++j) {
+						const char ch = news_body_text[row->offset + j];
+						news_body_text[output++] = ch == '\0' ? '|' : ch;
+					}
+					news_body_text[output++] = '\n';
+				}
+			}
+		}
+	} else {
+		for (size_t input = 0U; input < (size_t)news_ui.body_length;) {
+			if (news_body_text[input] == '\x1e') {
+				if (input + 4U <= (size_t)news_ui.body_length &&
+				    memcmp(news_body_text + input, PAPERMONO_RSS_TABLE_BEGIN, 4U) == 0) {
+					input += 4U;
+					news_body_text[output++] = '\n';
+					continue;
+				}
+				if (input + 3U <= (size_t)news_ui.body_length &&
+				    (news_body_text[input + 1U] == 'H' || news_body_text[input + 1U] == 'R') &&
+				    news_body_text[input + 2U] == '\t') {
+					input += 3U;
+					continue;
+				}
+				if (input + 3U <= (size_t)news_ui.body_length &&
+				    memcmp(news_body_text + input, PAPERMONO_RSS_TABLE_END, 3U) == 0) {
+					input += 3U;
+					news_body_text[output++] = '\n';
+					continue;
+				}
+			}
+			const char ch = news_body_text[input++];
+			news_body_text[output++] = ch == '\t' ? '|' : ch;
+		}
+	}
+	news_body_text[output] = '\0';
+	news_ui.body_length = (int)output;
+	news_doc.tables = false;
+	news_doc.text_fallback = true;
+	news_doc.ready = true;
+}
+
+static void news_document_prepare(void)
+{
+	struct papermono_rss_block parsed;
+	size_t cursor = 0U;
+
+	if (news_doc.ready || news_ui.body_length < 0) return;
+	news_doc.block_count = news_doc.row_count = 0U;
+	news_doc.line_cache_next = 0U;
+	for (size_t i = 0U; i < ARRAY_SIZE(news_doc.line_cache); ++i) {
+		news_doc.line_cache[i].row = UINT32_MAX;
+	}
+	news_doc.tables = false;
+	while (papermono_rss_block_next(news_body_text, (size_t)news_ui.body_length,
+		&cursor, &parsed)) {
+		if (news_doc.block_count >= NEWS_DOC_BLOCK_MAX) {
+			news_document_text_fallback(false);
+			return;
+		}
+		struct news_doc_block *block = &news_doc.blocks[news_doc.block_count++];
+		memset(block, 0, sizeof(*block));
+		block->table = parsed.kind == PAPERMONO_RSS_BLOCK_TABLE;
+		if (!block->table) {
+			block->offset = (uint32_t)(parsed.text.text - news_body_text);
+			block->length = (uint32_t)parsed.text.length;
+			continue;
+		}
+		news_doc.tables = true;
+		block->first_row = news_doc.row_count;
+		block->columns = (uint16_t)MIN(parsed.table.column_count, UINT16_MAX);
+		size_t row_cursor = 0U;
+		struct papermono_rss_table_row parsed_row;
+		bool leading_headers = true;
+
+		while (papermono_rss_table_row_next(&parsed.table, &row_cursor, &parsed_row)) {
+			if (news_doc.row_count >= NEWS_DOC_ROW_MAX) {
+				news_document_text_fallback(false);
+				return;
+			}
+			struct news_doc_row *row = &news_doc.rows[news_doc.row_count++];
+			row->offset = (uint32_t)(parsed_row.cells.text - news_body_text);
+			row->length = (uint32_t)parsed_row.cells.length;
+			row->columns = (uint16_t)MIN(parsed_row.column_count, UINT16_MAX);
+			row->header = parsed_row.header;
+			++block->row_count;
+			if (leading_headers && row->header) ++block->headers;
+			else leading_headers = false;
+		}
+	}
+	if (!news_doc.tables) {
+		news_doc.ready = true;
+		return;
+	}
+	/* All offsets are known before delimiters become NULs. LVGL can now
+	 * point directly into the arena for every visible paragraph/cell. */
+	for (size_t i = 0U; i < news_doc.row_count; ++i) {
+		const struct news_doc_row *row = &news_doc.rows[i];
+		for (size_t j = 0U; j < row->length; ++j) {
+			if (news_body_text[row->offset + j] == '\t') news_body_text[row->offset + j] = '\0';
+		}
+		news_body_text[row->offset + row->length] = '\0';
+	}
+	for (size_t i = 0U; i < news_doc.block_count; ++i) {
+		struct news_doc_block *block = &news_doc.blocks[i];
+		if (!block->table) {
+			news_body_text[block->offset + block->length] = '\0';
+			block->lines = news_text_lines(news_body_text + block->offset, NEWS_TEXT_WIDTH);
+		}
+	}
+	news_doc.pages[0] = (struct news_flow_cursor) {0};
+	news_ui.body_pages = 1U;
+	for (;;) {
+		const struct news_flow_cursor start = news_doc.pages[news_ui.body_pages - 1U];
+		const struct news_flow_cursor next = news_flow_page(NULL, start, NULL, NULL);
+
+		if (next.block >= news_doc.block_count) break;
+		if (news_ui.body_pages >= NEWS_DOC_PAGE_MAX || news_flow_same(start, next)) {
+			news_document_text_fallback(true);
+			return;
+		}
+		news_doc.pages[news_ui.body_pages++] = next;
+	}
+	news_ui.body_height = (int32_t)news_ui.body_pages * news_page_stride();
+	news_doc.ready = true;
+}
+
 static int render_news_detail(lv_obj_t *screen)
 {
 	const struct papermono_rss_feed *feed = &news_ui.feed;
@@ -3102,7 +3630,9 @@ static int render_news_detail(lv_obj_t *screen)
 	lv_obj_t *label;
 	char pager[24];
 
-	if (!news_ui.body_loaded || news_ui.body_index != index) {
+	if (!news_ui.body_loaded || news_ui.body_index != index ||
+	    news_ui.body_revision != papermono_rss_revision(news_ui.source_index) ||
+	    strcmp(news_ui.body_source_id, news_ui.sources[news_ui.source_index].id) != 0) {
 		(void)news_body_load(index);
 	}
 	/* No wordmark, date, 48 px heading or header rule: the article owns the
@@ -3125,6 +3655,27 @@ static int render_news_detail(lv_obj_t *screen)
 		label = detail_text(screen, error, 22, 254, 436, 30, false);
 		lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 		news_footer(screen, "点按返回列表", NULL);
+		return 0;
+	}
+	news_document_prepare();
+	if (news_doc.tables) {
+		size_t group = 0U, groups = 1U;
+		char hint[64];
+
+		if (news_ui.body_page >= news_ui.body_pages) {
+			news_ui.body_page = news_ui.body_pages - 1U;
+		}
+		(void)news_flow_page(screen, news_doc.pages[news_ui.body_page],
+			&group, &groups);
+		if (groups > 1U) {
+			(void)snprintf(hint, sizeof(hint), "点按返回 · 列 %u/%u",
+				(unsigned)(group + 1U), (unsigned)groups);
+		} else {
+			(void)snprintf(hint, sizeof(hint), "点按返回列表");
+		}
+		(void)snprintf(pager, sizeof(pager), "%u / %u",
+			(unsigned)(news_ui.body_page + 1U), (unsigned)news_ui.body_pages);
+		news_footer(screen, hint, pager);
 		return 0;
 	}
 	lv_obj_t *viewport = lv_obj_create(screen);
@@ -3154,14 +3705,24 @@ static int render_news_detail(lv_obj_t *screen)
 	lv_obj_set_pos(label, 0, -(int32_t)news_ui.body_page * stride);
 	(void)snprintf(pager, sizeof(pager), "%u / %u",
 		(unsigned)(news_ui.body_page + 1U), (unsigned)news_ui.body_pages);
-	news_footer(screen, "点按返回列表", pager);
+	news_footer(screen, news_doc.text_fallback ?
+		"表格按文本显示 · 点按返回" : "点按返回列表", pager);
 	return 0;
 }
 
 static int render_news(void *context, lv_obj_t *screen)
 {
 	ARG_UNUSED(context);
-	papermono_rss_get(&news_ui.feed);
+	news_sources_sync();
+	papermono_rss_get_source(news_ui.source_index, &news_ui.feed);
+	if (!news_ui.detail || !news_ui.feed.valid || news_ui.feed.count == 0U ||
+	    news_ui.source_count == 0U) {
+		news_source_tabs(screen);
+	}
+	if (news_ui.source_count == 0U) {
+		return render_news_empty(screen, "暂无订阅", "请在内容中心添加 RSS 订阅源。",
+			"长按返回");
+	}
 	if (!news_ui.feed.valid || news_ui.feed.count == 0U) {
 		const int rss_status = news_sync_status();
 		char reason[96];
@@ -3205,6 +3766,27 @@ static int news_event(void *context, const struct papermono_app_event *event,
 		 event->y >= UI_DETAIL_FOOTER_TOP);
 
 	ARG_UNUSED(context);
+	news_sources_sync();
+	if (news_ui.source_needs_refresh) {
+		news_request_refresh();
+	}
+	if (!news_ui.detail && event->type == PAPERMONO_APP_EVENT_TAP) {
+		for (size_t i = 0U; i < news_ui.source_count; ++i) {
+			const struct papermono_rect rect = news_source_tab_rect(i);
+
+			if (papermono_interaction_contains(event,
+				PAPERMONO_INTERACTION_TAP, &rect)) {
+				if (i != news_ui.source_index) {
+					news_ui.source_index = i;
+					news_reset_view();
+					news_request_refresh();
+					papermono_rss_get_source(i, &news_ui.feed);
+					request_redraw(command);
+				}
+				return 0;
+			}
+		}
+	}
 	if (news_ui.detail) {
 		if (event->type == PAPERMONO_APP_EVENT_TAP) {
 			news_ui.detail = false;
@@ -3232,7 +3814,10 @@ static int news_event(void *context, const struct papermono_app_event *event,
 			/* A completed fetch replaces the cached body; reload the open
 			 * article instead of showing the previous copy.
 			 */
-			(void)news_body_load(news_ui.selected);
+			if (news_ui.body_revision !=
+			    papermono_rss_revision(news_ui.source_index)) {
+				(void)news_body_load(news_ui.selected);
+			}
 			request_redraw(command);
 		} else if (event->type == PAPERMONO_APP_EVENT_REFRESH) {
 			request_redraw(command);

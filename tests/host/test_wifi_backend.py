@@ -7,6 +7,7 @@ The fakes assert that no driver/NVS call runs while server_lock is held.
 """
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -103,8 +104,8 @@ static int papermono_settings_clear_wifi(void) {
  memset(&preferences, 0, sizeof(preferences)); return 0;
 }
 static void papermono_ui_request_background_refresh(void) { assert(!lock_depth); ++refreshes; }
-static int k_work_submit_to_queue(struct k_work_q *q, struct k_work *w) { (void)q; (void)w; ++scheduled; return 1; }
-static int k_work_reschedule_for_queue(struct k_work_q *q, struct k_work_delayable *w, int d) { (void)q; (void)w; (void)d; ++scheduled; return 1; }
+static int k_work_submit_to_queue(struct k_work_q *q, struct k_work *w) { assert(q==&wifi_work_queue); (void)w; ++scheduled; return 1; }
+static int k_work_reschedule_for_queue(struct k_work_q *q, struct k_work_delayable *w, int d) { assert(q==&wifi_work_queue); (void)w; (void)d; ++scheduled; return 1; }
 static int k_work_cancel_delayable(struct k_work_delayable *w) { (void)w; return 0; }
 static int64_t k_uptime_get(void) { return now; }
 static void schedule_station_retry(void) { assert(!lock_depth); ++retries; }
@@ -225,7 +226,22 @@ class WifiBackendTests(unittest.TestCase):
             subprocess.run([str(executable)], check=True)
 
     def test_no_system_queue_or_direct_http_nvs(self):
-        self.assertNotIn("k_work_reschedule(&", SOURCE)
+        # Wi-Fi transitions and NVS must use their dedicated queue. The RSS
+        # deadline is the only system-queue exception: its callback only checks
+        # short state and shuts down a socket, leaving cleanup to HTTP ABORT.
+        system_calls = re.finditer(
+            r"\bk_work_(?:reschedule|schedule|submit)\s*\(\s*([^,)]+)", SOURCE)
+        for call in system_calls:
+            with self.subTest(system_work=call.group(1).strip()):
+                self.assertEqual(call.group(1).strip(), "&rss_request_timeout",
+                                 "Wi-Fi work must stay on wifi_work_queue")
+        self.assertIn("k_work_reschedule_for_queue(&wifi_work_queue", function("wifi_reschedule"))
+        deadline = function("rss_request_timeout_worker")
+        self.assertIn("K_NO_WAIT", deadline)
+        self.assertNotIn("K_FOREVER", deadline)
+        for forbidden in ("papermono_settings_", "net_mgmt(", "papermono_content_store_",
+                          "papermono_ui_", "papermono_rss_sources_replace", "k_msleep("):
+            self.assertNotIn(forbidden, deadline)
         self.assertNotIn("papermono_settings_set_wifi", function("wifi_handler"))
         self.assertNotIn("net_mgmt(", function("papermono_content_server_connect_wifi"))
         self.assertNotIn("net_mgmt(", function("papermono_content_server_scan_wifi"))

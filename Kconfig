@@ -492,4 +492,12 @@ config PAPERMONO_RSS_URL
 	help
 	  Feed used until the user overrides it in Settings.
 
+config PAPERMONO_RSS_AI_URL
+	string "Default AI news RSS feed URL"
+	default ""
+	depends on PAPERMONO_RSS
+	help
+	  Optional second built-in subscription. Runtime subscription lists are
+	  managed independently and stored atomically on the SD card.
+
 endmenu

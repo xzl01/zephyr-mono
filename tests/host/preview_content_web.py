@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 import threading
+import os
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +17,10 @@ PAIRING_TICKET = "0011223344556677"
 TICKETS = {PAIRING_TICKET}
 TICKET_LOCK = threading.Lock()
 paired = False
+RSS_SOURCES = [
+    {"id": "gold", "name": "金价", "url": "http://rss.local/gold.xml"},
+    {"id": "ai", "name": "AI 资讯", "url": "http://rss.local/ai-news.xml"},
+]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -51,6 +56,10 @@ class Handler(BaseHTTPRequestHandler):
                 {"id": "fedcba9876543210", "title": "一份很长的中文测试便签名称用于验证手机换行",
                  "kind": "note", "size": 8192},
             ], ensure_ascii=False).encode())
+        if self.path == "/api/v1/rss/sources" and self.authorized():
+            return self.send(200, json.dumps({
+                "max_sources": 4, "generation": 1, "sources": RSS_SOURCES,
+            }, ensure_ascii=False).encode())
         self.send(401 if self.path.startswith("/api/") else 404, b'{"error":"preview only"}')
 
     def do_POST(self) -> None:
@@ -84,9 +93,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200 if self.authorized() else 401,
                   b'{"ok":true}' if self.authorized() else b'{"error":"pairing required"}')
 
+    def do_PUT(self) -> None:
+        global RSS_SOURCES
+        if not self.authorized():
+            return self.send(401, b'{"error":"pairing required"}')
+        if self.path != "/api/v1/rss/sources":
+            return self.send(404, b'{"error":"preview only"}')
+        length = int(self.headers.get("Content-Length", "0"))
+        if length > 4096:
+            return self.send(413, b'{"error":"request too large"}')
+        try:
+            sources = json.loads(self.rfile.read(length))["sources"]
+            assert isinstance(sources, list) and len(sources) <= 4
+            assert all(source["id"] and source["name"] and
+                       source["url"].startswith("http://") for source in sources)
+        except (ValueError, KeyError, AssertionError, TypeError):
+            return self.send(400, b'{"error":"invalid subscriptions"}')
+        RSS_SOURCES = sources
+        self.send(200, b'{"ok":true}')
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", 8766), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("PAPERMONO_PREVIEW_PORT", "8766"))), Handler).serve_forever()

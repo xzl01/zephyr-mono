@@ -28,6 +28,9 @@
 #include <papermono/power.h>
 #include <papermono/settings.h>
 #include <papermono/status_led.h>
+#if defined(CONFIG_PAPERMONO_RSS)
+#include <papermono/rss.h>
+#endif
 #if defined(CONFIG_PAPERMONO_TIME_SYNC)
 #include <papermono/time_sync.h>
 #endif
@@ -83,12 +86,56 @@ LOG_MODULE_REGISTER(papermono_content_server, LOG_LEVEL_INF);
 enum content_server_busy_bit {
 	CONTENT_SERVER_BUSY_UPLOAD,
 	CONTENT_SERVER_BUSY_WIFI_REQUEST,
+	CONTENT_SERVER_BUSY_RSS_REQUEST,
 };
 
 #if defined(CONFIG_ESP_SPIRAM)
 #define PAPERMONO_SERVER_BSS __attribute__((section(".ext_ram.bss")))
 #else
 #define PAPERMONO_SERVER_BSS
+#endif
+
+#if defined(CONFIG_PAPERMONO_RSS)
+#define RSS_REQUEST_LIMIT 4096U
+/* The Zephyr decoder bounds the escaped JSON token before unescaping it.
+ * After Unicode normalization, every stored byte needs at most two wire bytes.
+ */
+struct rss_source_wire {
+	char id[PAPERMONO_RSS_SOURCE_ID_MAX * 2U + 1U];
+	char name[PAPERMONO_RSS_SOURCE_NAME_MAX * 2U + 1U];
+	char url[PAPERMONO_RSS_SOURCE_URL_MAX * 2U + 1U];
+};
+struct rss_sources_wire {
+	struct rss_source_wire sources[PAPERMONO_RSS_SOURCE_MAX];
+	size_t count;
+};
+static const struct json_obj_descr rss_source_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct rss_source_wire, id, JSON_TOK_STRING_BUF),
+	JSON_OBJ_DESCR_PRIM(struct rss_source_wire, name, JSON_TOK_STRING_BUF),
+	JSON_OBJ_DESCR_PRIM(struct rss_source_wire, url, JSON_TOK_STRING_BUF),
+};
+static const struct json_obj_descr rss_sources_descr[] = {
+	JSON_OBJ_DESCR_OBJ_ARRAY(struct rss_sources_wire, sources,
+		PAPERMONO_RSS_SOURCE_MAX, count, rss_source_descr,
+		ARRAY_SIZE(rss_source_descr)),
+};
+/* URLs can carry private feed tokens. Only the paired request owner may
+ * retain them, and only until the transaction finishes. Large state is PSRAM.
+ */
+static struct {
+	struct http_client_ctx *owner;
+	int fd;
+	bool authorized;
+	int error;
+	int64_t started_ms;
+	size_t length;
+	char body[RSS_REQUEST_LIMIT + 1U];
+	struct rss_sources_wire decoded;
+	struct papermono_rss_source sources[PAPERMONO_RSS_SOURCE_MAX];
+} rss_request PAPERMONO_SERVER_BSS;
+static K_MUTEX_DEFINE(rss_request_lock);
+static void rss_request_timeout_worker(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(rss_request_timeout, rss_request_timeout_worker);
 #endif
 
 struct wifi_request {
@@ -113,7 +160,7 @@ static struct http_client_ctx *upload_rejected_client;
 static int upload_reject_reason;
 static int64_t upload_started_ms;
 static char response_buffer[RESPONSE_BUFFER_SIZE] PAPERMONO_SERVER_BSS;
-static uint8_t wifi_request_buffer[WIFI_REQUEST_LIMIT + 1U];
+static uint8_t wifi_request_buffer[WIFI_REQUEST_LIMIT + 1U] PAPERMONO_SERVER_BSS;
 static size_t wifi_request_length;
 static struct http_client_ctx *wifi_request_owner;
 static struct http_client_ctx *wifi_request_rejected_client;
@@ -1122,6 +1169,290 @@ static int session_handler(struct http_client_ctx *client,
 	return 0;
 }
 
+#if defined(CONFIG_PAPERMONO_RSS)
+static void rss_request_clear(void)
+{
+	(void)k_work_cancel_delayable(&rss_request_timeout);
+	memset(&rss_request, 0, sizeof(rss_request));
+	content_server_set_busy(CONTENT_SERVER_BUSY_RSS_REQUEST, false);
+}
+
+static void rss_request_timeout_worker(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	/* FINAL may hold the request lock while it saves the SD registry. Keep
+	 * this short deadline callback from blocking the system work queue.
+	 */
+	if (k_mutex_lock(&rss_request_lock, K_NO_WAIT) != 0) {
+		(void)k_work_reschedule(&rss_request_timeout, K_MSEC(100));
+		return;
+	}
+	if (rss_request.owner != NULL) {
+		const int64_t remaining = rss_request.started_ms +
+			STREAMING_REQUEST_DEADLINE_MS - k_uptime_get();
+
+		if (remaining > 0) {
+			/* A canceled invocation may have been queued before a fresh
+			 * owner started. Only its current deadline can close it.
+			 */
+			(void)k_work_reschedule(&rss_request_timeout, K_MSEC(remaining));
+		} else {
+			/* Zephyr invokes ABORT before closing/recycling the client
+			 * fd. ABORT takes this same lock, so the captured fd cannot
+			 * be reused until shutdown finishes. poll then performs the
+			 * ordinary transaction cleanup on the HTTP server thread.
+			 */
+			(void)zsock_shutdown(rss_request.fd, ZSOCK_SHUT_RD);
+		}
+	}
+	k_mutex_unlock(&rss_request_lock);
+}
+
+static int rss_json_hex4(const char *text, uint32_t *value)
+{
+	*value = 0U;
+	for (size_t index = 0U; index < 4U; ++index) {
+		const unsigned char ch = (unsigned char)text[index];
+		const int digit = ch >= '0' && ch <= '9' ? ch - '0' :
+			ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 :
+			ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
+		if (digit < 0) return -EINVAL;
+		*value = (*value << 4) | (uint32_t)digit;
+	}
+	return 0;
+}
+
+/* This Zephyr JSON decoder handles ordinary escapes but leaves \uXXXX
+ * literal. Normalize Unicode escapes in-place before the bounded decoder;
+ * the result always fits, and source fields cannot contain NUL/control bytes.
+ */
+static int rss_json_normalize(char *text, size_t *length)
+{
+	size_t output = 0U;
+	bool quoted = false;
+
+	for (size_t input = 0U; input < *length;) {
+		const char ch = text[input++];
+		if (ch == '\0') return -EINVAL;
+		if (ch == '"') quoted = !quoted;
+		if (!quoted || ch != '\\') {
+			text[output++] = ch;
+			continue;
+		}
+		if (input >= *length) return -EINVAL;
+		if (text[input] != 'u') {
+			text[output++] = ch;
+			text[output++] = text[input++];
+			continue;
+		}
+		if (*length - input < 5U) return -EINVAL;
+		uint32_t value;
+		if (rss_json_hex4(text + input + 1U, &value) < 0) return -EINVAL;
+		input += 5U;
+		if (value >= 0xd800U && value <= 0xdbffU) {
+			uint32_t low;
+			if (*length - input < 6U || text[input] != '\\' ||
+			    text[input + 1U] != 'u' ||
+			    rss_json_hex4(text + input + 2U, &low) < 0 ||
+			    low < 0xdc00U || low > 0xdfffU) return -EINVAL;
+			value = 0x10000U + ((value - 0xd800U) << 10) + low - 0xdc00U;
+			input += 6U;
+		} else if (value >= 0xdc00U && value <= 0xdfffU) {
+			return -EINVAL;
+		}
+		if (value < 0x20U || value == 0x7fU) return -EINVAL;
+		if (value == '"' || value == '\\') text[output++] = '\\';
+		if (value < 0x80U) {
+			text[output++] = (char)value;
+		} else if (value < 0x800U) {
+			text[output++] = (char)(0xc0U | (value >> 6));
+			text[output++] = (char)(0x80U | (value & 0x3fU));
+		} else if (value < 0x10000U) {
+			text[output++] = (char)(0xe0U | (value >> 12));
+			text[output++] = (char)(0x80U | ((value >> 6) & 0x3fU));
+			text[output++] = (char)(0x80U | (value & 0x3fU));
+		} else {
+			text[output++] = (char)(0xf0U | (value >> 18));
+			text[output++] = (char)(0x80U | ((value >> 12) & 0x3fU));
+			text[output++] = (char)(0x80U | ((value >> 6) & 0x3fU));
+			text[output++] = (char)(0x80U | (value & 0x3fU));
+		}
+	}
+	text[output] = '\0';
+	*length = output;
+	return quoted ? -EINVAL : 0;
+}
+
+static int rss_sources_response(struct http_response_ctx *response)
+{
+	const uint32_t generation = papermono_rss_sources_generation();
+	const size_t count = papermono_rss_source_count();
+	size_t used = (size_t)snprintf(response_buffer, sizeof(response_buffer),
+		"{\"max_sources\":%u,\"generation\":%u,\"sources\":[",
+		PAPERMONO_RSS_SOURCE_MAX, generation);
+
+	for (size_t index = 0U; index < count; ++index) {
+		struct papermono_rss_source *source = &rss_request.sources[0];
+		if (papermono_rss_source_get(index, source) < 0) {
+			return -EAGAIN;
+		}
+		const char *keys[] = {"id", "name", "url"};
+		const char *values[] = {source->id, source->name, source->url};
+
+		response_buffer[used++] = index == 0U ? '{' : ',';
+		if (index != 0U) response_buffer[used++] = '{';
+		for (size_t field = 0U; field < ARRAY_SIZE(keys); ++field) {
+			const int prefix = snprintf(response_buffer + used,
+				sizeof(response_buffer) - used, "%s\"%s\":",
+				field == 0U ? "" : ",", keys[field]);
+			if (prefix < 0 || (size_t)prefix >= sizeof(response_buffer) - used) {
+				return -ENOSPC;
+			}
+			used += (size_t)prefix;
+			const int ret = append_json_string(response_buffer,
+				sizeof(response_buffer), &used, values[field]);
+			if (ret < 0) return ret;
+		}
+		if (used + 4U >= sizeof(response_buffer)) return -ENOSPC;
+		response_buffer[used++] = '}';
+	}
+	if (generation != papermono_rss_sources_generation()) return -EAGAIN;
+	response_buffer[used++] = ']';
+	response_buffer[used++] = '}';
+	response_buffer[used] = '\0';
+	response_json(response, HTTP_200_OK, response_buffer);
+	return 0;
+}
+
+static int rss_sources_decode(void)
+{
+	for (size_t index = 0U; index < rss_request.decoded.count; ++index) {
+		const struct rss_source_wire *wire = &rss_request.decoded.sources[index];
+		struct papermono_rss_source *source = &rss_request.sources[index];
+		const size_t id_length = strlen(wire->id);
+		const size_t name_length = strlen(wire->name);
+		const size_t url_length = strlen(wire->url);
+
+		if (id_length >= sizeof(source->id) ||
+		    name_length >= sizeof(source->name) ||
+		    url_length >= sizeof(source->url)) return -EINVAL;
+		memcpy(source->id, wire->id, id_length + 1U);
+		memcpy(source->name, wire->name, name_length + 1U);
+		memcpy(source->url, wire->url, url_length + 1U);
+	}
+	return 0;
+}
+
+static int rss_sources_request(struct http_client_ctx *client,
+	enum http_transaction_status status,
+	const struct http_request_ctx *request,
+	struct http_response_ctx *response, void *user_data)
+{
+	ARG_UNUSED(user_data);
+	if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
+	    status == HTTP_SERVER_TRANSACTION_COMPLETE) {
+		if (rss_request.owner == client) rss_request_clear();
+		return 0;
+	}
+	if (rss_request.owner != NULL &&
+	    k_uptime_get() - rss_request.started_ms >= STREAMING_REQUEST_DEADLINE_MS) {
+		rss_request.error = -ETIMEDOUT;
+	}
+	if (rss_request.owner != NULL && rss_request.owner != client) {
+		if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
+			response_json(response, HTTP_409_CONFLICT,
+				"{\"error\":\"subscriptions_busy\",\"message\":\"另一个订阅操作正在进行，请稍后重试\"}");
+		}
+		return 0;
+	}
+	if (rss_request.owner == NULL) {
+		/* Captured headers exist only on the first callback. Bind this
+		 * authorization to its client before accepting subsequent chunks.
+		 */
+		if (request->headers_status == HTTP_HEADER_STATUS_NONE ||
+		    !session_authorized(request)) {
+			if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
+				response_json(response, HTTP_401_UNAUTHORIZED,
+					"{\"error\":\"pairing required\"}");
+			}
+			return status == HTTP_SERVER_REQUEST_DATA_FINAL ? 0 : -EACCES;
+		}
+		rss_request.owner = client;
+		rss_request.fd = client->fd;
+		rss_request.authorized = true;
+		rss_request.started_ms = k_uptime_get();
+		(void)k_work_reschedule(&rss_request_timeout,
+			K_MSEC(STREAMING_REQUEST_DEADLINE_MS));
+		content_server_set_busy(CONTENT_SERVER_BUSY_RSS_REQUEST, true);
+	}
+	if (request->data_len > RSS_REQUEST_LIMIT - rss_request.length) {
+		rss_request.error = -EFBIG;
+	}
+	if (rss_request.error != 0) {
+		const int error = rss_request.error;
+		/* An incomplete rejected request must close, so Zephyr releases its
+		 * holder and delivers ABORT before this client slot can be reused.
+		 */
+		if (status != HTTP_SERVER_REQUEST_DATA_FINAL) return error;
+		response_json(response, error == -EFBIG ?
+			HTTP_413_PAYLOAD_TOO_LARGE : HTTP_408_REQUEST_TIMEOUT,
+			"{\"error\":\"subscriptions_request_rejected\",\"message\":\"请求过大或已超时，请重新保存\"}");
+		rss_request_clear();
+		return 0;
+	}
+	if (rss_request.error == 0 && request->data_len > 0U) {
+		memcpy(rss_request.body + rss_request.length, request->data,
+			request->data_len);
+		rss_request.length += request->data_len;
+	}
+	if (status != HTTP_SERVER_REQUEST_DATA_FINAL) return 0;
+	if (client->method == HTTP_GET) {
+		if (rss_sources_response(response) < 0) {
+			response_json(response, HTTP_409_CONFLICT,
+				"{\"error\":\"subscriptions_changed\",\"message\":\"订阅列表已变化，请重新加载\"}");
+		}
+	} else {
+		rss_request.body[rss_request.length] = '\0';
+		memset(&rss_request.decoded, 0, sizeof(rss_request.decoded));
+		const int64_t parsed = rss_json_normalize(rss_request.body,
+			&rss_request.length) < 0 ? -EINVAL :
+			json_obj_parse(rss_request.body, rss_request.length,
+				rss_sources_descr, ARRAY_SIZE(rss_sources_descr),
+				&rss_request.decoded);
+		int ret = -EINVAL;
+		if (parsed == BIT_MASK(ARRAY_SIZE(rss_sources_descr)) &&
+		    rss_request.decoded.count <= PAPERMONO_RSS_SOURCE_MAX &&
+		    rss_sources_decode() == 0) {
+			ret = papermono_rss_sources_replace(rss_request.sources,
+				rss_request.decoded.count);
+		}
+		if (ret == 0) {
+			response_json(response, HTTP_200_OK, "{\"ok\":true}");
+		} else {
+			const bool unavailable = ret == -ENODEV || ret == -EIO || ret == -ENOSPC;
+			response_json(response, unavailable ? HTTP_503_SERVICE_UNAVAILABLE :
+				HTTP_400_BAD_REQUEST, unavailable ?
+				"{\"error\":\"subscriptions_storage\",\"message\":\"TF 存储未就绪或无法写入，原订阅已保留\"}" :
+				"{\"error\":\"subscriptions_invalid\",\"message\":\"请检查名称、http:// 地址、重复订阅和数量限制\"}");
+		}
+	}
+	/* Do not retain feed tokens in the HTTP request buffer. */
+	rss_request_clear();
+	return 0;
+}
+
+static int rss_sources_handler(struct http_client_ctx *client,
+	enum http_transaction_status status,
+	const struct http_request_ctx *request,
+	struct http_response_ctx *response, void *user_data)
+{
+	k_mutex_lock(&rss_request_lock, K_FOREVER);
+	const int ret = rss_sources_request(client, status, request, response, user_data);
+	k_mutex_unlock(&rss_request_lock);
+	return ret;
+}
+#endif
+
 static struct http_resource_detail_dynamic status_resource_detail = {
 	.common = { .type = HTTP_RESOURCE_TYPE_DYNAMIC,
 		.bitmask_of_supported_http_methods = BIT(HTTP_GET),
@@ -1182,6 +1513,14 @@ static struct http_resource_detail_dynamic wifi_resource_detail = {
 		.content_type = "application/json" },
 	.cb = wifi_handler,
 };
+#if defined(CONFIG_PAPERMONO_RSS)
+static struct http_resource_detail_dynamic rss_sources_resource_detail = {
+	.common = { .type = HTTP_RESOURCE_TYPE_DYNAMIC,
+		.bitmask_of_supported_http_methods = BIT(HTTP_GET) | BIT(HTTP_PUT),
+		.content_type = "application/json" },
+	.cb = rss_sources_handler,
+};
+#endif
 
 static uint16_t content_server_port = CONTENT_SERVER_PORT;
 HTTP_SERVICE_DEFINE(papermono_http, NULL, &content_server_port,
@@ -1205,6 +1544,10 @@ HTTP_RESOURCE_DEFINE(content_resource, papermono_http, "/api/v1/content",
 	&content_resource_detail);
 HTTP_RESOURCE_DEFINE(wifi_resource, papermono_http, "/api/v1/wifi",
 	&wifi_resource_detail);
+#if defined(CONFIG_PAPERMONO_RSS)
+HTTP_RESOURCE_DEFINE(rss_sources_resource, papermono_http, "/api/v1/rss/sources",
+	&rss_sources_resource_detail);
+#endif
 
 static int configure_ap_address(struct net_if *iface)
 {
